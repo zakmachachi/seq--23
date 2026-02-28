@@ -5,9 +5,17 @@
 static IntervalTimer midiClockTimer;
 static volatile bool midiTimerRunning = false;
 
+// Engine timer (1ms) to decouple MIDI processing from UI drawing
+static IntervalTimer engineTimer;
+static volatile bool stepAdvanceRequested = false; // set by internalClockTick
+
+// forward wrapper so ISR stays tiny
+static void internalClockTickWrapper();
+
 void sendClockISR() {
-  // ISR must be as tiny as possible
+  // ISR must be as tiny as possible: emit MIDI Clock and advance internal tick counter
   Serial8.write(0xF8);
+  internalClockTickWrapper();
 }
 // MIDI clock timing (24 PPQN)
 static uint32_t lastMidiClockMicros = 0;
@@ -28,8 +36,8 @@ static float smoothedBpm = 120.0f;
 
 
 
-// Note length factors (fraction of a quarter note) and printable names
-static const float noteLenFactors[] = { 4.0f, 2.0f, 1.0f, 0.5f, 0.25f };
+// Note length in exact MIDI Clock Ticks (96 = Whole, 48 = Half, 24 = Quarter, 12 = Eighth, 6 = Sixteenth)
+static const uint8_t noteLenTicks[] = { 96, 48, 24, 12, 6 };
 static const char* noteLenNames[] = { "1", "1/2", "1/4", "1/8", "1/16" };
 
 // Division printable names
@@ -49,22 +57,29 @@ static float getDivisionFactor(SimpleSequencer::Division d){
 SimpleSequencer::SimpleSequencer()
   : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0)
 {
+  // Global defaults
+  globalPitch = 36; // Default global pitch to C2
+
   for (uint8_t c=0;c<NUM_CHANNELS;c++){
     pulses[c]=4;
     retrig[c]=1;
     euclidEnabled[c]=false;
-    noteOffTime[c]=0;
+    muted[c]=false; // <-- All channels start unmuted
+    noteOffTick[c]=0;
     for(uint8_t s=0;s<NUM_STEPS;s++){
       steps[c][s]=false;
       euclidPattern[c][s]=false;
-      // Default pitch set to MIDI 36 (Elektron default drum pitch center)
-      pitch[c][s] = 36;
-      noteLen[c][s] = 3; // Default every step to 1/8th note length
+      // --- THE FIX: 255 means "Use Global Pitch" ---
+      pitch[c][s] = 255;
+      // --- THE FIX: 255 means "Use Global Length" ---
+      noteLen[c][s] = 255;
+      pendingToggle[s] = false;
     }
     lastNotePlaying[c] = 255;
   }
   lastMidiClockMicros = 0;
   noteLenIdx = 3; // default to 1/8
+  absoluteTickCounter = 0;
 }
 
 // define per-button ISR forwarders (attachInterrupt requires a no-arg function)
@@ -127,6 +142,9 @@ void SimpleSequencer::begin(){
 
   // MIDI clock timing handled by global `lastMidiClockMicros`
 
+  // start the 1ms engine timer which will process MIDI RX, note-offs and step advancement
+  engineTimer.begin([](){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->runEngine(); }, 1000);
+
 }
 
 void SimpleSequencer::midiSendByte(uint8_t b){
@@ -153,6 +171,8 @@ void SimpleSequencer::setupPins(){
   for (uint8_t i=0;i<NUM_STEPS;i++){
     pinMode(BUTTON_PINS[i], INPUT_PULLUP);
   }
+  // channel modifier button (hold + step 1-4 to quick-select channel)
+  pinMode(CHANNEL_BTN_PIN, INPUT_PULLUP);
   // encoder pins
   for (uint8_t e=0;e<4;e++){
     pinMode(ENC_A[e], INPUT_PULLUP);
@@ -178,10 +198,12 @@ void SimpleSequencer::handleButtonIRQ(uint8_t idx){
 }
 
 void SimpleSequencer::loop(){
+  // UI-only loop: read controls and update display. Time-critical MIDI work runs in engine timer.
   readButtons();
   readEncoders();
   // handle start/stop button debounce (Arduino-style)
   unsigned long now = millis();
+
   bool startReading = (digitalRead(START_STOP_PIN) == LOW);
   if (startReading != startLastReading){
     startLastDebounceTime = now;
@@ -190,44 +212,40 @@ void SimpleSequencer::loop(){
     if (startReading != startState){
       startState = startReading;
       if (startState){
-        // pressed: toggle running and send MIDI start/stop
-        isRunning = !isRunning;
-        if (isRunning){
-          // Starting: go to start of sequence and trigger step 0 immediately
-          Serial.println("MIDI START");
-          midiSendByte(0xFA); // MIDI Start
-          // reset MIDI clock timer so clocks start aligned
-          // send an immediate MIDI Clock tick so receivers start in sync
-          midiSendByte(0xF8);
-          // start the hardware timer for internal MIDI clock if we're not driven externally
-          if (!externalMidiClockActive && !midiTimerRunning) {
-            uint32_t interval = (60000000UL / bpm) / 24;
-            midiClockTimer.begin(sendClockISR, interval);
-            midiTimerRunning = true;
-          }
-          // reset position to start
-          currentStep = 0;
-          lastStepMillis = now;
-          // trigger any enabled steps at step 0 immediately
-          for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-            if (steps[ch][currentStep]) triggerChannel(ch);
-          }
-        } else {
-          // Stopping: send Stop and silence any playing notes, reset to start
-          Serial.println("MIDI STOP");
-          midiSendByte(0xFC); // MIDI Stop
-          // send Note Off for any scheduled notes to avoid hanging notes
-          for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-            if (noteOffTime[ch]){
+        // PRESSED: Reset the modifier flag
+        startStopModifierFlag = false;
+      } else {
+        // RELEASED: Only toggle transport if we DID NOT use it to mute a track
+        if (!startStopModifierFlag) {
+          // toggle running state
+          isRunning = !isRunning;
+          if (isRunning){
+            midiStepTickCounter = 0;
+            stepAdvanceRequested = false;
+            midiSendByte(0xFA); // MIDI Start
+            midiSendByte(0xF8); // MIDI Clock
+            currentStep = 0;
+            for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+              if (steps[ch][currentStep]) triggerChannel(ch);
+            }
+            if (!externalMidiClockActive && !midiTimerRunning) {
+              uint32_t interval = (60000000UL / bpm) / 24;
+              midiClockTimer.begin(sendClockISR, interval);
+              midiTimerRunning = true;
+            }
+          } else {
+            for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+              if (noteOffTick[ch]){
                 if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-                noteOffTime[ch] = 0;
+                noteOffTick[ch] = 0;
               }
+            }
+            midiSendByte(0xFC); // MIDI Stop
+            if (midiTimerRunning) { midiClockTimer.end(); midiTimerRunning = false; }
+            currentStep = 0;
+            midiStepTickCounter = 0;
+            stepAdvanceRequested = false;
           }
-          // reset clock timer while stopped and ensure hardware timer is stopped
-          if (midiTimerRunning) { midiClockTimer.end(); midiTimerRunning = false; }
-          // reset position to start so next Start begins at step 0
-          currentStep = 0;
-          lastStepMillis = now;
         }
       }
     }
@@ -361,16 +379,7 @@ void SimpleSequencer::loop(){
     }
   }
 
-  // advance internal step clock only when NOT driven by external MIDI clock
-  if (!externalMidiClockActive) stepClock();
-  // handle scheduled MIDI note-offs
-  // note-off scheduling
-  for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-    if (noteOffTime[ch] && now >= noteOffTime[ch]){
-      if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-      noteOffTime[ch] = 0;
-    }
-  }
+  // Time-critical MIDI processing (advancing steps/note-offs/MIDI RX) now runs in the engine timer.
   // update display at configured refresh interval
   if (millis() - lastDisplayMillis > displayRefreshMs){
     drawDisplay();
@@ -385,6 +394,7 @@ void SimpleSequencer::readButtons(){
     static bool buttonState[NUM_STEPS] = {0};        // the debounced/stable state
     static bool lastReading[NUM_STEPS] = {0};        // last raw reading
     static unsigned long lastDebounceTime[NUM_STEPS] = {0};
+    // pendingToggle moved to member variable to allow encoder access
     unsigned long now = millis();
     bool reading = (digitalRead(BUTTON_PINS[i]) == LOW); // pressed = LOW
     if (reading != lastReading[i]){
@@ -393,17 +403,37 @@ void SimpleSequencer::readButtons(){
     if ((now - lastDebounceTime[i]) > debounceMs){
       if (reading != buttonState[i]){
         buttonState[i] = reading;
-        if (buttonState[i]){ // pressed
-          // toggle step for selected channel; do NOT trigger immediately
-          steps[selectedChannel][i] = !steps[selectedChannel][i];
-          Serial.print("Ch"); Serial.print(selectedChannel+1);
-          Serial.print(" Step "); Serial.print(i);
-          Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
-          // note playback will occur when the sequencer reaches this step
-          // record which step is held for parameter-lock editing
-          heldStep = i;
-        } else {
-          // released: if this was the held step, clear heldStep
+        if (buttonState[i]){ // PRESSED
+          bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+
+          // 1. CHANNEL SELECT INTERCEPT: Pin 28 + Buttons 1-4
+          if (chanModHeld && i < NUM_CHANNELS) {
+            selectedChannel = i;
+          }
+          // 2. MUTE INTERCEPT: Start/Stop + Buttons 1-4
+          else if (startState && i < NUM_CHANNELS) {
+            muted[i] = !muted[i];
+            startStopModifierFlag = true;
+          }
+          // 3. NORMAL STEP TOGGLE / P-LOCK HOLD
+          else {
+            pendingToggle[i] = true;
+            heldStep = i;
+          }
+        } else { // released
+          // perform the toggle now (on release) if it was pending
+          if (pendingToggle[i]){
+            steps[selectedChannel][i] = !steps[selectedChannel][i];
+            // THE ERASER: If step turned OFF, reset it to Global defaults (255)
+            if (!steps[selectedChannel][i]) {
+              noteLen[selectedChannel][i] = 255;
+              pitch[selectedChannel][i] = 255;
+            }
+            Serial.print("Ch"); Serial.print(selectedChannel+1);
+            Serial.print(" Step "); Serial.print(i);
+            Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
+            pendingToggle[i] = false;
+          }
           if (heldStep == (int8_t)i) heldStep = -1;
         }
       }
@@ -434,71 +464,91 @@ void SimpleSequencer::readEncoders(){
     uint8_t idx = (lastState[e] << 2) | st;
     int8_t delta = encTable[idx & 0x0F];
     if (delta != 0){
-      // apply every quadrature transition immediately (but encoder1 uses half-step)
-      Serial.print("Enc"); Serial.print(e+1); Serial.print(" delta="); Serial.println(delta);
-      // debug raw for encoder 1
-      if (e==0){
-        Serial.print("Enc1 raw A="); Serial.print(a); Serial.print(" B="); Serial.println(b);
-      }
       static int8_t encAcc1 = 0;
-      int steps = 0;
+      static int encAcc2 = 0;
+      static int encAcc3 = 0;
+      int encSteps = 0; // Renamed from 'steps' to avoid array conflicts
+
       if (e == 0){
-        // encoder 1: half the step size (accumulate two transitions per BPM step)
         encAcc1 += delta;
-        if (encAcc1 >= 2) { steps = encAcc1 / 2; encAcc1 = encAcc1 % 2; }
-        else if (encAcc1 <= -2) { steps = encAcc1 / 2; encAcc1 = encAcc1 % 2; }
+        if (abs(encAcc1) >= 2) { encSteps = encAcc1 / 2; encAcc1 %= 2; }
+      } else if (e == 1){
+        if (heldStep >= 0){
+          encAcc2 += delta;
+          if (abs(encAcc2) >= 4) { encSteps = encAcc2 / 4; encAcc2 %= 4; }
+        } else {
+          encAcc2 -= delta; // Reversed for channel
+          if (abs(encAcc2) >= 20) { encSteps = encAcc2 / 20; encAcc2 %= 20; }
+        }
+      } else if (e == 2){
+        encAcc3 += delta;
+        if (heldStep >= 0){
+          if (abs(encAcc3) >= 4) { encSteps = encAcc3 / 4; encAcc3 %= 4; }
+        } else {
+          if (abs(encAcc3) >= 20) { encSteps = encAcc3 / 20; encAcc3 %= 20; }
+        }
       } else {
-        steps = delta; // other encoders: one per transition
+        encSteps = delta;
       }
+
       // apply steps
-      if (e == 0){ // encoder 1: BPM
-        int newBpm = (int)bpm + steps;
-        if (newBpm < 20) newBpm = 20;
-        if (newBpm > 300) newBpm = 300;
-        bpm = newBpm;
-        Serial.print("BPM="); Serial.println(bpm);
-        // update hardware timer interval immediately if using internal clock
-        if (isRunning && !externalMidiClockActive && midiTimerRunning){
-          uint32_t interval = (60000000UL / bpm) / 24;
-          midiClockTimer.update(interval);
-        }
-      } else if (e == 1){ // encoder 2: channel select OR per-step pitch when holding a step
-        if (heldStep >= 0){
-          int note = (int)pitch[selectedChannel][heldStep] + steps;
-          if (note < 0) note = 0;
-          if (note > 127) note = 127;
-          pitch[selectedChannel][heldStep] = (uint8_t)note;
-          Serial.print("Ch"); Serial.print(selectedChannel+1); Serial.print(" Step"); Serial.print(heldStep); Serial.print(" pitch="); Serial.println(pitch[selectedChannel][heldStep]);
-        } else {
-          int ch = (int)selectedChannel + steps;
-          while (ch < 0) ch += NUM_CHANNELS;
-          selectedChannel = ch % NUM_CHANNELS;
-          Serial.print("Channel="); Serial.println(selectedChannel+1);
-        }
-      } else if (e == 2){ // encoder 3: note length
-        if (heldStep >= 0){
-          int idxn = (int)noteLen[selectedChannel][heldStep] + steps;
-          int maxIdx = (int)(sizeof(noteLenFactors)/sizeof(noteLenFactors[0])) - 1;
-          if (idxn < 0) idxn = 0;
-          if (idxn > maxIdx) idxn = maxIdx;
-          noteLen[selectedChannel][heldStep] = (uint8_t)idxn;
-          Serial.print("Ch"); Serial.print(selectedChannel+1); Serial.print(" Step"); Serial.print(heldStep); Serial.print(" len="); Serial.println(noteLenNames[noteLen[selectedChannel][heldStep]]);
-        } else {
-          int idxn = (int)noteLenIdx + steps;
-          int maxIdx = (int)(sizeof(noteLenFactors)/sizeof(noteLenFactors[0])) - 1;
-          if (idxn < 0) idxn = 0;
-          if (idxn > maxIdx) idxn = maxIdx;
-          noteLenIdx = (uint8_t)idxn;
-          Serial.print("NoteLen="); Serial.println(noteLenNames[noteLenIdx]);
-        }
-      } else if (e == 3){ // encoder 4: euclid pulses when enabled
-        if (euclidEnabled[selectedChannel]){
-          int p = (int)pulses[selectedChannel] + steps;
-          if (p < 0) p = 0;
-          if (p > NUM_STEPS) p = NUM_STEPS;
-          pulses[selectedChannel] = p;
-          updateEuclid(selectedChannel);
-          Serial.print("Ch"); Serial.print(selectedChannel+1); Serial.print(" pulses="); Serial.println(pulses[selectedChannel]);
+      if (encSteps != 0){
+        if (e == 0){ // BPM
+          int newBpm = (int)bpm + encSteps;
+          if (newBpm < 20) newBpm = 20;
+          if (newBpm > 300) newBpm = 300;
+          bpm = newBpm;
+          if (isRunning && !externalMidiClockActive && midiTimerRunning){
+            uint32_t interval = (60000000UL / bpm) / 24;
+            midiClockTimer.update(interval);
+          }
+        } else if (e == 1){ // encoder 2: GLOBAL PITCH or P-LOCK PITCH
+          if (heldStep >= 0){
+            // THE OVERRIDE: Editing a param forces step ON and cancels the release toggle
+            pendingToggle[heldStep] = false;
+            steps[selectedChannel][heldStep] = true;
+
+            // If it was global, grab the global pitch as our starting point
+            if (pitch[selectedChannel][heldStep] == 255) {
+               pitch[selectedChannel][heldStep] = globalPitch;
+            }
+
+            int note = (int)pitch[selectedChannel][heldStep] + encSteps;
+            pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
+          } else {
+            // EDIT GLOBAL PITCH (No step held)
+            if (encSteps != 0){
+              int note = (int)globalPitch + encSteps;
+              globalPitch = (uint8_t)constrain(note, 0, 127);
+            }
+          }
+        } else if (e == 2){ // NOTE LENGTH
+          if (heldStep >= 0){
+            // THE OVERRIDE: Editing a param forces step ON and cancels the release toggle
+            pendingToggle[heldStep] = false;
+            steps[selectedChannel][heldStep] = true;
+
+            // If it was global, grab the global setting as our starting point
+            if (noteLen[selectedChannel][heldStep] == 255) {
+              noteLen[selectedChannel][heldStep] = noteLenIdx;
+            }
+
+            int idxn = (int)noteLen[selectedChannel][heldStep] + encSteps;
+            int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
+            noteLen[selectedChannel][heldStep] = (uint8_t)constrain(idxn, 0, maxIdx);
+          } else {
+            int idxn = (int)noteLenIdx + encSteps;
+            int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
+            noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
+          }
+        } else if (e == 3){ // encoder 4: euclid pulses when enabled
+          if (euclidEnabled[selectedChannel]){
+            int p = (int)pulses[selectedChannel] + encSteps;
+            if (p < 0) p = 0;
+            if (p > NUM_STEPS) p = NUM_STEPS;
+            pulses[selectedChannel] = p;
+            updateEuclid(selectedChannel);
+          }
         }
       }
     }
@@ -546,51 +596,163 @@ void SimpleSequencer::updateEuclid(uint8_t ch){
   }
 }
 
-void SimpleSequencer::stepClock(){
-  if (!isRunning) return; // don't advance when stopped
-  // ms per step: quarter-note divided by 4 (16 steps = 4 beats)
-  // compute ms per step using musical division relative to quarter note
-  float quarterMs = 60000.0f / (float)bpm;
-  float msPerStep = quarterMs * getDivisionFactor(stepDivision);
-  uint32_t now = millis();
-  if (now - lastStepMillis >= (uint32_t)msPerStep){
-    // advance step
-    currentStep = (currentStep + 1) % NUM_STEPS;
-    lastStepMillis = now;
-    // trigger channels that have the step enabled
-    for(uint8_t ch=0;ch<NUM_CHANNELS;ch++){
-      if (steps[ch][currentStep]){
-        triggerChannel(ch);
+// Advance the internal MIDI tick counter (called from MIDI clock ISR)
+void SimpleSequencer::internalClockTick(){
+  // increment absolute tick counter
+  absoluteTickCounter++;
+
+  // 1) Process tick-based note-offs FIRST so they clear before a new step triggers
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
+    if (noteOffTick[ch] > 0 && absoluteTickCounter >= noteOffTick[ch]){
+      if (lastNotePlaying[ch] < 128){
+        midiSendNoteOff(ch, lastNotePlaying[ch], 0);
       }
+      noteOffTick[ch] = 0;
+      lastNotePlaying[ch] = 255;
     }
+  }
+
+  // 2) Advance the sequencer step using PPQN counting
+  midiStepTickCounter++;
+  if (midiStepTickCounter >= 6){
+    midiStepTickCounter = 0;
+    stepAdvanceRequested = true;
   }
 }
 
-void SimpleSequencer::triggerChannel(uint8_t ch){
-  // interrupt any currently-playing note on this channel, then send new Note On
-  uint32_t now = millis();
-  // if a previous note was playing on this channel, turn it off
-  if (noteOffTime[ch] && now < noteOffTime[ch]){
-    if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-    noteOffTime[ch] = 0;
+// Small static wrapper to keep ISR tiny
+static void internalClockTickWrapper(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->internalClockTick(); }
+
+// Engine runs at 1ms from hardware timer. It processes incoming MIDI bytes,
+// handles external/internal clock state, advances steps when requested, and
+// services scheduled note-offs. This function is intentionally minimal and
+// avoids USB Serial printing to keep timing deterministic.
+void SimpleSequencer::runEngine(){
+  // Use micros() for timing inside the engine to avoid reliance on millis()
+  uint32_t nowMicros = micros();
+  uint32_t nowMs = nowMicros / 1000;
+
+  // 1) Process any MIDI bytes from hardware Serial8
+  while (Serial8.available() > 0){
+    uint8_t b = Serial8.read();
+    if (b == 0xF8){
+      externalMidiClockActive = true;
+      lastExternalClockMillis = nowMs;
+      if (midiTimerRunning){ midiClockTimer.end(); midiTimerRunning = false; }
+      // update timestamp window for BPM calculation
+      uint32_t currentMicros = nowMicros;
+      tickTimestamps[tickIndex] = currentMicros;
+      if (validTicks < BPM_TICK_WINDOW) {
+        validTicks++;
+      } else {
+        uint8_t oldestIndex = (tickIndex + 1) % BPM_TICK_WINDOW;
+        uint32_t elapsedMicros = currentMicros - tickTimestamps[oldestIndex];
+        if (elapsedMicros > 0){
+          float calculatedBpm = 120000000.0f / (float)elapsedMicros;
+          smoothedBpm = (smoothedBpm * 0.40f) + (calculatedBpm * 0.60f);
+          bpm = (uint32_t)(smoothedBpm + 0.5f);
+        }
+      }
+      tickIndex = (tickIndex + 1) % BPM_TICK_WINDOW;
+      // advance internal tick counter for this incoming clock
+      internalClockTick();
+    }
+    else if (b == 0xFA){
+      // MIDI Start
+      externalMidiClockActive = true;
+      lastExternalClockMillis = nowMs;
+      midiStepTickCounter = 0; validTicks = 0; tickIndex = 0;
+      absoluteTickCounter = 0;
+      if (midiTimerRunning){ midiClockTimer.end(); midiTimerRunning = false; }
+      // start playback
+      isRunning = true;
+      currentStep = 0;
+      // immediately trigger steps at position 0
+      for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+        if (steps[ch][currentStep]) triggerChannel(ch);
+      }
+    }
+    else if (b == 0xFB){
+      // MIDI Continue
+      externalMidiClockActive = true;
+      lastExternalClockMillis = nowMs;
+      if (midiTimerRunning){ midiClockTimer.end(); midiTimerRunning = false; }
+      // resume without resetting position
+      isRunning = true;
+    }
+    else if (b == 0xFC){
+      // MIDI Stop
+      externalMidiClockActive = true;
+      if (midiTimerRunning){ midiClockTimer.end(); midiTimerRunning = false; }
+      isRunning = false;
+      // silence any playing notes immediately
+      for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+        if (lastNotePlaying[ch] < 128){ midiSendNoteOff(ch, lastNotePlaying[ch], 0); lastNotePlaying[ch] = 255; }
+        noteOffTick[ch] = 0;
+      }
+      // reset metronome counters on external Stop
+      midiStepTickCounter = 0;
+      stepAdvanceRequested = false;
+      absoluteTickCounter = 0;
+    }
+    else {
+      // other MIDI bytes ignored by engine to keep it tight
+    }
   }
-  // send MIDI Note On for this channel using per-step pitch mapping
-  uint8_t note = constrain(pitch[ch][currentStep], 0, 127);
+
+  // 2) Detect loss of external clock and fall back to internal timer if needed
+  if (externalMidiClockActive){
+    if ((nowMs - lastExternalClockMillis) > 2000){
+      externalMidiClockActive = false;
+      midiStepTickCounter = 0;
+      validTicks = 0; tickIndex = 0;
+      // restart internal hardware timer if needed
+      if (isRunning && !midiTimerRunning){
+        uint32_t interval = (60000000UL / bpm) / 24;
+        midiClockTimer.begin(sendClockISR, interval);
+        midiTimerRunning = true;
+      }
+    }
+  }
+
+  // 3) Advance step when requested (set by internalClockTick)
+  if (stepAdvanceRequested){
+    stepAdvanceRequested = false;
+    if (isRunning){
+      currentStep = (currentStep + 1) % NUM_STEPS;
+      // trigger channels that have the step enabled
+      for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+        if (steps[ch][currentStep]) triggerChannel(ch);
+      }
+    }
+  }
+
+  // Note-offs are now handled in `internalClockTick()` on MIDI ticks.
+}
+
+void SimpleSequencer::triggerChannel(uint8_t ch){
+  // If a previous note is playing, turn it off immediately before striking the new one
+  if (noteOffTick[ch] > 0 && absoluteTickCounter < noteOffTick[ch]){
+    if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
+    noteOffTick[ch] = 0;
+  }
+
+  // 2. THE MUTE BLOCK: Abort before firing new Note-Ons
+  if (muted[ch]) return;
+
+  // THE FIX: If step pitch is 255, use the Global Pitch
+  uint8_t p = pitch[ch][currentStep];
+  if (p == 255) p = globalPitch;
+
+  uint8_t note = constrain(p, 0, 127);
   uint8_t vel = 100;
-  // Send NoteOn on the specific channel (track channels 0..3 map to MIDI 1..4)
   midiSendNoteOn(ch, note, vel);
-  // remember which note we just played for proper NoteOff later
   lastNotePlaying[ch] = note;
-  // debug: report fired note to serial monitor
-  Serial.print("FIRING NOTE! MIDI Ch: "); Serial.print(ch + 1);
-  Serial.print(" | Note: "); Serial.println(note);
-  // compute note length using selected noteLenIdx (fractions of a quarter)
-  float quarterMs = 60000.0f / (float)bpm;
-  // use per-step note length index when available
+
+  // Calculate the exact tick in the future to turn this note off
   uint8_t lenIdx = noteLen[ch][currentStep];
-  float noteLenF = quarterMs * noteLenFactors[lenIdx];
-  uint32_t noteLen = (uint32_t)(noteLenF + 0.5f);
-  noteOffTime[ch] = now + noteLen;
+  if (lenIdx == 255) lenIdx = noteLenIdx;
+  noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
 }
 
 // CV/Gate functions removed; using MIDI out only
@@ -603,10 +765,22 @@ void SimpleSequencer::drawDisplay(){
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0, 0);
   display.print("BPM:"); display.print(bpm);
-  display.setCursor(56, 0);
-  display.print("CH:"); display.print(selectedChannel + 1);
-  display.setCursor(96, 0);
-  display.print("L:"); display.print(noteLenNames[noteLenIdx]);
+  display.setCursor(42, 0);
+  display.print("C:"); display.print(selectedChannel + 1);
+
+  // Draw Global Note
+  const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  display.setCursor(60, 0);
+  display.print("N:"); display.print(noteNames[globalPitch % 12]); display.print((globalPitch / 12) - 1);
+
+  // Draw Mute Indicators
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+    if (muted[c]) display.setTextColor(SH110X_BLACK, SH110X_WHITE);
+    else display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+    display.setCursor(92 + (c * 9), 0);
+    display.print(c + 1);
+  }
+  display.setTextColor(SH110X_WHITE, SH110X_BLACK);
 
   // Separator Line
   display.drawLine(0, 10, 128, 10, SH110X_WHITE);
@@ -647,14 +821,18 @@ void SimpleSequencer::drawDisplay(){
 
     uint8_t p = pitch[selectedChannel][heldStep];
     uint8_t lenIdx = noteLen[selectedChannel][heldStep];
+    // Fallbacks to globals for display if no p-lock exists
+    if (p == 255) p = globalPitch;
+    if (lenIdx == 255) lenIdx = noteLenIdx;
+
     const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
 
     // Display the specific step data
     display.setCursor(2, 54);
-    display.print("STEP "); display.print(heldStep + 1);
-    display.print(" | ");
+    display.print("STP:"); display.print(heldStep + 1);
+    display.print(" ");
     display.print(noteNames[p % 12]); display.print((p / 12) - 1);
-    display.print(" | L:"); display.print(noteLenNames[lenIdx]);
+    display.print(" L:"); display.print(noteLenNames[lenIdx]);
   }
 
   display.display();
@@ -776,9 +954,10 @@ void SimpleSequencer::midiHandleStop(){
   isRunning = false;
   // silence notes
   for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-    if (noteOffTime[ch]){
+    if (noteOffTick[ch]){
       if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-      noteOffTime[ch] = 0;
+      noteOffTick[ch] = 0;
+      lastNotePlaying[ch] = 255;
     }
   }
   // when external Stop received, consider external clock inactive

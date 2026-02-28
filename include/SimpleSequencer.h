@@ -32,18 +32,27 @@ class SimpleSequencer {
     // ISR access
     static SimpleSequencer* instancePtr;
     void handleButtonIRQ(uint8_t idx);
+    // Engine moved to a 1ms hardware timer: runs MIDI processing and step advancement
+    void runEngine();
+    void internalClockTick();
 
   private:
     bool steps[NUM_CHANNELS][NUM_STEPS];
+    bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)
     bool euclidPattern[NUM_CHANNELS][NUM_STEPS];
     uint8_t pulses[NUM_CHANNELS];
     uint8_t retrig[NUM_CHANNELS];
     // --- UPDATED: Per-Step Parameter Arrays ---
     uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
-    uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenFactors
+    uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenTicks
     int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
+    
+    // --- MUTE & MODIFIER STATE ---
+    bool muted[NUM_CHANNELS]; 
+    bool startStopModifierFlag = false; 
     uint8_t noteLenIdx; // global default length index when no step is held
+    uint8_t globalPitch; // master pitch for un-locked steps (255 means use global)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
 
     // runtime
@@ -53,9 +62,9 @@ class SimpleSequencer {
     uint8_t selectedChannel;
     // high-resolution MIDI clock reference moved to file-scope static variable
     Division stepDivision = DIV_SIXTEENTH; // default to 1/16 (16 steps per 4/4 bar)
-    // MIDI note-off scheduling (non-blocking)
-    uint32_t noteOffTime[NUM_CHANNELS];
-    const uint16_t noteMs = 200; // note length in ms (longer sustain)
+    // --- TICK-BASED NOTE LENGTH ENGINE ---
+    uint32_t noteOffTick[NUM_CHANNELS];
+    uint32_t absoluteTickCounter = 0;
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     uint32_t lastDisplayMillis;
@@ -65,6 +74,8 @@ class SimpleSequencer {
 
     // button debounce parameters (Arduino example)
     const unsigned long debounceMs = 10;
+    // --- MODIFIER PINS ---
+    const uint8_t CHANNEL_BTN_PIN = 28; // channel modifier (hold + Steps 1-4 to select channel)
     // run state + start/stop button debounce state
     bool isRunning = false;
     bool startLastReading = false;
@@ -78,7 +89,6 @@ class SimpleSequencer {
     void readButtons();
     void updateEuclid(uint8_t ch);
     void readEncoders();
-    void stepClock();
     void triggerChannel(uint8_t ch);
 };
 
