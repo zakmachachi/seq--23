@@ -73,9 +73,14 @@ SimpleSequencer::SimpleSequencer()
       pitch[c][s] = 255;
       // --- THE FIX: 255 means "Use Global Length" ---
       noteLen[c][s] = 255;
+      // ratchet default: off
+      stepRatchet[c][s] = 0;
       pendingToggle[s] = false;
     }
     channelPitch[c] = 36; // Default each channel's base pitch to C2
+    // ratchet engine defaults
+    activeRatchetInterval[c] = 0;
+    ratchetNoteOffMs[c] = 0;
     lastNotePlaying[c] = 255;
   }
   lastMidiClockMicros = 0;
@@ -428,11 +433,12 @@ void SimpleSequencer::readButtons(){
           // perform the toggle now (on release) if it was pending
           if (pendingToggle[i]){
             steps[selectedChannel][i] = !steps[selectedChannel][i];
-            // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill
+            // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
             if (!steps[selectedChannel][i]) {
               noteLen[selectedChannel][i] = 255;
               pitch[selectedChannel][i] = 255;
               fillStep[selectedChannel][i] = false;
+              stepRatchet[selectedChannel][i] = 0;
             }
             Serial.print("Ch"); Serial.print(selectedChannel+1);
             Serial.print(" Step "); Serial.print(i);
@@ -501,14 +507,24 @@ void SimpleSequencer::readEncoders(){
       }
 
       if (encSteps != 0){
-        if (e == 0){ // BPM
-          int newBpm = (int)bpm + encSteps;
-          if (newBpm < 20) newBpm = 20;
-          if (newBpm > 300) newBpm = 300;
-          bpm = newBpm;
-          if (isRunning && !externalMidiClockActive && midiTimerRunning){
-            uint32_t interval = (60000000UL / bpm) / 24;
-            midiClockTimer.update(interval);
+        if (e == 0){ // Encoder 1: BPM or Ratchet when a step is held
+          if (heldStep >= 0){
+            // Editing ratchet for held step
+            pendingToggle[heldStep] = false;
+            steps[selectedChannel][heldStep] = true;
+            int val = (int)stepRatchet[selectedChannel][heldStep] + encSteps;
+            if (val < 0) val = 0;
+            if (val > 8) val = 8;
+            stepRatchet[selectedChannel][heldStep] = (uint8_t)val;
+          } else {
+            int newBpm = (int)bpm + encSteps;
+            if (newBpm < 20) newBpm = 20;
+            if (newBpm > 300) newBpm = 300;
+            bpm = newBpm;
+            if (isRunning && !externalMidiClockActive && midiTimerRunning){
+              uint32_t interval = (60000000UL / bpm) / 24;
+              midiClockTimer.update(interval);
+            }
           }
         } else if (e == 1){ // encoder 2: PITCH
           if (heldStep >= 0){
@@ -742,6 +758,30 @@ void SimpleSequencer::runEngine(){
   }
 
   // Note-offs are now handled in `internalClockTick()` on MIDI ticks.
+
+  // --- RATCHET ENGINE PROCESSING ---
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
+    // Step retrig scheduling
+    if (activeRatchetInterval[ch] > 0 && nowMs >= activeRatchetNext[ch]){
+      if (nowMs < activeRatchetEnd[ch]){
+        if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
+        midiSendNoteOn(ch, activeRatchetPitch[ch], 100);
+        lastNotePlaying[ch] = activeRatchetPitch[ch];
+        ratchetNoteOffMs[ch] = nowMs + (activeRatchetInterval[ch] / 2);
+        activeRatchetNext[ch] += activeRatchetInterval[ch];
+      } else {
+        // finished ratcheting for this step
+        activeRatchetInterval[ch] = 0;
+      }
+    }
+
+    // Fast ratchet note-off processing
+    if (ratchetNoteOffMs[ch] > 0 && nowMs >= ratchetNoteOffMs[ch]){
+      if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
+      ratchetNoteOffMs[ch] = 0;
+      lastNotePlaying[ch] = 255;
+    }
+  }
 }
 
 void SimpleSequencer::triggerChannel(uint8_t ch){
@@ -767,10 +807,28 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   midiSendNoteOn(ch, note, vel);
   lastNotePlaying[ch] = note;
 
-  // Calculate the exact tick in the future to turn this note off
+  // RATCHET: If ratchet is disabled for this step, use regular tick-based note-off
   uint8_t lenIdx = noteLen[ch][currentStep];
   if (lenIdx == 255) lenIdx = noteLenIdx;
-  noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
+
+  uint8_t r = stepRatchet[ch][currentStep];
+  if (r == 0) {
+    // standard note-off scheduled on ticks
+    noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
+  } else {
+    // RATCET ENABLED: schedule rapid retrigs for the duration of the step
+    float rateVals[] = {16, 20, 24, 32, 40, 48, 64, 80};
+    uint32_t intervalMs = (uint32_t)((240000.0f / (float)bpm) / rateVals[r - 1]);
+    uint32_t stepDurationMs = (uint32_t)(noteLenTicks[lenIdx] * (60000.0f / (float)bpm) / 24.0f);
+    activeRatchetInterval[ch] = intervalMs;
+    activeRatchetNext[ch] = millis() + intervalMs;
+    activeRatchetEnd[ch] = millis() + stepDurationMs - 4;
+    activeRatchetPitch[ch] = note;
+    // disable standard tick-based note-off while ratcheting
+    noteOffTick[ch] = 0;
+    // schedule a fast note-off for the first ratchet
+    ratchetNoteOffMs[ch] = millis() + (intervalMs / 2);
+  }
 }
 
 // CV/Gate functions removed; using MIDI out only
@@ -838,9 +896,9 @@ void SimpleSequencer::drawDisplay(){
 
   // 3. PARAMETER LOCK UI OVERLAY
   if (heldStep >= 0) {
-    // Black out a space at the bottom for the edit menu
-    display.fillRect(0, 50, 128, 14, SH110X_BLACK);
-    display.drawLine(0, 49, 128, 49, SH110X_WHITE); // Separator
+    // Black out a larger space at the bottom for the edit menu (two lines)
+    display.fillRect(0, 42, 128, 22, SH110X_BLACK);
+    display.drawLine(0, 41, 128, 41, SH110X_WHITE); // Separator
 
     uint8_t p = pitch[selectedChannel][heldStep];
     uint8_t lenIdx = noteLen[selectedChannel][heldStep];
@@ -849,15 +907,21 @@ void SimpleSequencer::drawDisplay(){
     if (lenIdx == 255) lenIdx = noteLenIdx;
 
     const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+    const char* rNames[] = {"OFF", "16", "20", "24", "32", "40", "48", "64", "80"};
 
-    // Display the specific step data
-    display.setCursor(2, 54);
+    // First line: STP / Note / Length
+    display.setCursor(2, 45);
     display.print("STP:"); display.print(heldStep + 1);
     display.print(" ");
     display.print(noteNames[p % 12]); display.print((p / 12) - 1);
     display.print(" L:"); display.print(noteLenNames[lenIdx]);
-    // THE FIX: Show the Fill Condition State
-    display.print(" F:"); display.print(fillStep[selectedChannel][heldStep] ? "ON" : "OFF");
+
+    // Second line: Fill and Ratchet
+    display.setCursor(2, 55);
+    display.print("F:"); display.print(fillStep[selectedChannel][heldStep] ? "ON" : "OFF");
+    display.print(" ");
+    uint8_t r = stepRatchet[selectedChannel][heldStep];
+    display.print("RATC:"); display.print(rNames[r]);
   }
 
   display.display();

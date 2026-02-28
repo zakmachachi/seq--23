@@ -45,6 +45,7 @@ class SimpleSequencer {
     // --- UPDATED: Per-Step Parameter Arrays ---
     uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
     uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenTicks
+    uint8_t stepRatchet[NUM_CHANNELS][NUM_STEPS]; // per-step ratchet count (0 = off)
     int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
     
@@ -69,6 +70,13 @@ class SimpleSequencer {
     // --- FILL / PERFORMANCE MODES ---
     bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
     bool fillStep[NUM_CHANNELS][NUM_STEPS]; // per-step Fill memory
+
+    // --- RATCHET ENGINE ---
+    uint32_t activeRatchetInterval[NUM_CHANNELS];
+    uint32_t activeRatchetNext[NUM_CHANNELS];
+    uint32_t activeRatchetEnd[NUM_CHANNELS];
+    uint32_t ratchetNoteOffMs[NUM_CHANNELS];
+    uint8_t activeRatchetPitch[NUM_CHANNELS];
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     uint32_t lastDisplayMillis;
