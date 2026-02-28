@@ -79,8 +79,7 @@ SimpleSequencer::SimpleSequencer()
     }
     channelPitch[c] = 36; // Default each channel's base pitch to C2
     // ratchet engine defaults
-    activeRatchetInterval[c] = 0;
-    ratchetNoteOffMs[c] = 0;
+    ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
   }
   lastMidiClockMicros = 0;
@@ -285,108 +284,7 @@ void SimpleSequencer::loop(){
       runEncoderSwitchTest(10000);
     }
   }
-  // process any received MIDI bytes from hardware Serial8 (MIDI)
-  while (Serial8.available() > 0) {
-    uint8_t b = Serial8.read();
-
-    // 1. Handle Clock Ticks (0xF8)
-    if (b == 0xF8) {
-      externalMidiClockActive = true;
-      lastExternalClockMillis = now;
-
-      // If we were running an internal hardware timer, stop it because external clock is authoritative
-      if (midiTimerRunning) {
-        midiClockTimer.end();
-        midiTimerRunning = false;
-      }
-
-      // Sequencer Advancement (6 ticks = 16th note)
-      midiStepTickCounter++;
-      if (midiStepTickCounter >= 6) {
-        midiStepTickCounter = 0;
-        midiHandleClockTick();
-      }
-
-      // Store the absolute timestamp of this tick in the rolling window
-      uint32_t currentMicros = micros();
-      tickTimestamps[tickIndex] = currentMicros;
-      if (validTicks < BPM_TICK_WINDOW) {
-        validTicks++;
-      } else {
-        // oldest index is one past current in the ring
-        uint8_t oldestIndex = (tickIndex + 1) % BPM_TICK_WINDOW;
-        uint32_t elapsedMicros = currentMicros - tickTimestamps[oldestIndex];
-        if (elapsedMicros > 0) {
-          // 48 ticks = 2 quarter notes -> BPM = (2 beats / elapsed_seconds) * 60
-          // simplified: BPM = 120,000,000 / elapsedMicros
-          float calculatedBpm = 120000000.0f / (float)elapsedMicros;
-          // lighter smoothing for faster reaction to tempo changes
-          smoothedBpm = (smoothedBpm * 0.40f) + (calculatedBpm * 0.60f);
-          bpm = (uint32_t)(smoothedBpm + 0.5f);
-        }
-      }
-      tickIndex = (tickIndex + 1) % BPM_TICK_WINDOW;
-    }
-
-    // 2. Handle Start (0xFA)
-    else if (b == 0xFA) {
-      Serial.println("Ext MIDI Start");
-      externalMidiClockActive = true;
-      lastExternalClockMillis = now;
-
-      // Reset all counters so the math starts fresh
-      midiStepTickCounter = 0;
-      validTicks = 0;
-      tickIndex = 0;
-
-      // stop internal timer if it was running
-      if (midiTimerRunning) { midiClockTimer.end(); midiTimerRunning = false; }
-
-      midiHandleStart();
-    }
-
-    // 3. Handle Continue (0xFB)
-    else if (b == 0xFB) {
-      Serial.println("Ext MIDI Continue");
-      externalMidiClockActive = true;
-      lastExternalClockMillis = now;
-      if (midiTimerRunning) { midiClockTimer.end(); midiTimerRunning = false; }
-      midiHandleContinue();
-    }
-
-    // 4. Handle Stop (0xFC)
-    else if (b == 0xFC) {
-      Serial.println("Ext MIDI Stop");
-      // external Stop -> stop internal timer too
-      if (midiTimerRunning) { midiClockTimer.end(); midiTimerRunning = false; }
-      midiHandleStop();
-    }
-    else {
-      if (b != 0xF8) {
-        Serial.print("MIDI RX byte: 0x"); Serial.println(b, HEX);
-      }
-    }
-  }
-  // MIDI clock generation is handled by a background IntervalTimer when running
-  // Nothing to do here in the foreground loop for internal clocking.
-
-  // if external MIDI clock was active but we haven't seen ticks for a while, fall back to internal clock
-  if (externalMidiClockActive){
-    if (millis() - lastExternalClockMillis > 2000){
-      externalMidiClockActive = false;
-      midiStepTickCounter = 0;
-      // reset timestamp window
-      validTicks = 0;
-      tickIndex = 0;
-      Serial.println("External MIDI clock lost; reverting to internal clock");
-      // start internal hardware timer if sequencer is running
-      if (isRunning && !midiTimerRunning){
-        uint32_t interval = (60000000UL / bpm) / 24;
-        midiClockTimer.begin(sendClockISR, interval);
-        midiTimerRunning = true;
-      }
-    }
-  }
+  // MIDI clock generation and external MIDI handling moved to `runEngine()` only to avoid race conditions.
 
   // Time-critical MIDI processing (advancing steps/note-offs/MIDI RX) now runs in the engine timer.
   // update display at configured refresh interval
@@ -513,9 +411,7 @@ void SimpleSequencer::readEncoders(){
             pendingToggle[heldStep] = false;
             steps[selectedChannel][heldStep] = true;
             int val = (int)stepRatchet[selectedChannel][heldStep] + encSteps;
-            if (val < 0) val = 0;
-            if (val > 8) val = 8;
-            stepRatchet[selectedChannel][heldStep] = (uint8_t)val;
+            stepRatchet[selectedChannel][heldStep] = (uint8_t)constrain(val, 0, 5);
           } else {
             int newBpm = (int)bpm + encSteps;
             if (newBpm < 20) newBpm = 20;
@@ -640,6 +536,23 @@ void SimpleSequencer::internalClockTick(){
       noteOffTick[ch] = 0;
       lastNotePlaying[ch] = 255;
     }
+
+    // 1b) Process pure-tick Ratchet Note-Ons
+    if (ratchetIntervalTicks[ch] > 0 && absoluteTickCounter >= ratchetNextTick[ch]) {
+      if (absoluteTickCounter < ratchetEndTick[ch]) {
+        // Fire next ratchet
+        midiSendNoteOn(ch, ratchetPitch[ch], 100);
+        lastNotePlaying[ch] = ratchetPitch[ch];
+        // Schedule its crisp note-off
+        uint32_t offOffset = ratchetIntervalTicks[ch] / 2;
+        if (offOffset == 0) offOffset = 1;
+        noteOffTick[ch] = absoluteTickCounter + offOffset;
+        // Schedule next hit
+        ratchetNextTick[ch] += ratchetIntervalTicks[ch];
+      } else {
+        ratchetIntervalTicks[ch] = 0; // Burst finished
+      }
+    }
   }
 
   // 2) Advance the sequencer step using PPQN counting
@@ -759,29 +672,7 @@ void SimpleSequencer::runEngine(){
 
   // Note-offs are now handled in `internalClockTick()` on MIDI ticks.
 
-  // --- RATCHET ENGINE PROCESSING ---
-  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
-    // Step retrig scheduling
-    if (activeRatchetInterval[ch] > 0 && nowMs >= activeRatchetNext[ch]){
-      if (nowMs < activeRatchetEnd[ch]){
-        if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-        midiSendNoteOn(ch, activeRatchetPitch[ch], 100);
-        lastNotePlaying[ch] = activeRatchetPitch[ch];
-        ratchetNoteOffMs[ch] = nowMs + (activeRatchetInterval[ch] / 2);
-        activeRatchetNext[ch] += activeRatchetInterval[ch];
-      } else {
-        // finished ratcheting for this step
-        activeRatchetInterval[ch] = 0;
-      }
-    }
-
-    // Fast ratchet note-off processing
-    if (ratchetNoteOffMs[ch] > 0 && nowMs >= ratchetNoteOffMs[ch]){
-      if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-      ratchetNoteOffMs[ch] = 0;
-      lastNotePlaying[ch] = 255;
-    }
-  }
+  // Note-offs are now handled in `internalClockTick()` on MIDI ticks.
 }
 
 void SimpleSequencer::triggerChannel(uint8_t ch){
@@ -811,23 +702,24 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   uint8_t lenIdx = noteLen[ch][currentStep];
   if (lenIdx == 255) lenIdx = noteLenIdx;
 
-  uint8_t r = stepRatchet[ch][currentStep];
-  if (r == 0) {
-    // standard note-off scheduled on ticks
-    noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
+  uint8_t rIdx = stepRatchet[ch][currentStep];
+  if (rIdx > 0) {
+    const uint8_t rTicks[] = {0, 6, 4, 3, 2, 1}; // Exact tick intervals for 16, 24, 32, 48, 96
+    uint8_t ticksPerHit = rTicks[rIdx];
+    
+    ratchetIntervalTicks[ch] = ticksPerHit;
+    ratchetNextTick[ch] = absoluteTickCounter + ticksPerHit;
+    ratchetEndTick[ch] = absoluteTickCounter + 6; // Strictly constrain burst to exactly one 16th-note step (6 ticks)
+    ratchetPitch[ch] = note;
+    
+    // Schedule crisp note off halfway through the tick interval
+    uint32_t offOffset = ticksPerHit / 2;
+    if (offOffset == 0) offOffset = 1; 
+    noteOffTick[ch] = absoluteTickCounter + offOffset;
   } else {
-    // RATCET ENABLED: schedule rapid retrigs for the duration of the step
-    float rateVals[] = {16, 20, 24, 32, 40, 48, 64, 80};
-    uint32_t intervalMs = (uint32_t)((240000.0f / (float)bpm) / rateVals[r - 1]);
-    uint32_t stepDurationMs = (uint32_t)(noteLenTicks[lenIdx] * (60000.0f / (float)bpm) / 24.0f);
-    activeRatchetInterval[ch] = intervalMs;
-    activeRatchetNext[ch] = millis() + intervalMs;
-    activeRatchetEnd[ch] = millis() + stepDurationMs - 4;
-    activeRatchetPitch[ch] = note;
-    // disable standard tick-based note-off while ratcheting
-    noteOffTick[ch] = 0;
-    // schedule a fast note-off for the first ratchet
-    ratchetNoteOffMs[ch] = millis() + (intervalMs / 2);
+    // Normal single-hit logic
+    ratchetIntervalTicks[ch] = 0; 
+    noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
   }
 }
 
@@ -907,7 +799,7 @@ void SimpleSequencer::drawDisplay(){
     if (lenIdx == 255) lenIdx = noteLenIdx;
 
     const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-    const char* rNames[] = {"OFF", "16", "20", "24", "32", "40", "48", "64", "80"};
+    const char* rNames[] = {"OFF", "16", "24", "32", "48", "96"};
 
     // First line: STP / Note / Length
     display.setCursor(2, 45);
@@ -1013,52 +905,7 @@ void SimpleSequencer::runMidiPinMonitor(uint32_t ms){
   Serial.println("Monitor finished");
 }
 
-// MIDI input handlers
-void SimpleSequencer::midiHandleClockTick(){
-  if (!isRunning) return;
-  // advance step and trigger channels
-  currentStep = (currentStep + 1) % NUM_STEPS;
-  lastStepMillis = millis();
-  for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-    if (steps[ch][currentStep]) triggerChannel(ch);
-  }
-}
-
-void SimpleSequencer::midiHandleStart(){
-  isRunning = true;
-  currentStep = 0;
-  lastStepMillis = millis();
-  for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-    if (steps[ch][currentStep]) triggerChannel(ch);
-  }
-}
-
-void SimpleSequencer::midiHandleContinue(){
-  // Resume without resetting position
-  isRunning = true;
-  lastStepMillis = millis();
-}
-
-void SimpleSequencer::midiHandleStop(){
-  isRunning = false;
-  // silence notes
-  for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-    if (noteOffTick[ch]){
-      if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-      noteOffTick[ch] = 0;
-      lastNotePlaying[ch] = 255;
-    }
-  }
-  // when external Stop received, consider external clock inactive
-  externalMidiClockActive = false;
-}
-
-void SimpleSequencer::midiHandleReset(){
-  isRunning = false;
-  currentStep = 0;
-  lastStepMillis = millis();
-  externalMidiClockActive = false;
-}
+// MIDI input handlers removed — processing consolidated in runEngine() to avoid concurrent Serial reads.
 
 void SimpleSequencer::displayTest(){
   // flash full screen a few times and show text

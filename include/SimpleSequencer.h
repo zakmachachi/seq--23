@@ -19,12 +19,7 @@ class SimpleSequencer {
     void runEncoderSwitchTest(uint32_t ms);
     void printEncoderRaw();
     void runMidiPinMonitor(uint32_t ms);
-    // MIDI input handlers (called from MIDI RX processor)
-    void midiHandleStart();
-    void midiHandleStop();
-    void midiHandleClockTick();
-    void midiHandleContinue();
-    void midiHandleReset();
+    // MIDI input handlers (moved into `runEngine()` to avoid concurrent Serial reads)
     // MIDI output
     void midiSendByte(uint8_t b);
     void midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel);
@@ -71,12 +66,11 @@ class SimpleSequencer {
     bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
     bool fillStep[NUM_CHANNELS][NUM_STEPS]; // per-step Fill memory
 
-    // --- RATCHET ENGINE ---
-    uint32_t activeRatchetInterval[NUM_CHANNELS];
-    uint32_t activeRatchetNext[NUM_CHANNELS];
-    uint32_t activeRatchetEnd[NUM_CHANNELS];
-    uint32_t ratchetNoteOffMs[NUM_CHANNELS];
-    uint8_t activeRatchetPitch[NUM_CHANNELS];
+    // --- RATCHET / RETRIG ENGINE ---
+    uint8_t ratchetIntervalTicks[NUM_CHANNELS];
+    uint32_t ratchetNextTick[NUM_CHANNELS];
+    uint32_t ratchetEndTick[NUM_CHANNELS];
+    uint8_t ratchetPitch[NUM_CHANNELS];
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     uint32_t lastDisplayMillis;
