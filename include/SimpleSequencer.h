@@ -52,7 +52,8 @@ class SimpleSequencer {
     bool muted[NUM_CHANNELS]; 
     bool startStopModifierFlag = false; 
     uint8_t noteLenIdx; // global default length index when no step is held
-    uint8_t globalPitch; // master pitch for un-locked steps (255 means use global)
+    // --- CHANNEL DEFAULT PITCHES ---
+    uint8_t channelPitch[NUM_CHANNELS]; // per-channel base pitch (used when per-step pitch == 255)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
 
     // runtime
@@ -65,6 +66,9 @@ class SimpleSequencer {
     // --- TICK-BASED NOTE LENGTH ENGINE ---
     uint32_t noteOffTick[NUM_CHANNELS];
     uint32_t absoluteTickCounter = 0;
+    // --- FILL / PERFORMANCE MODES ---
+    bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
+    bool fillStep[NUM_CHANNELS][NUM_STEPS]; // per-step Fill memory
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     uint32_t lastDisplayMillis;

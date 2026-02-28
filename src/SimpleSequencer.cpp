@@ -57,8 +57,7 @@ static float getDivisionFactor(SimpleSequencer::Division d){
 SimpleSequencer::SimpleSequencer()
   : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0)
 {
-  // Global defaults
-  globalPitch = 36; // Default global pitch to C2
+  // Default base pitch per channel
 
   for (uint8_t c=0;c<NUM_CHANNELS;c++){
     pulses[c]=4;
@@ -66,6 +65,7 @@ SimpleSequencer::SimpleSequencer()
     euclidEnabled[c]=false;
     muted[c]=false; // <-- All channels start unmuted
     noteOffTick[c]=0;
+    for (uint8_t s=0; s<NUM_STEPS; s++) fillStep[c][s] = false;
     for(uint8_t s=0;s<NUM_STEPS;s++){
       steps[c][s]=false;
       euclidPattern[c][s]=false;
@@ -75,6 +75,7 @@ SimpleSequencer::SimpleSequencer()
       noteLen[c][s] = 255;
       pendingToggle[s] = false;
     }
+    channelPitch[c] = 36; // Default each channel's base pitch to C2
     lastNotePlaying[c] = 255;
   }
   lastMidiClockMicros = 0;
@@ -198,6 +199,9 @@ void SimpleSequencer::handleButtonIRQ(uint8_t idx){
 }
 
 void SimpleSequencer::loop(){
+  // --- TRACK THE FILL PERFORMANCE BUTTON (Now on Pin 28) ---
+  fillModeActive = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+
   // UI-only loop: read controls and update display. Time-critical MIDI work runs in engine timer.
   readButtons();
   readEncoders();
@@ -424,10 +428,11 @@ void SimpleSequencer::readButtons(){
           // perform the toggle now (on release) if it was pending
           if (pendingToggle[i]){
             steps[selectedChannel][i] = !steps[selectedChannel][i];
-            // THE ERASER: If step turned OFF, reset it to Global defaults (255)
+            // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill
             if (!steps[selectedChannel][i]) {
               noteLen[selectedChannel][i] = 255;
               pitch[selectedChannel][i] = 255;
+              fillStep[selectedChannel][i] = false;
             }
             Serial.print("Ch"); Serial.print(selectedChannel+1);
             Serial.print(" Step "); Serial.print(i);
@@ -446,9 +451,11 @@ void SimpleSequencer::readEncoders(){
   static uint8_t lastState[4] = {0,0,0,0};
   static unsigned long lastSwDebounce[4] = {0,0,0,0};
   static bool lastSwState[4] = {0,0,0,0};
+  static bool lastRawSwState[4] = {0,0,0,0}; // <-- THE FIX: Missing raw tracker added!
+  
   const int8_t encTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
   static bool encInitialized = false;
-  // initialize previous states for all encoders on first call
+  
   if (!encInitialized){
     for (uint8_t e=0;e<4;e++){
       uint8_t a = digitalRead(ENC_A[e])==HIGH ? 1:0;
@@ -457,17 +464,19 @@ void SimpleSequencer::readEncoders(){
     }
     encInitialized = true;
   }
+  
   for (uint8_t e=0;e<4;e++){
     uint8_t a = digitalRead(ENC_A[e])==HIGH ? 1:0;
     uint8_t b = digitalRead(ENC_B[e])==HIGH ? 1:0;
     uint8_t st = (a<<1) | b;
     uint8_t idx = (lastState[e] << 2) | st;
     int8_t delta = encTable[idx & 0x0F];
+    
     if (delta != 0){
       static int8_t encAcc1 = 0;
       static int encAcc2 = 0;
       static int encAcc3 = 0;
-      int encSteps = 0; // Renamed from 'steps' to avoid array conflicts
+      int encSteps = 0; 
 
       if (e == 0){
         encAcc1 += delta;
@@ -477,7 +486,7 @@ void SimpleSequencer::readEncoders(){
           encAcc2 += delta;
           if (abs(encAcc2) >= 4) { encSteps = encAcc2 / 4; encAcc2 %= 4; }
         } else {
-          encAcc2 -= delta; // Reversed for channel
+          encAcc2 -= delta; 
           if (abs(encAcc2) >= 20) { encSteps = encAcc2 / 20; encAcc2 %= 20; }
         }
       } else if (e == 2){
@@ -491,7 +500,6 @@ void SimpleSequencer::readEncoders(){
         encSteps = delta;
       }
 
-      // apply steps
       if (encSteps != 0){
         if (e == 0){ // BPM
           int newBpm = (int)bpm + encSteps;
@@ -502,37 +510,28 @@ void SimpleSequencer::readEncoders(){
             uint32_t interval = (60000000UL / bpm) / 24;
             midiClockTimer.update(interval);
           }
-        } else if (e == 1){ // encoder 2: GLOBAL PITCH or P-LOCK PITCH
+        } else if (e == 1){ // encoder 2: PITCH
           if (heldStep >= 0){
-            // THE OVERRIDE: Editing a param forces step ON and cancels the release toggle
             pendingToggle[heldStep] = false;
             steps[selectedChannel][heldStep] = true;
-
-            // If it was global, grab the global pitch as our starting point
             if (pitch[selectedChannel][heldStep] == 255) {
-               pitch[selectedChannel][heldStep] = globalPitch;
+              pitch[selectedChannel][heldStep] = channelPitch[selectedChannel];
             }
-
             int note = (int)pitch[selectedChannel][heldStep] + encSteps;
             pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
           } else {
-            // EDIT GLOBAL PITCH (No step held)
             if (encSteps != 0){
-              int note = (int)globalPitch + encSteps;
-              globalPitch = (uint8_t)constrain(note, 0, 127);
+              int note = (int)channelPitch[selectedChannel] + encSteps;
+              channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
             }
           }
-        } else if (e == 2){ // NOTE LENGTH
+        } else if (e == 2){ // encoder 3: NOTE LENGTH
           if (heldStep >= 0){
-            // THE OVERRIDE: Editing a param forces step ON and cancels the release toggle
             pendingToggle[heldStep] = false;
             steps[selectedChannel][heldStep] = true;
-
-            // If it was global, grab the global setting as our starting point
             if (noteLen[selectedChannel][heldStep] == 255) {
               noteLen[selectedChannel][heldStep] = noteLenIdx;
             }
-
             int idxn = (int)noteLen[selectedChannel][heldStep] + encSteps;
             int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
             noteLen[selectedChannel][heldStep] = (uint8_t)constrain(idxn, 0, maxIdx);
@@ -541,38 +540,53 @@ void SimpleSequencer::readEncoders(){
             int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
             noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
           }
-        } else if (e == 3){ // encoder 4: euclid pulses when enabled
-          if (euclidEnabled[selectedChannel]){
-            int p = (int)pulses[selectedChannel] + encSteps;
-            if (p < 0) p = 0;
-            if (p > NUM_STEPS) p = NUM_STEPS;
-            pulses[selectedChannel] = p;
-            updateEuclid(selectedChannel);
+        } else if (e == 3){ // encoder 4: EUCLID PULSES
+          if (heldStep < 0) { 
+            if (euclidEnabled[selectedChannel]){
+              int p = (int)pulses[selectedChannel] + encSteps;
+              if (p < 0) p = 0;
+              if (p > NUM_STEPS) p = NUM_STEPS;
+              pulses[selectedChannel] = p;
+              updateEuclid(selectedChannel);
+            }
           }
         }
       }
     }
     lastState[e] = st;
-    // encoder switch
+    
+    // --- THE FIX: Correctly structured switch debounce logic ---
     bool sw = (digitalRead(ENC_SW[e]) == LOW);
     unsigned long now = millis();
-    if (sw != lastSwState[e]){
+    
+    // Compare against raw state!
+    if (sw != lastRawSwState[e]){
       lastSwDebounce[e] = now;
     }
+    
     if ((now - lastSwDebounce[e]) > debounceMs){
       if (sw != lastSwState[e]){
         lastSwState[e] = sw;
         if (sw){
-          // pressed
-          if (e == 3){
+          // PRESSED
+          if (e == 1) { // ENCODER 2 SWITCH (Fill Toggle)
+            if (heldStep >= 0) {
+              // Toggle Fill, force step ON, cancel release toggle
+              fillStep[selectedChannel][heldStep] = !fillStep[selectedChannel][heldStep];
+              steps[selectedChannel][heldStep] = true;
+              pendingToggle[heldStep] = false;
+            }
+          }
+          else if (e == 3){
             // toggle euclid for selected channel
             euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
             updateEuclid(selectedChannel);
-            Serial.print("Ch"); Serial.print(selectedChannel+1); Serial.print(" euclid="); Serial.println(euclidEnabled[selectedChannel]);
           }
         }
       }
     }
+    // Record raw state for next loop
+    lastRawSwState[e] = sw;
   }
 }
 
@@ -731,18 +745,22 @@ void SimpleSequencer::runEngine(){
 }
 
 void SimpleSequencer::triggerChannel(uint8_t ch){
-  // If a previous note is playing, turn it off immediately before striking the new one
+  // 1. If a previous note is playing, turn it off immediately
   if (noteOffTick[ch] > 0 && absoluteTickCounter < noteOffTick[ch]){
     if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
     noteOffTick[ch] = 0;
   }
 
-  // 2. THE MUTE BLOCK: Abort before firing new Note-Ons
+  // 2. THE NORMAL MUTE BLOCK
   if (muted[ch]) return;
 
-  // THE FIX: If step pitch is 255, use the Global Pitch
+  // 3. THE FILL CONDITION BLOCK (This was missing!)
+  // If this step is a Fill Step, but the Fill button (Pin 28) is NOT held, abort!
+  if (fillStep[ch][currentStep] && !fillModeActive) return;
+
+  // Fire the new Note On
   uint8_t p = pitch[ch][currentStep];
-  if (p == 255) p = globalPitch;
+  if (p == 255) p = channelPitch[ch];
 
   uint8_t note = constrain(p, 0, 127);
   uint8_t vel = 100;
@@ -768,10 +786,11 @@ void SimpleSequencer::drawDisplay(){
   display.setCursor(42, 0);
   display.print("C:"); display.print(selectedChannel + 1);
 
-  // Draw Global Note
+  // Draw Current Channel Base Note
   const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  uint8_t cp = channelPitch[selectedChannel];
   display.setCursor(60, 0);
-  display.print("N:"); display.print(noteNames[globalPitch % 12]); display.print((globalPitch / 12) - 1);
+  display.print("N:"); display.print(noteNames[cp % 12]); display.print((cp / 12) - 1);
 
   // Draw Mute Indicators
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -802,6 +821,10 @@ void SimpleSequencer::drawDisplay(){
     // Draw filled box if step is active
     if (steps[selectedChannel][i]) {
       display.fillRect(x, y, stepW, stepH, SH110X_WHITE);
+      // THE FIX: Draw a distinct "Hollow Core" if it is a Fill Step
+      if (fillStep[selectedChannel][i]) {
+        display.fillRect(x + 3, y + 3, stepW - 6, stepH - 6, SH110X_BLACK);
+      }
     } else {
       display.drawRect(x, y, stepW, stepH, SH110X_WHITE);
     }
@@ -821,8 +844,8 @@ void SimpleSequencer::drawDisplay(){
 
     uint8_t p = pitch[selectedChannel][heldStep];
     uint8_t lenIdx = noteLen[selectedChannel][heldStep];
-    // Fallbacks to globals for display if no p-lock exists
-    if (p == 255) p = globalPitch;
+    // Fallback to channel base pitch for display if no p-lock exists
+    if (p == 255) p = channelPitch[selectedChannel];
     if (lenIdx == 255) lenIdx = noteLenIdx;
 
     const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
@@ -833,6 +856,8 @@ void SimpleSequencer::drawDisplay(){
     display.print(" ");
     display.print(noteNames[p % 12]); display.print((p / 12) - 1);
     display.print(" L:"); display.print(noteLenNames[lenIdx]);
+    // THE FIX: Show the Fill Condition State
+    display.print(" F:"); display.print(fillStep[selectedChannel][heldStep] ? "ON" : "OFF");
   }
 
   display.display();
