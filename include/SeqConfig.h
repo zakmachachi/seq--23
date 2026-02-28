@@ -21,6 +21,8 @@ static const uint8_t NUM_STEPS = 16;
 
 // MIDI TX pin (connect to DIN pin of MIDI OUT optocoupler circuit)
 static const uint8_t MIDI_TX_PIN = 35;
+// MIDI RX pin (DIN input from MIDI IN optocoupler)
+static const uint8_t MIDI_RX_PIN = 34;
 // Start/Stop button pin
 static const uint8_t START_STOP_PIN = 27;
 

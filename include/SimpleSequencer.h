@@ -16,6 +16,15 @@ class SimpleSequencer {
     void begin();
     void loop();
     void runSwitchTest(uint32_t ms);
+    void runEncoderSwitchTest(uint32_t ms);
+    void printEncoderRaw();
+    void runMidiPinMonitor(uint32_t ms);
+    // MIDI input handlers (called from MIDI RX processor)
+    void midiHandleStart();
+    void midiHandleStop();
+    void midiHandleClockTick();
+    void midiHandleContinue();
+    void midiHandleReset();
     // MIDI output
     void midiSendByte(uint8_t b);
     void midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel);
@@ -29,15 +38,20 @@ class SimpleSequencer {
     bool euclidPattern[NUM_CHANNELS][NUM_STEPS];
     uint8_t pulses[NUM_CHANNELS];
     uint8_t retrig[NUM_CHANNELS];
-    int16_t pitch[NUM_CHANNELS];
+    // --- UPDATED: Per-Step Parameter Arrays ---
+    uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
+    uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenFactors
+    int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
-    uint8_t noteLenIdx; // index into note length table (0..4)
+    uint8_t noteLenIdx; // global default length index when no step is held
+    uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
 
     // runtime
     uint32_t bpm;
     uint32_t lastStepMillis;
     uint16_t currentStep;
     uint8_t selectedChannel;
+    // high-resolution MIDI clock reference moved to file-scope static variable
     Division stepDivision = DIV_SIXTEENTH; // default to 1/16 (16 steps per 4/4 bar)
     // MIDI note-off scheduling (non-blocking)
     uint32_t noteOffTime[NUM_CHANNELS];
