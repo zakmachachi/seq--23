@@ -83,7 +83,7 @@ SimpleSequencer::SimpleSequencer()
     lastNotePlaying[c] = 255;
   }
   lastMidiClockMicros = 0;
-  noteLenIdx = 3; // default to 1/8
+  noteLenIdx = 4; // default to 1/16 (use shorter gate to avoid envelope collisions)
   absoluteTickCounter = 0;
 }
 
@@ -165,10 +165,12 @@ void SimpleSequencer::midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel)
 }
 
 void SimpleSequencer::midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel){
-  uint8_t status = 0x80 | (channel & 0x0F);
+  // Some Elektron devices expect Note-Offs as Note-On with velocity 0.
+  // Send a Note-On (0x90) with velocity 0 to be compatible.
+  uint8_t status = 0x90 | (channel & 0x0F);
   midiSendByte(status);
   midiSendByte(note & 0x7F);
-  midiSendByte(vel & 0x7F);
+  midiSendByte(0);
 }
 
 void SimpleSequencer::setupPins(){
@@ -230,11 +232,14 @@ void SimpleSequencer::loop(){
           if (isRunning){
             midiStepTickCounter = 0;
             stepAdvanceRequested = false;
+            // reset absolute tick counter so internal timing/ratchets start aligned
+            absoluteTickCounter = 0;
             midiSendByte(0xFA); // MIDI Start
             midiSendByte(0xF8); // MIDI Clock
             currentStep = 0;
             for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-              if (steps[ch][currentStep]) triggerChannel(ch);
+              bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+              if (isActive) triggerChannel(ch);
             }
             if (!externalMidiClockActive && !midiTimerRunning) {
               uint32_t interval = (60000000UL / bpm) / 24;
@@ -612,7 +617,8 @@ void SimpleSequencer::runEngine(){
       currentStep = 0;
       // immediately trigger steps at position 0
       for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-        if (steps[ch][currentStep]) triggerChannel(ch);
+        bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+        if (isActive) triggerChannel(ch);
       }
     }
     else if (b == 0xFB){
@@ -664,9 +670,10 @@ void SimpleSequencer::runEngine(){
     if (isRunning){
       currentStep = (currentStep + 1) % NUM_STEPS;
       // trigger channels that have the step enabled
-      for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-        if (steps[ch][currentStep]) triggerChannel(ch);
-      }
+        for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+          bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+          if (isActive) triggerChannel(ch);
+        }
     }
   }
 
@@ -719,7 +726,10 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   } else {
     // Normal single-hit logic
     ratchetIntervalTicks[ch] = 0; 
-    noteOffTick[ch] = absoluteTickCounter + noteLenTicks[lenIdx];
+    // THE GATE GAP FIX: Subtract 1 tick from the duration to let analog envelopes reset
+    uint32_t ticks = noteLenTicks[lenIdx];
+    uint32_t gateLength = (ticks > 1) ? (ticks - 1) : 1;
+    noteOffTick[ch] = absoluteTickCounter + gateLength;
   }
 }
 
@@ -768,8 +778,9 @@ void SimpleSequencer::drawDisplay(){
     int x = startX + col * (stepW + spacingX);
     int y = startY + row * (stepH + spacingY);
 
-    // Draw filled box if step is active
-    if (steps[selectedChannel][i]) {
+    // Draw filled box if step is active (supports Euclidean mode)
+    bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
+    if (stepActive) {
       display.fillRect(x, y, stepW, stepH, SH110X_WHITE);
       // THE FIX: Draw a distinct "Hollow Core" if it is a Fill Step
       if (fillStep[selectedChannel][i]) {
@@ -814,6 +825,19 @@ void SimpleSequencer::drawDisplay(){
     display.print(" ");
     uint8_t r = stepRatchet[selectedChannel][heldStep];
     display.print("RATC:"); display.print(rNames[r]);
+  }
+
+  else if (euclidEnabled[selectedChannel]) {
+    // Black out the bottom for the Euclidean menu
+    display.fillRect(0, 42, 128, 22, SH110X_BLACK);
+    display.drawLine(0, 41, 128, 41, SH110X_WHITE);
+    
+    display.setCursor(2, 45);
+    display.print("--- EUCLIDEAN ---");
+    
+    display.setCursor(2, 55);
+    display.print("HITS: "); display.print(pulses[selectedChannel]);
+    display.print(" / 16");
   }
 
   display.display();
