@@ -61,6 +61,7 @@ SimpleSequencer::SimpleSequencer()
 
   for (uint8_t c=0;c<NUM_CHANNELS;c++){
     pulses[c]=4;
+    euclidOffset[c] = 0;
     retrig[c]=1;
     euclidEnabled[c]=false;
     muted[c]=false; // <-- All channels start unmuted
@@ -381,10 +382,11 @@ void SimpleSequencer::readEncoders(){
     uint8_t idx = (lastState[e] << 2) | st;
     int8_t delta = encTable[idx & 0x0F];
     
-    if (delta != 0){
+      if (delta != 0){
       static int8_t encAcc1 = 0;
       static int encAcc2 = 0;
       static int encAcc3 = 0;
+      static int encAcc4 = 0;
       int encSteps = 0; 
 
       if (e == 0){
@@ -405,6 +407,12 @@ void SimpleSequencer::readEncoders(){
         } else {
           if (abs(encAcc3) >= 20) { encSteps = encAcc3 / 20; encAcc3 %= 20; }
         }
+      } else if (e == 3) { // ENCODER 4 GEARBOX
+        encAcc4 += delta;
+        if (abs(encAcc4) >= 4) { 
+          encSteps = encAcc4 / 4; // 4 pulses = 1 physical click
+          encAcc4 %= 4; 
+        }
       } else {
         encSteps = delta;
       }
@@ -412,11 +420,19 @@ void SimpleSequencer::readEncoders(){
       if (encSteps != 0){
         if (e == 0){ // Encoder 1: BPM or Ratchet when a step is held
           if (heldStep >= 0){
-            // Editing ratchet for held step
-            pendingToggle[heldStep] = false;
-            steps[selectedChannel][heldStep] = true;
-            int val = (int)stepRatchet[selectedChannel][heldStep] + encSteps;
-            stepRatchet[selectedChannel][heldStep] = (uint8_t)constrain(val, 0, 5);
+            // RATCHET GEARBOX
+            static int ratchetAcc = 0;
+            ratchetAcc += encSteps;
+            
+            if (abs(ratchetAcc) >= 2) { // 2 encSteps = 1 full physical click
+              int rSteps = ratchetAcc / 2;
+              ratchetAcc %= 2;
+              
+              pendingToggle[heldStep] = false;
+              steps[selectedChannel][heldStep] = true;
+              int val = (int)stepRatchet[selectedChannel][heldStep] + rSteps;
+              stepRatchet[selectedChannel][heldStep] = (uint8_t)constrain(val, 0, 5);
+            }
           } else {
             int newBpm = (int)bpm + encSteps;
             if (newBpm < 20) newBpm = 20;
@@ -457,13 +473,23 @@ void SimpleSequencer::readEncoders(){
             int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
             noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
           }
-        } else if (e == 3){ // encoder 4: EUCLID PULSES
+        } else if (e == 3){ // encoder 4: EUCLID PULSES or OFFSET
           if (heldStep < 0) { 
             if (euclidEnabled[selectedChannel]){
-              int p = (int)pulses[selectedChannel] + encSteps;
-              if (p < 0) p = 0;
-              if (p > NUM_STEPS) p = NUM_STEPS;
-              pulses[selectedChannel] = p;
+              bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+              
+              if (chanModHeld) {
+                // Adjust the Shift Offset
+                int o = (int)euclidOffset[selectedChannel] + encSteps;
+                while (o < 0) o += NUM_STEPS; // Safe negative wrapping
+                euclidOffset[selectedChannel] = (uint8_t)(o % NUM_STEPS);
+              } else {
+                // Adjust the Hit Pulses
+                int p = (int)pulses[selectedChannel] + encSteps;
+                if (p < 0) p = 0;
+                if (p > NUM_STEPS) p = NUM_STEPS;
+                pulses[selectedChannel] = p;
+              }
               updateEuclid(selectedChannel);
             }
           }
@@ -512,6 +538,7 @@ void SimpleSequencer::readEncoders(){
 void SimpleSequencer::updateEuclid(uint8_t ch){
   uint8_t k = pulses[ch];
   uint8_t n = NUM_STEPS;
+  uint8_t offset = euclidOffset[ch];
   if (k == 0){
     for (uint8_t i=0;i<n;i++) euclidPattern[ch][i]=false;
     return;
@@ -520,10 +547,17 @@ void SimpleSequencer::updateEuclid(uint8_t ch){
     for (uint8_t i=0;i<n;i++) euclidPattern[ch][i]=true;
     return;
   }
+
+  bool tempPattern[NUM_STEPS];
   for (uint8_t j=0;j<n;j++){
     int x = (j * k) / n;
     int y = ((j+1) * k) / n;
-    euclidPattern[ch][j] = (y > x);
+    tempPattern[j] = (y > x);
+  }
+
+  // Apply the rotation offset wrapping around NUM_STEPS
+  for (uint8_t j=0;j<n;j++){
+    euclidPattern[ch][(j + offset) % n] = tempPattern[j];
   }
 }
 
@@ -836,8 +870,8 @@ void SimpleSequencer::drawDisplay(){
     display.print("--- EUCLIDEAN ---");
     
     display.setCursor(2, 55);
-    display.print("HITS: "); display.print(pulses[selectedChannel]);
-    display.print(" / 16");
+    display.print("HIT:"); display.print(pulses[selectedChannel]);
+    display.print("  SFT:"); display.print(euclidOffset[selectedChannel]);
   }
 
   display.display();

@@ -36,6 +36,7 @@ class SimpleSequencer {
     bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)
     bool euclidPattern[NUM_CHANNELS][NUM_STEPS];
     uint8_t pulses[NUM_CHANNELS];
+    uint8_t euclidOffset[NUM_CHANNELS];
     uint8_t retrig[NUM_CHANNELS];
     // --- UPDATED: Per-Step Parameter Arrays ---
     uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
