@@ -64,6 +64,7 @@ SimpleSequencer::SimpleSequencer()
     euclidOffset[c] = 0;
     retrig[c]=1;
     euclidEnabled[c]=false;
+    euclidScaleMode[c] = 0;
     muted[c]=false; // <-- All channels start unmuted
     noteOffTick[c]=0;
     for (uint8_t s=0; s<NUM_STEPS; s++) fillStep[c][s] = false;
@@ -527,9 +528,16 @@ void SimpleSequencer::readEncoders(){
             }
           }
           else if (e == 3){
-            // toggle euclid for selected channel
-            euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
-            updateEuclid(selectedChannel);
+            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+            if (chanModHeld && euclidEnabled[selectedChannel]) {
+              // Cycle through 0=OFF, 1=LOC, 2=DIM, 3=ATO
+              euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + 1) % 4;
+              randomizeEuclidMelody(selectedChannel);
+            } else {
+              // Normal Click: Toggle Euclidean on/off
+              euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
+              updateEuclid(selectedChannel);
+            }
           }
         }
       }
@@ -542,7 +550,7 @@ void SimpleSequencer::readEncoders(){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 87654321; // Unique signature
+  data.magicNumber = 13572469; // Unique signature (v3)
   data.savedBpm = bpm;
   data.savedNoteLenIdx = noteLenIdx;
   
@@ -552,6 +560,7 @@ void SimpleSequencer::saveState() {
     data.savedEuclidEnabled[c] = euclidEnabled[c];
     data.savedPulses[c] = pulses[c];
     data.savedEuclidOffset[c] = euclidOffset[c];
+    data.savedEuclidScaleMode[c] = euclidScaleMode[c];
     
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
       data.savedSteps[c][s] = steps[c][s];
@@ -577,7 +586,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 87654321) {
+  if (data.magicNumber == 13572469) {
     bpm = data.savedBpm;
     noteLenIdx = data.savedNoteLenIdx;
 
@@ -587,6 +596,7 @@ void SimpleSequencer::loadState() {
       euclidEnabled[c] = data.savedEuclidEnabled[c];
       pulses[c] = data.savedPulses[c];
       euclidOffset[c] = data.savedEuclidOffset[c];
+      euclidScaleMode[c] = data.savedEuclidScaleMode[c];
       
       for (uint8_t s = 0; s < NUM_STEPS; s++) {
         steps[c][s] = data.savedSteps[c][s];
@@ -601,6 +611,35 @@ void SimpleSequencer::loadState() {
     Serial.println("State loaded from EEPROM.");
   } else {
     Serial.println("No saved state found. Booting blank.");
+  }
+}
+
+void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
+  uint8_t mode = euclidScaleMode[ch];
+  
+  if (mode == 0) {
+    // MODE 0: OFF (Clear all 16 pitches back to the base drum sound)
+    for (uint8_t s = 0; s < NUM_STEPS; s++) {
+      pitch[ch][s] = 255; 
+    }
+    return;
+  }
+  // MODES 1-3: Generate Scale for ALL 16 STEPS (1=Locrian, 2=Diminished, 3=Atonal)
+  uint8_t root = channelPitch[ch];
+
+  const uint8_t locrian[] = {0, 1, 3, 5, 6, 8, 10, 12};
+  const uint8_t diminished[] = {0, 1, 3, 4, 6, 7, 9, 10, 12};
+  const uint8_t atonal[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+
+  for (uint8_t s = 0; s < NUM_STEPS; s++) {
+    uint8_t interval = 0;
+    if (mode == 1) interval = locrian[random(0, 8)];
+    else if (mode == 2) interval = diminished[random(0, 9)];
+    else if (mode == 3) interval = atonal[random(0, 13)];
+
+    // Randomly drop some notes down an octave for bass movement
+    int note = root + interval - (random(0, 2) * 12); 
+    pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
   }
 }
 
@@ -630,6 +669,7 @@ void SimpleSequencer::updateEuclid(uint8_t ch){
   for (uint8_t j=0;j<n;j++){
     euclidPattern[ch][(j + offset) % n] = tempPattern[j];
   }
+  // Melody generation is decoupled from rhythm changes: do not regenerate here.
 }
 
 // Advance the internal MIDI tick counter (called from MIDI clock ISR)
@@ -941,8 +981,10 @@ void SimpleSequencer::drawDisplay(){
     display.print("--- EUCLIDEAN ---");
     
     display.setCursor(2, 55);
-    display.print("HIT:"); display.print(pulses[selectedChannel]);
-    display.print("  SFT:"); display.print(euclidOffset[selectedChannel]);
+    display.print("H:"); display.print(pulses[selectedChannel]);
+    display.print(" S:"); display.print(euclidOffset[selectedChannel]);
+    const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};
+    display.print(" SCL:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
   }
 
   display.display();

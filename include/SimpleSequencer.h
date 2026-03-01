@@ -67,6 +67,7 @@ class SimpleSequencer {
     // --- FILL / PERFORMANCE MODES ---
     bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
     bool fillStep[NUM_CHANNELS][NUM_STEPS]; // per-step Fill memory
+    uint8_t euclidScaleMode[NUM_CHANNELS];
 
     // --- RATCHET / RETRIG ENGINE ---
     uint8_t ratchetIntervalTicks[NUM_CHANNELS];
@@ -96,6 +97,7 @@ class SimpleSequencer {
     void setupPins();
     void readButtons();
     void updateEuclid(uint8_t ch);
+    void randomizeEuclidMelody(uint8_t ch);
     void readEncoders();
     void triggerChannel(uint8_t ch);
     // --- EEPROM SAVE SYSTEM ---
@@ -108,6 +110,7 @@ class SimpleSequencer {
       bool savedEuclidEnabled[NUM_CHANNELS];
       uint8_t savedPulses[NUM_CHANNELS];
       uint8_t savedEuclidOffset[NUM_CHANNELS];
+      uint8_t savedEuclidScaleMode[NUM_CHANNELS];
       bool savedSteps[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedPitch[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedNoteLen[NUM_CHANNELS][NUM_STEPS];
