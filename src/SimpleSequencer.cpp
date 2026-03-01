@@ -1192,16 +1192,17 @@ void SimpleSequencer::bootAnimation() {
 
 // LED update: new color mapping (playhead purple, fills blue, triggers red)
 void SimpleSequencer::updateLEDs() {
-  // 1. LIVE PERFORMANCE MODE: Global Blue Strobe
+  // 1. LIVE PERFORMANCE MODE: Crackling Red Glitch Strobe
   if (fillModeActive) {
-    // Create a fast 40ms strobe effect using the system clock
-    bool flashState = (millis() / 40) % 2 == 0; 
-    
     for (uint8_t i = 0; i < NUM_STEPS; i++) {
-      if (flashState) {
-        ledStrip.setPixelColor(i, ledStrip.Color(255, 0, 0)); // Bright Red
+      // Randomly choose which LEDs flash ON versus which stay dark/dim
+      // This creates a high-speed, chaotic red static effect across the grid at 60fps
+      if (random(0, 10) > 4) {
+        // Blinding Red Flash with slight randomized intensity for texture
+        ledStrip.setPixelColor(i, ledStrip.Color(random(150, 255), 0, 0)); 
       } else {
-        ledStrip.setPixelColor(i, ledStrip.Color(0, 0, 0));    // Blackout
+        // Very dim red or completely off for sharp contrast
+        ledStrip.setPixelColor(i, ledStrip.Color(random(0, 20), 0, 0)); 
       }
     }
     ledStrip.show();
