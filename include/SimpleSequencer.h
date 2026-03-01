@@ -103,6 +103,7 @@ class SimpleSequencer {
     void updateEuclid(uint8_t ch);
     void randomizeEuclidMelody(uint8_t ch);
     void readEncoders();
+    void shiftEuclidNotes(uint8_t ch, int steps);
     void triggerChannel(uint8_t ch);
     // --- EEPROM SAVE SYSTEM ---
     struct SaveData {

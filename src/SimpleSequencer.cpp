@@ -187,25 +187,32 @@ void SimpleSequencer::midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel
 }
 
 void SimpleSequencer::setupPins(){
-  // buttons use interrupt-driven handlers
-  for (uint8_t i=0;i<NUM_STEPS;i++){
-    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
-  }
-  // channel modifier button (hold + step 1-4 to quick-select channel)
-  pinMode(CHANNEL_BTN_PIN, INPUT_PULLUP);
-  // encoder pins
-  for (uint8_t e=0;e<4;e++){
+  // 1. Setup encoder pins FIRST
+  for (uint8_t e=0; e<4; e++){
     pinMode(ENC_A[e], INPUT_PULLUP);
     pinMode(ENC_B[e], INPUT_PULLUP);
     pinMode(ENC_SW[e], INPUT_PULLUP);
   }
-  // start/stop button
+  // 2. Setup button pins
+  for (uint8_t i=0; i<NUM_STEPS; i++){
+    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+  }
+  pinMode(CHANNEL_BTN_PIN, INPUT_PULLUP);
   pinMode(START_STOP_PIN, INPUT_PULLUP);
-  // MIDI RX handled by hardware Serial8; no manual pin/interrupt here
-  // CV/Gate pins removed; using MIDI only
-  // debug LED
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
+
+  // 3. Handle LED_BUILTIN conflict (Pin 13)
+  bool isPin13Used = false;
+  for (uint8_t e=0; e<4; e++) if (ENC_SW[e] == 13) isPin13Used = true;
+
+  if (!isPin13Used) {
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+  } else {
+    // Ensure Pin 13 is strictly an input if used by an encoder
+    pinMode(13, INPUT_PULLUP);
+    Serial.println("Pin 13 LED disabled to support Encoder 3 Switch.");
+  }
+
   debugLedFlag = false;
   debugLedOffTime = 0;
 }
@@ -225,9 +232,11 @@ void SimpleSequencer::loop(){
   readButtons();
   readEncoders();
   // handle start/stop button debounce (Arduino-style)
+  // NOTE: Start/Stop now requires BOTH the FN and FILL buttons held together (pins 27 + 28)
   unsigned long now = millis();
 
-  bool startReading = (digitalRead(START_STOP_PIN) == LOW);
+  // require both START_STOP_PIN and CHANNEL_BTN_PIN to be held for a transport toggle
+  bool startReading = (digitalRead(START_STOP_PIN) == LOW && digitalRead(CHANNEL_BTN_PIN) == LOW);
   if (startReading != startLastReading){
     startLastDebounceTime = now;
   }
@@ -456,8 +465,9 @@ void SimpleSequencer::readEncoders(){
               midiClockTimer.update(interval);
             }
           }
-        } else if (e == 1){ // encoder 2: PITCH
+        } else if (e == 1){ // encoder 2: PITCH or scale-shift when Euclid active
           if (heldStep >= 0){
+            // Per-step fine adjustment (P-Lock)
             pendingToggle[heldStep] = false;
             steps[selectedChannel][heldStep] = true;
             if (pitch[selectedChannel][heldStep] == 255) {
@@ -466,9 +476,14 @@ void SimpleSequencer::readEncoders(){
             int note = (int)pitch[selectedChannel][heldStep] + encSteps;
             pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
           } else {
-            if (encSteps != 0){
-              int note = (int)channelPitch[selectedChannel] + encSteps;
-              channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
+            // If Euclidean engine is active, rotate should shift the whole scale
+            if (euclidEnabled[selectedChannel]){
+              shiftEuclidNotes(selectedChannel, encSteps);
+            } else {
+              if (encSteps != 0){
+                int note = (int)channelPitch[selectedChannel] + encSteps;
+                channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
+              }
             }
           }
         } else if (e == 2){ // encoder 3: NOTE LENGTH
@@ -525,26 +540,50 @@ void SimpleSequencer::readEncoders(){
         lastSwState[e] = sw;
         if (sw){
           // PRESSED
-          if (e == 0) { // ENCODER 1 SWITCH: Save State
-            saveState();
+          if (e == 0) {
+            // Encoder 1 Click: Fn+Click = Save, Click = enable retrig/ratchet gearbox when p-locking
+            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+            if (chanModHeld) {
+              saveState();
+            } else {
+              if (heldStep >= 0) {
+                uint8_t &r = stepRatchet[selectedChannel][heldStep];
+                r = (r == 0) ? 1 : 0; // toggle simple ratchet enable
+                pendingToggle[heldStep] = false;
+                steps[selectedChannel][heldStep] = true;
+              }
+            }
           }
-          else if (e == 1) { // ENCODER 2 SWITCH (Fill Toggle)
+          else if (e == 1) {
+            // Encoder 2 Click: Cycle scale modes only when Euclid is enabled
+            if (euclidEnabled[selectedChannel]){
+              euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + 1) % 4;
+              randomizeEuclidMelody(selectedChannel);
+            } else {
+              // Ensure scale mode is off and fall back to channel note
+              euclidScaleMode[selectedChannel] = 0;
+              for (uint8_t s=0; s<NUM_STEPS; s++) pitch[selectedChannel][s] = 255;
+            }
+          }
+          else if (e == 2) {
+            // Encoder 3 Click: Toggle Fill on held step (moved from E2)
             if (heldStep >= 0) {
-              // Toggle Fill, force step ON, cancel release toggle
               fillStep[selectedChannel][heldStep] = !fillStep[selectedChannel][heldStep];
               steps[selectedChannel][heldStep] = true;
               pendingToggle[heldStep] = false;
             }
           }
           else if (e == 3){
-            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
-            if (chanModHeld && euclidEnabled[selectedChannel]) {
-              // Cycle through 0=OFF, 1=LOC, 2=DIM, 3=ATO
-              euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + 1) % 4;
-              randomizeEuclidMelody(selectedChannel);
+            // Encoder 4 Click: toggle euclid engine on/off
+            euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
+            if (euclidEnabled[selectedChannel]){
+              // If enabling and a scale is selected, regenerate melody
+              if (euclidScaleMode[selectedChannel] != 0) randomizeEuclidMelody(selectedChannel);
+              updateEuclid(selectedChannel);
             } else {
-              // Normal Click: Toggle Euclidean on/off
-              euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
+              // Disabling Euclid: clear scale mode and revert per-step pitches to channel note
+              euclidScaleMode[selectedChannel] = 0;
+              for (uint8_t s=0; s<NUM_STEPS; s++) pitch[selectedChannel][s] = 255;
               updateEuclid(selectedChannel);
             }
           }
@@ -650,6 +689,62 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     int note = root + interval - (random(0, 2) * 12); 
     pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
   }
+}
+
+// Shift all euclid-generated notes up/down by "steps" scale degrees for channel ch.
+void SimpleSequencer::shiftEuclidNotes(uint8_t ch, int steps){
+  uint8_t mode = euclidScaleMode[ch];
+  const uint8_t *scale = nullptr;
+  uint8_t len = 12; // default chromatic
+  static const uint8_t locrian[] = {0,1,3,5,6,8,10};
+  static const uint8_t diminished[] = {0,1,3,4,6,7,9,10};
+  static const uint8_t atonal[] = {0,1,2,3,4,5,6,7,8,9,10,11};
+
+  if (mode == 1){ scale = locrian; len = sizeof(locrian)/sizeof(locrian[0]); }
+  else if (mode == 2){ scale = diminished; len = sizeof(diminished)/sizeof(diminished[0]); }
+  else { scale = atonal; len = sizeof(atonal)/sizeof(atonal[0]); }
+
+  // Helper to convert a note to a global index (scale-step count)
+  auto noteToGlobalIndex = [&](int note)->int{
+    int bestGlobal = (note/12) * len; // fallback
+    int bestDist = 1000;
+    int baseOct = note / 12;
+    for (int oct = baseOct-2; oct <= baseOct+2; oct++){
+      for (int i=0;i<(int)len;i++){
+        int cand = oct*12 + scale[i];
+        if (cand < 0 || cand > 127) continue;
+        int d = abs(cand - note);
+        if (d < bestDist){ bestDist = d; bestGlobal = oct * len + i; }
+      }
+    }
+    return bestGlobal;
+  };
+
+  // Helper to convert global index back to MIDI note
+  auto globalIndexToNote = [&](int gidx)->int{
+    int oct = gidx / len;
+    int idx = gidx % len;
+    if (idx < 0) { idx += len; oct -= 1; }
+    int cand = oct*12 + scale[idx];
+    if (cand < 0) cand = 0;
+    if (cand > 127) cand = 127;
+    return cand;
+  };
+
+  // Shift per-step pitches if present
+  for (uint8_t s=0; s<NUM_STEPS; s++){
+    if (pitch[ch][s] == 255) continue;
+    int g = noteToGlobalIndex((int)pitch[ch][s]);
+    int ng = g + steps;
+    int nn = globalIndexToNote(ng);
+    pitch[ch][s] = (uint8_t)nn;
+  }
+
+  // Shift channelPitch as well
+  int groot = noteToGlobalIndex((int)channelPitch[ch]);
+  int ngroot = groot + steps;
+  int nroot = globalIndexToNote(ngroot);
+  channelPitch[ch] = (uint8_t)nroot;
 }
 
 
