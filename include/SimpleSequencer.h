@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "SeqConfig.h"
+#include <EEPROM.h>
 // OLED
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -97,6 +98,24 @@ class SimpleSequencer {
     void updateEuclid(uint8_t ch);
     void readEncoders();
     void triggerChannel(uint8_t ch);
+    // --- EEPROM SAVE SYSTEM ---
+    struct SaveData {
+      uint32_t magicNumber;
+      uint32_t savedBpm;
+      uint8_t savedNoteLenIdx;
+      uint8_t savedChannelPitch[NUM_CHANNELS];
+      bool savedMuted[NUM_CHANNELS];
+      bool savedEuclidEnabled[NUM_CHANNELS];
+      uint8_t savedPulses[NUM_CHANNELS];
+      uint8_t savedEuclidOffset[NUM_CHANNELS];
+      bool savedSteps[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedPitch[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedNoteLen[NUM_CHANNELS][NUM_STEPS];
+      bool savedFillStep[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedStepRatchet[NUM_CHANNELS][NUM_STEPS];
+    };
+    void saveState();
+    void loadState();
 };
 
 #endif

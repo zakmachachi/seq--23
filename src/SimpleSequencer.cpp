@@ -151,6 +151,9 @@ void SimpleSequencer::begin(){
   // start the 1ms engine timer which will process MIDI RX, note-offs and step advancement
   engineTimer.begin([](){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->runEngine(); }, 1000);
 
+  // attempt to auto-load saved state from EEPROM
+  loadState();
+
 }
 
 void SimpleSequencer::midiSendByte(uint8_t b){
@@ -512,7 +515,10 @@ void SimpleSequencer::readEncoders(){
         lastSwState[e] = sw;
         if (sw){
           // PRESSED
-          if (e == 1) { // ENCODER 2 SWITCH (Fill Toggle)
+          if (e == 0) { // ENCODER 1 SWITCH: Save State
+            saveState();
+          }
+          else if (e == 1) { // ENCODER 2 SWITCH (Fill Toggle)
             if (heldStep >= 0) {
               // Toggle Fill, force step ON, cancel release toggle
               fillStep[selectedChannel][heldStep] = !fillStep[selectedChannel][heldStep];
@@ -530,6 +536,71 @@ void SimpleSequencer::readEncoders(){
     }
     // Record raw state for next loop
     lastRawSwState[e] = sw;
+  }
+}
+
+
+void SimpleSequencer::saveState() {
+  SaveData data;
+  data.magicNumber = 87654321; // Unique signature
+  data.savedBpm = bpm;
+  data.savedNoteLenIdx = noteLenIdx;
+  
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+    data.savedChannelPitch[c] = channelPitch[c];
+    data.savedMuted[c] = muted[c];
+    data.savedEuclidEnabled[c] = euclidEnabled[c];
+    data.savedPulses[c] = pulses[c];
+    data.savedEuclidOffset[c] = euclidOffset[c];
+    
+    for (uint8_t s = 0; s < NUM_STEPS; s++) {
+      data.savedSteps[c][s] = steps[c][s];
+      data.savedPitch[c][s] = pitch[c][s];
+      data.savedNoteLen[c][s] = noteLen[c][s];
+      data.savedFillStep[c][s] = fillStep[c][s];
+      data.savedStepRatchet[c][s] = stepRatchet[c][s];
+    }
+  }
+  EEPROM.put(0, data); // Write to address 0
+
+  // Flash the OLED
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(24, 24);
+  display.print("SAVED!");
+  display.display();
+  delay(600);
+}
+
+void SimpleSequencer::loadState() {
+  SaveData data;
+  EEPROM.get(0, data);
+
+  if (data.magicNumber == 87654321) {
+    bpm = data.savedBpm;
+    noteLenIdx = data.savedNoteLenIdx;
+
+    for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+      channelPitch[c] = data.savedChannelPitch[c];
+      muted[c] = data.savedMuted[c];
+      euclidEnabled[c] = data.savedEuclidEnabled[c];
+      pulses[c] = data.savedPulses[c];
+      euclidOffset[c] = data.savedEuclidOffset[c];
+      
+      for (uint8_t s = 0; s < NUM_STEPS; s++) {
+        steps[c][s] = data.savedSteps[c][s];
+        pitch[c][s] = data.savedPitch[c][s];
+        noteLen[c][s] = data.savedNoteLen[c][s];
+        fillStep[c][s] = data.savedFillStep[c][s];
+        stepRatchet[c][s] = data.savedStepRatchet[c][s];
+      }
+      // Regenerate Euclidean patterns if enabled
+      if (euclidEnabled[c]) updateEuclid(c);
+    }
+    Serial.println("State loaded from EEPROM.");
+  } else {
+    Serial.println("No saved state found. Booting blank.");
   }
 }
 
