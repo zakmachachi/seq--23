@@ -26,4 +26,7 @@ static const uint8_t MIDI_RX_PIN = 34;
 // Start/Stop button pin
 static const uint8_t START_STOP_PIN = 27;
 
+// LED data pin for chained per-step LEDs (single DIN chain)
+static const uint8_t LED_DATA_PIN = 16;
+
 #endif

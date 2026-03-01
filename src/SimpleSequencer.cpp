@@ -55,7 +55,8 @@ static float getDivisionFactor(SimpleSequencer::Division d){
 }
 
 SimpleSequencer::SimpleSequencer()
-  : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0)
+  : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0),
+    ledStrip(NUM_STEPS, 17, NEO_GRB + NEO_KHZ800)
 {
   // Default base pitch per channel
 
@@ -140,7 +141,12 @@ void SimpleSequencer::begin(){
 
   // initialize display
   display.begin(0x3C);
-  displayTest();
+  // Initialize physical LEDs
+  ledStrip.begin();
+  ledStrip.setBrightness(100);
+  ledStrip.show();
+  // Run unified boot animation (LEDs + OLED)
+  bootAnimation();
 
   // Initialize hardware Serial8 for MIDI at 31250 baud
   Serial8.begin(31250);
@@ -156,6 +162,8 @@ void SimpleSequencer::begin(){
   loadState();
 
 }
+
+// Removed helper setStepLED and refreshStepLEDs; using updateLEDs() below.
 
 void SimpleSequencer::midiSendByte(uint8_t b){
   // Use hardware Serial8 for MIDI output (31250 baud)
@@ -299,6 +307,7 @@ void SimpleSequencer::loop(){
   // Time-critical MIDI processing (advancing steps/note-offs/MIDI RX) now runs in the engine timer.
   // update display at configured refresh interval
   if (millis() - lastDisplayMillis > displayRefreshMs){
+    updateLEDs();
     drawDisplay();
     lastDisplayMillis = millis();
   }
@@ -988,6 +997,8 @@ void SimpleSequencer::drawDisplay(){
   }
 
   display.display();
+  // Update LED strip to reflect current step/active steps. Safe to call from main loop.
+  updateLEDs();
 }
 
 void SimpleSequencer::runSwitchTest(uint32_t ms){
@@ -1078,25 +1089,143 @@ void SimpleSequencer::runMidiPinMonitor(uint32_t ms){
 
 // MIDI input handlers removed — processing consolidated in runEngine() to avoid concurrent Serial reads.
 
-void SimpleSequencer::displayTest(){
-  // flash full screen a few times and show text
-  for (int i=0;i<3;i++){
-    display.clearDisplay();
-    display.fillRect(0,0,128,64,SH110X_WHITE);
-    display.display();
-    delay(200);
-    display.clearDisplay();
-    display.display();
-    delay(200);
-  }
-  // show test text
+void SimpleSequencer::bootAnimation() {
   display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(10,20);
-  display.print("OLED");
-  display.setCursor(10,42);
-  display.print("TEST");
-  display.display();
+  ledStrip.clear();
+  randomSeed(analogRead(0));
+
+  // --- LED DNA ---
+  bool useRed = (random(0, 2) == 0);
+  const uint8_t spread[4][4] = {
+    {3, 4, 11, 12}, // Zone 0: Center
+    {2, 5, 10, 13}, // Zone 1: Mid-Inner
+    {1, 6, 9, 14},  // Zone 2: Mid-Outer
+    {0, 7, 8, 15}   // Zone 3: Outer Edges
+  };
+
+  // --- OLED DNA ---
+  int cx = 64, cy = 32;
+  int branches = random(2, 6);
+  float angleStep = random(5, 20) / 100.0f;
+  float radiusStep = random(10, 50) / 100.0f;
+  float fractalTwist = random(10, 50) / 10.0f;
+  float angle = 0, radius = 0;
+
+  // MASTER LOOP: 150 Frames
+  for (int frame = 0; frame < 150; frame++) {
+    
+    // 1. Calculate the sharp sweeping peak
+    // Starts at 0.0 (Center), hits 3.0 (Edges) at frame 75, returns to 0.0 at frame 150
+    float peak = 1.5f - 1.5f * cos(frame * (TWO_PI / 150.0f)); 
+    
+    // Calculate a smooth fade-out to 0 during the final 30 frames
+    float globalFade = 1.0f;
+    if (frame > 120) {
+      globalFade = 1.0f - ((frame - 120) / 30.0f);
+    }
+    
+    for (int d = 0; d < 4; d++) {
+      // Calculate distance from the hot core of the pulse
+      float dist = abs(peak - (float)d);
+      
+      // Rapidly decaying brightness using a cubic curve (x^3)
+      float intensity = constrain(1.0f - (dist * 0.7f), 0.0f, 1.0f);
+      
+      // Apply both the pulse intensity AND the end-of-sequence fade out
+      int val = (int)(255.0f * intensity * intensity * intensity * globalFade); 
+      
+      uint8_t r = useRed ? val : (val * 180) / 255;
+      uint8_t b = useRed ? 0 : val;
+      
+      for (int i = 0; i < 4; i++) {
+        ledStrip.setPixelColor(spread[d][i], ledStrip.Color(r, 0, b));
+      }
+    }
+    ledStrip.show();
+    // 2. Calculate and push OLED fractal geometry (2 iterations per frame)
+    for (int iter = 0; iter < 2; iter++) {
+      angle += angleStep;
+      radius += radiusStep;
+      for (int b_idx = 0; b_idx < branches; b_idx++) {
+        float armAngle = angle + (b_idx * (TWO_PI / branches));
+        int x = cx + (radius * cos(armAngle));
+        int y = cy + (radius * sin(armAngle));
+        int fx = x + ((radius * 0.3f) * cos(armAngle * fractalTwist));
+        int fy = y + ((radius * 0.3f) * sin(armAngle * fractalTwist));
+        display.drawPixel(x, y, SH110X_WHITE);
+        display.drawPixel(fx, fy, SH110X_WHITE);
+      }
+    }
+    // Update screen every 2 frames to prevent I2C bottlenecking
+    if (frame % 2 == 0) display.display();
+
+    delay(12); // Master framerate clock (~80 FPS for a crisp 1.8s boot)
+  }
+
+  // --- FINALE ---
+  // (Boot text removed per user request)
   delay(800);
+
+  // Clear everything for the sequencer
+  display.clearDisplay();
+  ledStrip.clear();
+  ledStrip.show();
+  // show boxed final text for 1 second (includes date and version)
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  // Draw a slightly larger box to fit multiple lines
+  display.setCursor(44, 20);
+  display.print("seq-23");
+  display.setCursor(28, 30);
+  display.print("made by Bob and Zak");
+  display.setCursor(28, 40);
+  display.print("01 Mar 2026");
+  display.setCursor(28, 50);
+  display.print("v. prototype");
+  display.display();
+  delay(1000);
+
+  // final clear
+  display.clearDisplay();
+  display.display();
+}
+
+// LED update: new color mapping (playhead purple, fills blue, triggers red)
+void SimpleSequencer::updateLEDs() {
+  // 1. LIVE PERFORMANCE MODE: Global Blue Strobe
+  if (fillModeActive) {
+    // Create a fast 40ms strobe effect using the system clock
+    bool flashState = (millis() / 40) % 2 == 0; 
+    
+    for (uint8_t i = 0; i < NUM_STEPS; i++) {
+      if (flashState) {
+        ledStrip.setPixelColor(i, ledStrip.Color(255, 0, 0)); // Bright Red
+      } else {
+        ledStrip.setPixelColor(i, ledStrip.Color(0, 0, 0));    // Blackout
+      }
+    }
+    ledStrip.show();
+    return; // Exit early to skip normal drawing
+  }
+  // 2. NORMAL MODE: Playhead and Triggers
+  for (uint8_t i = 0; i < NUM_STEPS; i++) {
+    bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
+    uint8_t r = 0, g = 0, b = 0;
+
+    if (i == currentStep) {
+      // PLAYHEAD: Purple
+      r = 180; g = 0; b = 255; 
+    } else if (stepActive) {
+      // ACTIVE STEPS
+      if (fillStep[selectedChannel][i]) {
+        // FILL STEP: Blue
+        r = 0; g = 50; b = 255;   
+      } else {
+        // NORMAL TRIGGER: Red
+        r = 255; g = 0; b = 0;   
+      }
+    }
+    ledStrip.setPixelColor(i, ledStrip.Color(r, g, b));
+  }
+  ledStrip.show();
 }

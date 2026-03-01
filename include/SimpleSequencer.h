@@ -1,6 +1,7 @@
 #ifndef SIMPLESEQUENCER_H
 #define SIMPLESEQUENCER_H
 
+#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include "SeqConfig.h"
 #include <EEPROM.h>
@@ -76,10 +77,13 @@ class SimpleSequencer {
     uint8_t ratchetPitch[NUM_CHANNELS];
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
+    // --- HARDWARE LED GRID ---
+    Adafruit_NeoPixel ledStrip;
+    void updateLEDs();
     uint32_t lastDisplayMillis;
     const uint32_t displayRefreshMs = 16; // display refresh interval in ms (~60Hz)
     void drawDisplay();
-    void displayTest();
+    void bootAnimation();
 
     // button debounce parameters (Arduino example)
     const unsigned long debounceMs = 10;
