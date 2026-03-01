@@ -345,8 +345,8 @@ void SimpleSequencer::readButtons(){
           if (chanModHeld && i < NUM_CHANNELS) {
             selectedChannel = i;
           }
-          // 2. MUTE INTERCEPT: Start/Stop + Buttons 1-4
-          else if (startState && i < NUM_CHANNELS) {
+          // 2. MUTE INTERCEPT: START (pin 27) + Buttons 1-4 => mute/unmute channel
+          else if ((digitalRead(START_STOP_PIN) == LOW) && i < NUM_CHANNELS) {
             muted[i] = !muted[i];
             startStopModifierFlag = true;
           }
@@ -1087,7 +1087,7 @@ void SimpleSequencer::drawDisplay(){
     display.setCursor(2, 55);
     display.print("H:"); display.print(pulses[selectedChannel]);
     display.print(" S:"); display.print(euclidOffset[selectedChannel]);
-    const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};
+    const char* scaleNames[] = {"OFF", "LOC", "AUX", "ATO"};
     display.print(" SCL:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
   }
 
