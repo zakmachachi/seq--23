@@ -67,8 +67,13 @@ class SimpleSequencer {
     uint32_t absoluteTickCounter = 0;
     // --- FILL / PERFORMANCE MODES ---
     bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
-    bool fillStep[NUM_CHANNELS][NUM_STEPS]; // per-step Fill memory
+    // per-step Fill memory: 0 = normal, 1 = fill (plays only when Fill held), 2 = anti-fill (never plays)
+    uint8_t fillState[NUM_CHANNELS][NUM_STEPS];
     uint8_t euclidScaleMode[NUM_CHANNELS];
+    // UI focus helpers
+    uint8_t focusEncoder = 0;        // 0 = none, 1-4 = encoder focused
+    uint32_t lastEncoderMoveTime = 0;
+    const uint32_t focusTimeout = 1500; // ms to keep focus visible
 
     // --- RATCHET / RETRIG ENGINE ---
     uint8_t ratchetIntervalTicks[NUM_CHANNELS];
@@ -83,6 +88,7 @@ class SimpleSequencer {
     uint32_t lastDisplayMillis;
     const uint32_t displayRefreshMs = 16; // display refresh interval in ms (~60Hz)
     void drawDisplay();
+    void drawDebugGrid();
     void bootAnimation();
 
     // button debounce parameters (Arduino example)
@@ -119,7 +125,7 @@ class SimpleSequencer {
       bool savedSteps[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedPitch[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedNoteLen[NUM_CHANNELS][NUM_STEPS];
-      bool savedFillStep[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedFillStep[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedStepRatchet[NUM_CHANNELS][NUM_STEPS];
     };
     void saveState();

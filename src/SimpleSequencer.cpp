@@ -68,7 +68,7 @@ SimpleSequencer::SimpleSequencer()
     euclidScaleMode[c] = 0;
     muted[c]=false; // <-- All channels start unmuted
     noteOffTick[c]=0;
-    for (uint8_t s=0; s<NUM_STEPS; s++) fillStep[c][s] = false;
+    for (uint8_t s=0; s<NUM_STEPS; s++) fillState[c][s] = 0;
     for(uint8_t s=0;s<NUM_STEPS;s++){
       steps[c][s]=false;
       euclidPattern[c][s]=false;
@@ -295,6 +295,13 @@ void SimpleSequencer::loop(){
       stepDivision = (Division)((stepDivision + 1) % 5);
       Serial.print("Division: "); Serial.println(divisionNames[(int)stepDivision]);
     }
+    if (c == 'c' || c == 'C'){
+      // Clear saved EEPROM state (one-time clear)
+      SaveData z = {};
+      z.magicNumber = 0;
+      EEPROM.put(0, z);
+      Serial.println("Saved state cleared (EEPROM).");
+    }
     if (c == 'p' || c == 'P'){
       // play test note C3 on channel 0 immediately
       Serial.println("Play C3 (ch1)");
@@ -354,16 +361,19 @@ void SimpleSequencer::readButtons(){
           else {
             pendingToggle[i] = true;
             heldStep = i;
+            // Ensure UI updates to show parameter lock overlay
+            lastEncoderMoveTime = millis();
+            focusEncoder = 0; // clear encoder focus while in p-lock
           }
         } else { // released
           // perform the toggle now (on release) if it was pending
           if (pendingToggle[i]){
             steps[selectedChannel][i] = !steps[selectedChannel][i];
             // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
-            if (!steps[selectedChannel][i]) {
+              if (!steps[selectedChannel][i]) {
               noteLen[selectedChannel][i] = 255;
               pitch[selectedChannel][i] = 255;
-              fillStep[selectedChannel][i] = false;
+              fillState[selectedChannel][i] = 0;
               stepRatchet[selectedChannel][i] = 0;
             }
             Serial.print("Ch"); Serial.print(selectedChannel+1);
@@ -440,6 +450,9 @@ void SimpleSequencer::readEncoders(){
       }
 
       if (encSteps != 0){
+        // show encoder focus when the encoder is actively being used
+        focusEncoder = e + 1;
+        lastEncoderMoveTime = millis();
         if (e == 0){ // Encoder 1: BPM or Ratchet when a step is held
           if (heldStep >= 0){
             // RATCHET GEARBOX
@@ -534,11 +547,14 @@ void SimpleSequencer::readEncoders(){
     if (sw != lastRawSwState[e]){
       lastSwDebounce[e] = now;
     }
-    
+
     if ((now - lastSwDebounce[e]) > debounceMs){
       if (sw != lastSwState[e]){
         lastSwState[e] = sw;
         if (sw){
+          // encoder switch pressed — show focus
+          focusEncoder = e + 1;
+          lastEncoderMoveTime = millis();
           // PRESSED
           if (e == 0) {
             // Encoder 1 Click: Fn+Click = Save, Click = enable retrig/ratchet gearbox when p-locking
@@ -568,7 +584,9 @@ void SimpleSequencer::readEncoders(){
           else if (e == 2) {
             // Encoder 3 Click: Toggle Fill on held step (moved from E2)
             if (heldStep >= 0) {
-              fillStep[selectedChannel][heldStep] = !fillStep[selectedChannel][heldStep];
+              // Cycle: 0 -> 1 (fill) -> 2 (anti-fill) -> 0
+              uint8_t &fs = fillState[selectedChannel][heldStep];
+              fs = (fs + 1) % 3;
               steps[selectedChannel][heldStep] = true;
               pendingToggle[heldStep] = false;
             }
@@ -614,11 +632,12 @@ void SimpleSequencer::saveState() {
       data.savedSteps[c][s] = steps[c][s];
       data.savedPitch[c][s] = pitch[c][s];
       data.savedNoteLen[c][s] = noteLen[c][s];
-      data.savedFillStep[c][s] = fillStep[c][s];
+      data.savedFillStep[c][s] = fillState[c][s];
       data.savedStepRatchet[c][s] = stepRatchet[c][s];
     }
   }
-  EEPROM.put(0, data); // Write to address 0
+  // Write to EEPROM
+  EEPROM.put(0, data);
 
   // Flash the OLED
   display.clearDisplay();
@@ -650,7 +669,7 @@ void SimpleSequencer::loadState() {
         steps[c][s] = data.savedSteps[c][s];
         pitch[c][s] = data.savedPitch[c][s];
         noteLen[c][s] = data.savedNoteLen[c][s];
-        fillStep[c][s] = data.savedFillStep[c][s];
+        fillState[c][s] = data.savedFillStep[c][s];
         stepRatchet[c][s] = data.savedStepRatchet[c][s];
       }
       // Regenerate Euclidean patterns if enabled
@@ -941,9 +960,13 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   // 2. THE NORMAL MUTE BLOCK
   if (muted[ch]) return;
 
-  // 3. THE FILL CONDITION BLOCK (This was missing!)
-  // If this step is a Fill Step, but the Fill button (Pin 28) is NOT held, abort!
-  if (fillStep[ch][currentStep] && !fillModeActive) return;
+  // 3. THE FILL CONDITION BLOCK (tri-state handling)
+  // fillState: 0=normal, 1=fill (only when fillModeActive), 2=anti-fill (muted DURING fill)
+  uint8_t fstate = fillState[ch][currentStep];
+  // Fill-only: only play when modifier is active
+  if (fstate == 1 && !fillModeActive) return;
+  // Anti-Fill: play normally, but mute while the Fill modifier is held
+  if (fstate == 2 && fillModeActive) return;
 
   // Fire the new Note On
   uint8_t p = pitch[ch][currentStep];
@@ -987,113 +1010,253 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 void SimpleSequencer::drawDisplay(){
   display.clearDisplay();
 
-  // 1. TOP INFO BAR
-  display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 0);
-  display.print("BPM:"); display.print(bpm);
-  display.setCursor(42, 0);
-  display.print("C:"); display.print(selectedChannel + 1);
+  uint32_t now = millis();
+  bool focused = (focusEncoder != 0) && ((now - lastEncoderMoveTime) < focusTimeout);
 
-  // Draw Current Channel Base Note
   const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-  uint8_t cp = channelPitch[selectedChannel];
-  display.setCursor(60, 0);
-  display.print("N:"); display.print(noteNames[cp % 12]); display.print((cp / 12) - 1);
+  const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};
+  const char* ratchetNames[] = {"OFF", "1/16", "1/24", "1/32", "1/48", "1/96"};
 
-  // Draw Mute Indicators
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
-    if (muted[c]) display.setTextColor(SH110X_BLACK, SH110X_WHITE);
-    else display.setTextColor(SH110X_WHITE, SH110X_BLACK);
-    display.setCursor(92 + (c * 9), 0);
-    display.print(c + 1);
+  // ── DEBUG MODE: Hold both FN + START to show full grid ─────────
+  bool debugHold = (digitalRead(CHANNEL_BTN_PIN) == LOW) && (digitalRead(START_STOP_PIN) == LOW);
+  if (debugHold){
+    drawDebugGrid();
+    // Thin status line at top
+    display.fillRect(0, 0, 128, 10, SH110X_BLACK);
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(2, 1);
+    display.print("DEBUG  CH"); display.print(selectedChannel + 1);
+    display.setCursor(80, 1);
+    display.print("BPM "); display.print(bpm);
+    display.display();
+    updateLEDs();
+    return;
+  }
+
+  // Global Fill indicator (small vertical bar at top-right)
+  if (fillModeActive) {
+    // Draw a compact white bar to indicate Fill is active without taking space
+    display.fillRect(120, 2, 6, 10, SH110X_WHITE);
+  }
+
+  // ── FOCUSED ENCODER VIEWS ─────────────────────────────────────
+  if (focused){
+    uint8_t fe = focusEncoder - 1;
+
+    // ── ENCODER 1 ────────────────────────────────────────────────
+    if (fe == 0){
+      if (heldStep >= 0){
+        // P-LOCK: Full-screen retrig rate
+        uint8_t r = stepRatchet[selectedChannel][heldStep];
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("RETRIG");
+        display.setTextSize(1);
+        display.setCursor(90, 6);
+        display.print("STP "); display.print(heldStep + 1);
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(ratchetNames[r]);
+      } else {
+        // BPM — big
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("BPM");
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(bpm);
+      }
+      display.display();
+      updateLEDs();
+      return;
+    }
+
+    // ── ENCODER 2 ────────────────────────────────────────────────
+    if (fe == 1){
+      if (heldStep >= 0){
+        // P-LOCK: Per-step pitch
+        uint8_t p = pitch[selectedChannel][heldStep];
+        if (p == 255) p = channelPitch[selectedChannel];
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("NOTE");
+        display.setTextSize(1);
+        display.setCursor(90, 6);
+        display.print("STP "); display.print(heldStep + 1);
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(noteNames[p % 12]);
+        display.print((p / 12) - 1);
+      } else if (euclidEnabled[selectedChannel]){
+        // Euclid scale shift — show grid + shift info
+        drawDebugGrid();
+        display.fillRect(0, 0, 128, 12, SH110X_BLACK);
+        display.setTextSize(1);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(2, 2);
+        display.print("SHIFT ");
+        display.print(noteNames[channelPitch[selectedChannel] % 12]);
+        display.print((channelPitch[selectedChannel] / 12) - 1);
+        display.setCursor(80, 2);
+        display.print("SCL:");
+        display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
+      } else {
+        // Channel note — big
+        uint8_t cp = channelPitch[selectedChannel];
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("NOTE");
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(noteNames[cp % 12]);
+        display.print((cp / 12) - 1);
+      }
+      display.display();
+      updateLEDs();
+      return;
+    }
+
+    // ── ENCODER 3 ────────────────────────────────────────────────
+    if (fe == 2){
+      if (heldStep >= 0){
+        // P-LOCK: Per-step gate length
+        uint8_t lenIdx = noteLen[selectedChannel][heldStep];
+        if (lenIdx == 255) lenIdx = noteLenIdx;
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("GATE");
+        display.setTextSize(1);
+        display.setCursor(90, 6);
+        display.print("STP "); display.print(heldStep + 1);
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(noteLenNames[lenIdx]);
+      } else {
+        // Global gate length — big
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("GATE");
+        display.setTextSize(4);
+        display.setCursor(4, 26);
+        display.print(noteLenNames[noteLenIdx]);
+      }
+      display.display();
+      updateLEDs();
+      return;
+    }
+
+    // ── ENCODER 4 ────────────────────────────────────────────────
+    if (fe == 3){
+      if (euclidEnabled[selectedChannel]){
+        // Euclid active — show grid + params
+        drawDebugGrid();
+        display.fillRect(0, 0, 128, 12, SH110X_BLACK);
+        display.setTextSize(1);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(2, 2);
+        display.print("EUCLID");
+        display.setCursor(48, 2);
+        display.print("H:"); display.print(pulses[selectedChannel]);
+        display.setCursor(80, 2);
+        display.print("O:"); display.print(euclidOffset[selectedChannel]);
+      } else {
+        // Euclid off
+        display.setTextSize(2);
+        display.setTextColor(SH110X_WHITE);
+        display.setCursor(4, 2);
+        display.print("EUCLID");
+        display.setTextSize(3);
+        display.setCursor(4, 28);
+        display.print("OFF");
+      }
+      display.display();
+      updateLEDs();
+      return;
+    }
+  }
+
+  // ── DEFAULT OVERVIEW ──────────────────────────────────────────
+  display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+
+  // Row 1: Channel indicator boxes (mute state)
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 32;
+    if (c == selectedChannel){
+      display.fillRect(bx, 0, 30, 11, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK, SH110X_WHITE);
+    } else {
+      if (muted[c]){
+        display.drawRect(bx, 0, 30, 11, SH110X_WHITE);
+        display.drawLine(bx, 5, bx + 29, 5, SH110X_WHITE);
+      } else {
+        display.drawRect(bx, 0, 30, 11, SH110X_WHITE);
+      }
+      display.setTextColor(SH110X_WHITE, SH110X_BLACK);
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 5, 2);
+    display.print("CH"); display.print(c + 1);
   }
   display.setTextColor(SH110X_WHITE, SH110X_BLACK);
 
-  // Separator Line
-  display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+  // Row 2: Channel note + note length (note length slightly smaller)
+  uint8_t cp = channelPitch[selectedChannel];
+  display.setTextSize(3);
+  display.setCursor(4, 16);
+  display.print(noteNames[cp % 12]); display.print((cp / 12) - 1);
+  // Note length: reduce font to avoid awkward overflow
+  display.setTextSize(2);
+  display.setCursor(76, 18);
+  display.print(noteLenNames[noteLenIdx]);
 
-  // 2. SEQUENCER GRID (2 rows of 8 for the selected channel)
-  const int stepW = 12; // Big chunky boxes
-  const int stepH = 12;
-  const int startX = 6;
-  const int startY = 16;
-  const int spacingX = 3;
-  const int spacingY = 4;
+  // Row 3: Euclid status (BPM tucked bottom-right)
+  display.setTextSize(1);
+  // Place BPM a bit more left to avoid wrapping/overlap
+  display.setCursor(84, 44);
+  display.print("BPM "); display.print(bpm);
 
-  for (uint8_t i = 0; i < NUM_STEPS; i++) {
-    int col = i % 8;
-    int row = i / 8;
-    int x = startX + col * (stepW + spacingX);
-    int y = startY + row * (stepH + spacingY);
-
-    // Draw filled box if step is active (supports Euclidean mode)
-    bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
-    if (stepActive) {
-      display.fillRect(x, y, stepW, stepH, SH110X_WHITE);
-      // THE FIX: Draw a distinct "Hollow Core" if it is a Fill Step
-      if (fillStep[selectedChannel][i]) {
-        display.fillRect(x + 3, y + 3, stepW - 6, stepH - 6, SH110X_BLACK);
-      }
-    } else {
-      display.drawRect(x, y, stepW, stepH, SH110X_WHITE);
-    }
-
-    // Draw a thick playhead indicator underneath the current step
-    if (i == currentStep) {
-      display.drawFastHLine(x, y + stepH + 2, stepW, SH110X_WHITE);
-      display.drawFastHLine(x, y + stepH + 3, stepW, SH110X_WHITE);
-    }
+  if (euclidEnabled[selectedChannel]){
+    display.setCursor(52, 44);
+    display.print("EUC H:"); display.print(pulses[selectedChannel]);
+    display.print(" O:"); display.print(euclidOffset[selectedChannel]);
   }
 
-  // 3. PARAMETER LOCK UI OVERLAY
-  if (heldStep >= 0) {
-    // Black out a larger space at the bottom for the edit menu (two lines)
-    display.fillRect(0, 42, 128, 22, SH110X_BLACK);
-    display.drawLine(0, 41, 128, 41, SH110X_WHITE); // Separator
-
-    uint8_t p = pitch[selectedChannel][heldStep];
-    uint8_t lenIdx = noteLen[selectedChannel][heldStep];
-    // Fallback to channel base pitch for display if no p-lock exists
-    if (p == 255) p = channelPitch[selectedChannel];
-    if (lenIdx == 255) lenIdx = noteLenIdx;
-
-    const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-    const char* rNames[] = {"OFF", "16", "24", "32", "48", "96"};
-
-    // First line: STP / Note / Length
-    display.setCursor(2, 45);
-    display.print("STP:"); display.print(heldStep + 1);
-    display.print(" ");
-    display.print(noteNames[p % 12]); display.print((p / 12) - 1);
-    display.print(" L:"); display.print(noteLenNames[lenIdx]);
-
-    // Second line: Fill and Ratchet
-    display.setCursor(2, 55);
-    display.print("F:"); display.print(fillStep[selectedChannel][heldStep] ? "ON" : "OFF");
-    display.print(" ");
-    uint8_t r = stepRatchet[selectedChannel][heldStep];
-    display.print("RATC:"); display.print(rNames[r]);
-  }
-
-  else if (euclidEnabled[selectedChannel]) {
-    // Black out the bottom for the Euclidean menu
-    display.fillRect(0, 42, 128, 22, SH110X_BLACK);
-    display.drawLine(0, 41, 128, 41, SH110X_WHITE);
-    
-    display.setCursor(2, 45);
-    display.print("--- EUCLIDEAN ---");
-    
-    display.setCursor(2, 55);
-    display.print("H:"); display.print(pulses[selectedChannel]);
-    display.print(" S:"); display.print(euclidOffset[selectedChannel]);
-    const char* scaleNames[] = {"OFF", "LOC", "AUX", "ATO"};
-    display.print(" SCL:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
+  // Row 4: Scale + P-lock indicator (always show scale)
+  display.setCursor(4, 55);
+  display.print("SCL:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
+  if (heldStep >= 0){
+    display.setCursor(100, 55);
+    display.print("P:"); display.print(heldStep + 1);
   }
 
   display.display();
-  // Update LED strip to reflect current step/active steps. Safe to call from main loop.
   updateLEDs();
+}
+
+void SimpleSequencer::drawDebugGrid(){
+  // replicate previous grid drawing for debugging
+  const int stepW = 12, stepH = 12, startX = 6, startY = 16, spacingX = 3, spacingY = 4;
+  for (uint8_t i = 0; i < NUM_STEPS; i++){
+    int col = i % 8; int row = i / 8;
+    int x = startX + col * (stepW + spacingX);
+    int y = startY + row * (stepH + spacingY);
+    bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
+    if (stepActive){ 
+      display.fillRect(x, y, stepW, stepH, SH110X_WHITE);
+      uint8_t fs = fillState[selectedChannel][i];
+      if (fs == 1) display.fillRect(x+3, y+3, stepW-6, stepH-6, SH110X_BLACK);
+      else if (fs == 2){ display.drawRect(x+2, y+2, stepW-4, stepH-4, SH110X_WHITE); display.fillRect(x+4, y+4, 4, 4, SH110X_WHITE); }
+    }
+    else display.drawRect(x, y, stepW, stepH, SH110X_WHITE);
+    if (i == currentStep){ display.drawFastHLine(x, y + stepH + 2, stepW, SH110X_WHITE); display.drawFastHLine(x, y + stepH + 3, stepW, SH110X_WHITE); }
+  }
 }
 
 void SimpleSequencer::runSwitchTest(uint32_t ms){
@@ -1313,9 +1476,13 @@ void SimpleSequencer::updateLEDs() {
       r = 180; g = 0; b = 255; 
     } else if (stepActive) {
       // ACTIVE STEPS
-      if (fillStep[selectedChannel][i]) {
+      uint8_t fs = fillState[selectedChannel][i];
+      if (fs == 1) {
         // FILL STEP: Blue
         r = 0; g = 50; b = 255;   
+      } else if (fs == 2) {
+        // ANTI-FILL: Green indicator
+        r = 0; g = 180; b = 0;
       } else {
         // NORMAL TRIGGER: Red
         r = 255; g = 0; b = 0;   
