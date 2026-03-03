@@ -1,5 +1,5 @@
 # seq-23: Sequencer Prototype (Work in Progress)
-
+![Status: Prototype](https://img.shields.io/badge/Status-Prototype-orange?style=flat-square)
 >[!WARNING]  
 >**Status:** WORK IN PROGRESS — ongoing prototype. Use at your own risk; expect frequent changes.
 
