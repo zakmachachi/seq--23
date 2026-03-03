@@ -1,4 +1,4 @@
-# Sequencer Prototype (Work in Progress)
+# seq-23: Sequencer Prototype (Work in Progress)
 
 **Status:** WORK IN PROGRESS — ongoing prototype. Use at your own risk; expect frequent changes.
 This repository contains firmware for a Teensy 4.1 based step sequencer prototype. It drives a 16-LED WS2812 chain, reads 16 buttons and 4 encoders, and outputs MIDI.
@@ -33,4 +33,3 @@ License:
 ---
 
 _This project is actively under development — expect breaking changes._
-This is a WIP for a DIY sequencer. Check in soon!
