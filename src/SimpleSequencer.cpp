@@ -1466,6 +1466,64 @@ void SimpleSequencer::updateLEDs() {
     ledStrip.show();
     return; // Exit early to skip normal drawing
   }
+  // PAUSE LIGHTSHOW: Polyrhythmic Phase-Shifting Ring
+  if (!isRunning) {
+    uint32_t now = millis();
+    
+    // Map the 16 physical LEDs into a continuous clockwise circle:
+    // Top row left-to-right (0-7), then bottom row right-to-left (15-8)
+    const uint8_t ringMap[16] = {
+      0, 1, 2, 3, 4, 5, 6, 7, 
+      15, 14, 13, 12, 11, 10, 9, 8
+    };
+    // 3 Comets with integer speed ratios: +2, -3, +5
+    // These integers guarantee they will drift out of phase and periodically perfectly realign.
+    const int speeds[3] = {2, -3, 5};
+    // Unique shades of purely red intensity for each comet
+    const float cometColors[3][3] = {
+      {45.0f, 0.0f, 0.0f},      // Dark Dark Red (Clockwise)
+      {130.0f, 0.0f, 0.0f},     // Dark Red (Anti-Clockwise)
+      {255.0f, 0.0f, 0.0f}      // Pure Red (Fast Clockwise)
+    };
+
+    float pixelR[16] = {0};
+    float pixelG[16] = {0};
+    float pixelB[16] = {0};
+    float baseCycle = 8000.0f; // Base duration in ms for speed = 1
+    for (int c = 0; c < 3; c++) {
+      // Calculate continuous position on the 0-16 ring
+      float pos = (now * speeds[c] / baseCycle) * 16.0f;
+      
+      // Safely wrap the position around the ring (handles negative anti-clockwise speeds)
+      while (pos < 0.0f) pos += 16.0f;
+      while (pos >= 16.0f) pos -= 16.0f;
+      for (int r = 0; r < 16; r++) {
+        // Shortest distance around the circular ring
+        float dist = abs((float)r - pos);
+        if (dist > 8.0f) dist = 16.0f - dist;
+        
+        // Apply cubic decay for a sharp core and soft trail
+        float intensity = constrain(1.0f - (dist * 0.45f), 0.0f, 1.0f);
+        float val = intensity * intensity * intensity;
+        
+        // Additively mix the colors on the ring
+        pixelR[r] += cometColors[c][0] * val * 0.5f; 
+        pixelG[r] += cometColors[c][1] * val * 0.5f;
+        pixelB[r] += cometColors[c][2] * val * 0.5f;
+      }
+    }
+    // Map the calculated ring back to the physical keys and push to LEDs
+    for (int i = 0; i < 16; i++) {
+       uint8_t phys = ringMap[i];
+       uint8_t r_val = (uint8_t)constrain(pixelR[i], 0.0f, 255.0f);
+       uint8_t g_val = (uint8_t)constrain(pixelG[i], 0.0f, 255.0f);
+       uint8_t b_val = (uint8_t)constrain(pixelB[i], 0.0f, 255.0f);
+       
+       ledStrip.setPixelColor(phys, ledStrip.Color(r_val, g_val, b_val));
+    }
+    ledStrip.show();
+    return; // Exit early to skip normal drawing
+  }
   // 2. NORMAL MODE: Playhead and Triggers
   for (uint8_t i = 0; i < NUM_STEPS; i++) {
     bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
