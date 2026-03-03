@@ -30,7 +30,7 @@ If upload fails:
 - Verify wiring matches `include/SeqConfig.h` before connecting external signals.
 
 Contributing / reporting issues:
-- This is a private/solo prototype. To contribute or report bugs, open an issue or contact the author.
+- This is a private prototype. To contribute or report bugs, open an issue or contact the author.
 
 License:
 - See project root for any license files. No formal release license is guaranteed for this prototype.
