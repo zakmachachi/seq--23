@@ -44,6 +44,9 @@ class SimpleSequencer {
     uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
     uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenTicks
     uint8_t stepRatchet[NUM_CHANNELS][NUM_STEPS]; // per-step ratchet count (0 = off)
+    // --- ACCENT / SLIDE (TB-303 style) ---
+    uint8_t stepVelocity[NUM_CHANNELS][NUM_STEPS]; // 255 = use channel default
+    bool stepSlide[NUM_CHANNELS][NUM_STEPS];
     int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
     
@@ -54,6 +57,7 @@ class SimpleSequencer {
     // --- CHANNEL DEFAULT PITCHES ---
     uint8_t channelPitch[NUM_CHANNELS]; // per-channel base pitch (used when per-step pitch == 255)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
+    uint8_t channelVelocity[NUM_CHANNELS]; // default velocity per channel (0-127)
 
     // runtime
     uint32_t bpm;
@@ -111,6 +115,7 @@ class SimpleSequencer {
     void readEncoders();
     void shiftEuclidNotes(uint8_t ch, int steps);
     void triggerChannel(uint8_t ch);
+    void clearTrack(uint8_t ch);
     // --- EEPROM SAVE SYSTEM ---
     struct SaveData {
       uint32_t magicNumber;
@@ -127,6 +132,10 @@ class SimpleSequencer {
       uint8_t savedNoteLen[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedFillStep[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedStepRatchet[NUM_CHANNELS][NUM_STEPS];
+      // Persisted Accent/Slide
+      uint8_t savedStepVelocity[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedStepSlide[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedChannelVelocity[NUM_CHANNELS];
     };
     void saveState();
     void loadState();

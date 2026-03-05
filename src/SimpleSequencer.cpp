@@ -78,9 +78,13 @@ SimpleSequencer::SimpleSequencer()
       noteLen[c][s] = 255;
       // ratchet default: off
       stepRatchet[c][s] = 0;
+      // default Accent (Velocity) and Slide
+      stepVelocity[c][s] = 255; // use channel default
+      stepSlide[c][s] = false;
       pendingToggle[s] = false;
     }
     channelPitch[c] = 36; // Default each channel's base pitch to C2
+    channelVelocity[c] = 96; // default channel velocity (initialized to 96)
     // ratchet engine defaults
     ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
@@ -375,6 +379,8 @@ void SimpleSequencer::readButtons(){
               pitch[selectedChannel][i] = 255;
               fillState[selectedChannel][i] = 0;
               stepRatchet[selectedChannel][i] = 0;
+              stepVelocity[selectedChannel][i] = 255;
+              stepSlide[selectedChannel][i] = false;
             }
             Serial.print("Ch"); Serial.print(selectedChannel+1);
             Serial.print(" Step "); Serial.print(i);
@@ -479,40 +485,65 @@ void SimpleSequencer::readEncoders(){
             }
           }
         } else if (e == 1){ // encoder 2: PITCH or scale-shift when Euclid active
-          if (heldStep >= 0){
-            // Per-step fine adjustment (P-Lock)
-            pendingToggle[heldStep] = false;
-            steps[selectedChannel][heldStep] = true;
-            if (pitch[selectedChannel][heldStep] == 255) {
-              pitch[selectedChannel][heldStep] = channelPitch[selectedChannel];
-            }
-            int note = (int)pitch[selectedChannel][heldStep] + encSteps;
-            pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
-          } else {
-            // If Euclidean engine is active, rotate should shift the whole scale
-            if (euclidEnabled[selectedChannel]){
-              shiftEuclidNotes(selectedChannel, encSteps);
+          // New behavior: If START/STOP (Pin 27) is held, adjust Accent (Velocity).
+          bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+          if (startHeld) {
+            // When START is held, encoder 2 adjusts per-step velocity (if a step is held),
+            // otherwise adjust the channel default velocity.
+            if (heldStep >= 0) {
+              pendingToggle[heldStep] = false;
+              steps[selectedChannel][heldStep] = true;
+              if (stepVelocity[selectedChannel][heldStep] == 255) stepVelocity[selectedChannel][heldStep] = channelVelocity[selectedChannel];
+              int v = (int)stepVelocity[selectedChannel][heldStep] + encSteps;
+              stepVelocity[selectedChannel][heldStep] = (uint8_t)constrain(v, 0, 127);
             } else {
-              if (encSteps != 0){
-                int note = (int)channelPitch[selectedChannel] + encSteps;
-                channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
+              int v = (int)channelVelocity[selectedChannel] + encSteps;
+              channelVelocity[selectedChannel] = (uint8_t)constrain(v, 0, 127);
+            }
+          } else {
+            if (heldStep >= 0){
+              // Per-step fine adjustment (P-Lock)
+              pendingToggle[heldStep] = false;
+              steps[selectedChannel][heldStep] = true;
+              if (pitch[selectedChannel][heldStep] == 255) {
+                pitch[selectedChannel][heldStep] = channelPitch[selectedChannel];
+              }
+              int note = (int)pitch[selectedChannel][heldStep] + encSteps;
+              pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
+            } else {
+              // If Euclidean engine is active, rotate should shift the whole scale
+              if (euclidEnabled[selectedChannel]){
+                shiftEuclidNotes(selectedChannel, encSteps);
+              } else {
+                if (encSteps != 0){
+                  int note = (int)channelPitch[selectedChannel] + encSteps;
+                  channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
+                }
               }
             }
           }
         } else if (e == 2){ // encoder 3: NOTE LENGTH
-          if (heldStep >= 0){
-            pendingToggle[heldStep] = false;
-            steps[selectedChannel][heldStep] = true;
-            if (noteLen[selectedChannel][heldStep] == 255) {
-              noteLen[selectedChannel][heldStep] = noteLenIdx;
-            }
-            int idxn = (int)noteLen[selectedChannel][heldStep] + encSteps;
-            int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
-            noteLen[selectedChannel][heldStep] = (uint8_t)constrain(idxn, 0, maxIdx);
+          // Encoder 3: primary function is gate/length, but when START is held allow Slide toggling
+          bool startHeldE3 = (digitalRead(START_STOP_PIN) == LOW);
+          if (startHeldE3 && heldStep >= 0) {
+            // Use turns to set/clear slide for the held step. Positive = ON, Negative = OFF
+            if (encSteps > 0) stepSlide[selectedChannel][heldStep] = true;
+            else if (encSteps < 0) stepSlide[selectedChannel][heldStep] = false;
           } else {
-            int idxn = (int)noteLenIdx + encSteps;
-            int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
-            noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
+            if (heldStep >= 0){
+              pendingToggle[heldStep] = false;
+              steps[selectedChannel][heldStep] = true;
+              if (noteLen[selectedChannel][heldStep] == 255) {
+                noteLen[selectedChannel][heldStep] = noteLenIdx;
+              }
+              int idxn = (int)noteLen[selectedChannel][heldStep] + encSteps;
+              int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
+              noteLen[selectedChannel][heldStep] = (uint8_t)constrain(idxn, 0, maxIdx);
+            } else {
+              int idxn = (int)noteLenIdx + encSteps;
+              int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
+              noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
+            }
           }
         } else if (e == 3){ // encoder 4: EUCLID PULSES or OFFSET
           if (heldStep < 0) { 
@@ -582,9 +613,14 @@ void SimpleSequencer::readEncoders(){
             }
           }
           else if (e == 2) {
-            // Encoder 3 Click: Toggle Fill on held step (moved from E2)
-            if (heldStep >= 0) {
-              // Cycle: 0 -> 1 (fill) -> 2 (anti-fill) -> 0
+            // Encoder 3 Click: Check for Clear Track modifier first
+            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+            if (chanModHeld) {
+              clearTrack(selectedChannel);
+              focusEncoder = 3;
+              lastEncoderMoveTime = millis();
+            } else if (heldStep >= 0) {
+              // Normal Enc 3 Click: Toggle Fill on held step
               uint8_t &fs = fillState[selectedChannel][heldStep];
               fs = (fs + 1) % 3;
               steps[selectedChannel][heldStep] = true;
@@ -634,7 +670,10 @@ void SimpleSequencer::saveState() {
       data.savedNoteLen[c][s] = noteLen[c][s];
       data.savedFillStep[c][s] = fillState[c][s];
       data.savedStepRatchet[c][s] = stepRatchet[c][s];
+      data.savedStepVelocity[c][s] = stepVelocity[c][s];
+      data.savedStepSlide[c][s] = stepSlide[c][s] ? 1 : 0;
     }
+    data.savedChannelVelocity[c] = channelVelocity[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -671,7 +710,12 @@ void SimpleSequencer::loadState() {
         noteLen[c][s] = data.savedNoteLen[c][s];
         fillState[c][s] = data.savedFillStep[c][s];
         stepRatchet[c][s] = data.savedStepRatchet[c][s];
+        stepVelocity[c][s] = data.savedStepVelocity[c][s];
+        stepSlide[c][s] = (data.savedStepSlide[c][s] != 0);
       }
+      channelVelocity[c] = data.savedChannelVelocity[c];
+      // If saved velocity is unexpectedly high (old TD-3 defaults), normalize to requested default
+      if (channelVelocity[c] > 120) channelVelocity[c] = 96;
       // Regenerate Euclidean patterns if enabled
       if (euclidEnabled[c]) updateEuclid(c);
     }
@@ -951,57 +995,75 @@ void SimpleSequencer::runEngine(){
 }
 
 void SimpleSequencer::triggerChannel(uint8_t ch){
-  // 1. If a previous note is playing, turn it off immediately
-  if (noteOffTick[ch] > 0 && absoluteTickCounter < noteOffTick[ch]){
-    if (lastNotePlaying[ch] < 128) midiSendNoteOff(ch, lastNotePlaying[ch], 0);
-    noteOffTick[ch] = 0;
-  }
-
-  // 2. THE NORMAL MUTE BLOCK
+  // 1. THE NORMAL MUTE & FILL BLOCK
   if (muted[ch]) return;
-
-  // 3. THE FILL CONDITION BLOCK (tri-state handling)
-  // fillState: 0=normal, 1=fill (only when fillModeActive), 2=anti-fill (muted DURING fill)
   uint8_t fstate = fillState[ch][currentStep];
-  // Fill-only: only play when modifier is active
   if (fstate == 1 && !fillModeActive) return;
-  // Anti-Fill: play normally, but mute while the Fill modifier is held
   if (fstate == 2 && fillModeActive) return;
-
-  // Fire the new Note On
   uint8_t p = pitch[ch][currentStep];
   if (p == 255) p = channelPitch[ch];
-
   uint8_t note = constrain(p, 0, 127);
-  uint8_t vel = 100;
-  midiSendNoteOn(ch, note, vel);
-  lastNotePlaying[ch] = note;
 
-  // RATCHET: If ratchet is disabled for this step, use regular tick-based note-off
+  uint8_t vel = stepVelocity[ch][currentStep];
+  if (vel == 255) vel = channelVelocity[ch];
+
+  // 2. THE MONOSYNTH LEGATO MAGIC
+  static bool prevSlide[NUM_CHANNELS] = {false};
+  bool isSlidingIntoThis = prevSlide[ch];
+
+  if (lastNotePlaying[ch] < 128) {
+    if (isSlidingIntoThis) {
+      // LEGATO: Fire the new note BEFORE killing the old one to trigger portamento
+      midiSendNoteOn(ch, note, vel);
+      midiSendNoteOff(ch, lastNotePlaying[ch], 0);
+    } else {
+      // NORMAL: Kill the old note BEFORE firing the new one (Crisp re-trigger)
+      midiSendNoteOff(ch, lastNotePlaying[ch], 0);
+      midiSendNoteOn(ch, note, vel);
+    }
+  } else {
+    // No overlapping note, just fire
+    midiSendNoteOn(ch, note, vel);
+  }
+
+  // Save the new state for the NEXT step
+  lastNotePlaying[ch] = note;
+  prevSlide[ch] = stepSlide[ch][currentStep];
+
+  // 3. RATCHET & GATE LENGTH
   uint8_t lenIdx = noteLen[ch][currentStep];
   if (lenIdx == 255) lenIdx = noteLenIdx;
 
   uint8_t rIdx = stepRatchet[ch][currentStep];
   if (rIdx > 0) {
-    const uint8_t rTicks[] = {0, 6, 4, 3, 2, 1}; // Exact tick intervals for 16, 24, 32, 48, 96
+    const uint8_t rTicks[] = {0, 6, 4, 3, 2, 1};
     uint8_t ticksPerHit = rTicks[rIdx];
-    
+
     ratchetIntervalTicks[ch] = ticksPerHit;
     ratchetNextTick[ch] = absoluteTickCounter + ticksPerHit;
-    ratchetEndTick[ch] = absoluteTickCounter + 6; // Strictly constrain burst to exactly one 16th-note step (6 ticks)
+    ratchetEndTick[ch] = absoluteTickCounter + 6; 
     ratchetPitch[ch] = note;
-    
-    // Schedule crisp note off halfway through the tick interval
     uint32_t offOffset = ticksPerHit / 2;
-    if (offOffset == 0) offOffset = 1; 
+    if (offOffset == 0) offOffset = 1;
     noteOffTick[ch] = absoluteTickCounter + offOffset;
+
+
   } else {
     // Normal single-hit logic
-    ratchetIntervalTicks[ch] = 0; 
-    // THE GATE GAP FIX: Subtract 1 tick from the duration to let analog envelopes reset
+    ratchetIntervalTicks[ch] = 0;
     uint32_t ticks = noteLenTicks[lenIdx];
-    uint32_t gateLength = (ticks > 1) ? (ticks - 1) : 1;
+    uint32_t gateLength;
+
+    if (stepSlide[ch][currentStep]) {
+      // FORCE OVERLAP: If this step is sliding, ensure it bleeds past the 6-tick boundary
+      gateLength = (ticks < 7) ? 7 : (ticks + 1);
+    } else {
+      // NORMAL: Cut it short to leave a gap for envelopes to reset
+      gateLength = (ticks > 1) ? (ticks - 1) : 1;
+    }
     noteOffTick[ch] = absoluteTickCounter + gateLength;
+
+
   }
 }
 
@@ -1077,20 +1139,29 @@ void SimpleSequencer::drawDisplay(){
     // ── ENCODER 2 ────────────────────────────────────────────────
     if (fe == 1){
       if (heldStep >= 0){
-        // P-LOCK: Per-step pitch
-        uint8_t p = pitch[selectedChannel][heldStep];
-        if (p == 255) p = channelPitch[selectedChannel];
-        display.setTextSize(2);
-        display.setTextColor(SH110X_WHITE);
-        display.setCursor(4, 2);
-        display.print("NOTE");
-        display.setTextSize(1);
-        display.setCursor(90, 6);
-        display.print("STP "); display.print(heldStep + 1);
-        display.setTextSize(4);
-        display.setCursor(4, 26);
-        display.print(noteNames[p % 12]);
-        display.print((p / 12) - 1);
+        bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+        if (startHeld) {
+          // ACCENT UI
+          uint8_t v = stepVelocity[selectedChannel][heldStep];
+          if (v == 255) v = channelVelocity[selectedChannel];
+          display.setTextSize(2); display.setTextColor(SH110X_WHITE);
+          display.setCursor(4, 2); display.print("ACCENT");
+          display.setTextSize(1); display.setCursor(90, 6);
+          display.print("STP "); display.print(heldStep + 1);
+          display.setTextSize(4); display.setCursor(4, 26);
+          display.print(v);
+        } else {
+          // PITCH UI
+          uint8_t p = pitch[selectedChannel][heldStep];
+          if (p == 255) p = channelPitch[selectedChannel];
+          display.setTextSize(2); display.setTextColor(SH110X_WHITE);
+          display.setCursor(4, 2); display.print("NOTE");
+          display.setTextSize(1); display.setCursor(90, 6);
+          display.print("STP "); display.print(heldStep + 1);
+          display.setTextSize(4); display.setCursor(4, 26);
+          display.print(noteNames[p % 12]);
+          display.print((p / 12) - 1);
+        }
       } else if (euclidEnabled[selectedChannel]){
         // Euclid scale shift — show grid + shift info
         drawDebugGrid();
@@ -1124,19 +1195,26 @@ void SimpleSequencer::drawDisplay(){
     // ── ENCODER 3 ────────────────────────────────────────────────
     if (fe == 2){
       if (heldStep >= 0){
-        // P-LOCK: Per-step gate length
-        uint8_t lenIdx = noteLen[selectedChannel][heldStep];
-        if (lenIdx == 255) lenIdx = noteLenIdx;
-        display.setTextSize(2);
-        display.setTextColor(SH110X_WHITE);
-        display.setCursor(4, 2);
-        display.print("GATE");
-        display.setTextSize(1);
-        display.setCursor(90, 6);
-        display.print("STP "); display.print(heldStep + 1);
-        display.setTextSize(4);
-        display.setCursor(4, 26);
-        display.print(noteLenNames[lenIdx]);
+        bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+        if (startHeld) {
+          // SLIDE UI
+          display.setTextSize(2); display.setTextColor(SH110X_WHITE);
+          display.setCursor(4, 2); display.print("SLIDE");
+          display.setTextSize(1); display.setCursor(90, 6);
+          display.print("STP "); display.print(heldStep + 1);
+          display.setTextSize(4); display.setCursor(4, 26);
+          display.print(stepSlide[selectedChannel][heldStep] ? "ON" : "OFF");
+        } else {
+          // GATE UI
+          uint8_t lenIdx = noteLen[selectedChannel][heldStep];
+          if (lenIdx == 255) lenIdx = noteLenIdx;
+          display.setTextSize(2); display.setTextColor(SH110X_WHITE);
+          display.setCursor(4, 2); display.print("GATE");
+          display.setTextSize(1); display.setCursor(90, 6);
+          display.print("STP "); display.print(heldStep + 1);
+          display.setTextSize(4); display.setCursor(4, 26);
+          display.print(noteLenNames[lenIdx]);
+        }
       } else {
         // Global gate length — big
         display.setTextSize(2);
@@ -1234,6 +1312,13 @@ void SimpleSequencer::drawDisplay(){
   if (heldStep >= 0){
     display.setCursor(100, 55);
     display.print("P:"); display.print(heldStep + 1);
+    // Show per-step P-Lock VEL and SLD
+    uint8_t v = stepVelocity[selectedChannel][heldStep];
+    if (v == 255) v = channelVelocity[selectedChannel];
+    display.setCursor(4, 55);
+    display.print("VEL:"); display.print(v);
+    display.setCursor(52, 55);
+    display.print("SLD:"); display.print(stepSlide[selectedChannel][heldStep] ? "ON" : "OFF");
   }
 
   display.display();
@@ -1549,4 +1634,25 @@ void SimpleSequencer::updateLEDs() {
     ledStrip.setPixelColor(i, ledStrip.Color(r, g, b));
   }
   ledStrip.show();
+}
+
+
+void SimpleSequencer::clearTrack(uint8_t ch) {
+  for (uint8_t s = 0; s < NUM_STEPS; s++) {
+    steps[ch][s] = false;
+    pitch[ch][s] = 255;
+    noteLen[ch][s] = 255;
+    fillState[ch][s] = 0;
+    stepRatchet[ch][s] = 0;
+    stepVelocity[ch][s] = 255;
+    stepSlide[ch][s] = false;
+  }
+  euclidEnabled[ch] = false;
+  pulses[ch] = 4;
+  euclidOffset[ch] = 0;
+  
+  display.clearDisplay();
+  display.fillRect(0, 0, 128, 64, SH110X_WHITE);
+  display.display();
+  delay(30);
 }
