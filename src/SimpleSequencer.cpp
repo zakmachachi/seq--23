@@ -372,15 +372,29 @@ void SimpleSequencer::readButtons(){
         } else { // released
           // perform the toggle now (on release) if it was pending
           if (pendingToggle[i]){
-            steps[selectedChannel][i] = !steps[selectedChannel][i];
-            // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
+            if (euclidEnabled[selectedChannel]) {
+              // When Euclid is active, toggle the generated euclidPattern
+              euclidPattern[selectedChannel][i] = !euclidPattern[selectedChannel][i];
+              // keep legacy steps[] in sync for UI and saving
+              steps[selectedChannel][i] = euclidPattern[selectedChannel][i];
+              // Reset per-step params when removing a step
+              if (!steps[selectedChannel][i]) {
+                noteLen[selectedChannel][i] = 255;
+                pitch[selectedChannel][i] = 255;
+                fillState[selectedChannel][i] = 0;
+                stepRatchet[selectedChannel][i] = 0;
+                stepVelocity[selectedChannel][i] = 255;
+                stepSlide[selectedChannel][i] = false;
+              }
+            } else {
+              steps[selectedChannel][i] = !steps[selectedChannel][i];
+              // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
               if (!steps[selectedChannel][i]) {
               noteLen[selectedChannel][i] = 255;
               pitch[selectedChannel][i] = 255;
               fillState[selectedChannel][i] = 0;
               stepRatchet[selectedChannel][i] = 0;
-              stepVelocity[selectedChannel][i] = 255;
-              stepSlide[selectedChannel][i] = false;
+            }
             }
             Serial.print("Ch"); Serial.print(selectedChannel+1);
             Serial.print(" Step "); Serial.print(i);
@@ -711,6 +725,8 @@ void SimpleSequencer::loadState() {
         fillState[c][s] = data.savedFillStep[c][s];
         stepRatchet[c][s] = data.savedStepRatchet[c][s];
         stepVelocity[c][s] = data.savedStepVelocity[c][s];
+        // Normalize suspicious saved per-step velocities (preserve 255 sentinel)
+        if (stepVelocity[c][s] != 255 && stepVelocity[c][s] > 120) stepVelocity[c][s] = 96;
         stepSlide[c][s] = (data.savedStepSlide[c][s] != 0);
       }
       channelVelocity[c] = data.savedChannelVelocity[c];
