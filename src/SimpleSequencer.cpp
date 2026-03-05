@@ -372,34 +372,42 @@ void SimpleSequencer::readButtons(){
         } else { // released
           // perform the toggle now (on release) if it was pending
           if (pendingToggle[i]){
-            if (euclidEnabled[selectedChannel]) {
-              // When Euclid is active, toggle the generated euclidPattern
-              euclidPattern[selectedChannel][i] = !euclidPattern[selectedChannel][i];
-              // keep legacy steps[] in sync for UI and saving
-              steps[selectedChannel][i] = euclidPattern[selectedChannel][i];
-              // Reset per-step params when removing a step
-              if (!steps[selectedChannel][i]) {
-                noteLen[selectedChannel][i] = 255;
-                pitch[selectedChannel][i] = 255;
-                fillState[selectedChannel][i] = 0;
-                stepRatchet[selectedChannel][i] = 0;
-                stepVelocity[selectedChannel][i] = 255;
-                stepSlide[selectedChannel][i] = false;
-              }
+            bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+            if (startHeld) {
+              // If START is held, treat the button as a momentary trigger — do not toggle state
+              pendingToggle[i] = false;
             } else {
-              steps[selectedChannel][i] = !steps[selectedChannel][i];
-              // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
-              if (!steps[selectedChannel][i]) {
-              noteLen[selectedChannel][i] = 255;
-              pitch[selectedChannel][i] = 255;
-              fillState[selectedChannel][i] = 0;
-              stepRatchet[selectedChannel][i] = 0;
+              if (euclidEnabled[selectedChannel]) {
+                // Toggle the generated euclidPattern and keep steps[] in sync
+                bool newState = !euclidPattern[selectedChannel][i];
+                euclidPattern[selectedChannel][i] = newState;
+                steps[selectedChannel][i] = newState;
+                if (newState) {
+                  // Turning ON: initialize per-step params if unset so they are remembered
+                  if (pitch[selectedChannel][i] == 255) pitch[selectedChannel][i] = channelPitch[selectedChannel];
+                  if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx;
+                  if (stepVelocity[selectedChannel][i] == 255) stepVelocity[selectedChannel][i] = channelVelocity[selectedChannel];
+                  // leave fillState/ratchet/slide as-is (user can set)
+                } else {
+                  // Turning OFF: preserve per-step params so re-enabling restores them
+                }
+              } else {
+                steps[selectedChannel][i] = !steps[selectedChannel][i];
+                // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
+                if (!steps[selectedChannel][i]) {
+                  noteLen[selectedChannel][i] = 255;
+                  pitch[selectedChannel][i] = 255;
+                  fillState[selectedChannel][i] = 0;
+                  stepRatchet[selectedChannel][i] = 0;
+                  stepVelocity[selectedChannel][i] = 255;
+                  stepSlide[selectedChannel][i] = false;
+                }
+              }
+              Serial.print("Ch"); Serial.print(selectedChannel+1);
+              Serial.print(" Step "); Serial.print(i);
+              Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
+              pendingToggle[i] = false;
             }
-            }
-            Serial.print("Ch"); Serial.print(selectedChannel+1);
-            Serial.print(" Step "); Serial.print(i);
-            Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
-            pendingToggle[i] = false;
           }
           if (heldStep == (int8_t)i) heldStep = -1;
         }
