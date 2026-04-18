@@ -635,18 +635,23 @@ void SimpleSequencer::readEncoders(){
             }
           }
           else if (e == 2) {
-            // Encoder 3 Click: Check for Clear Track modifier first
+            // Encoder 3 Click: Clear Track / Fill or start Slide hold when not p-locking
             bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
             if (chanModHeld) {
               clearTrack(selectedChannel);
               focusEncoder = 3;
               lastEncoderMoveTime = millis();
             } else if (heldStep >= 0) {
-              // Normal Enc 3 Click: Toggle Fill on held step
+              // P-LOCK: Toggle Fill on held step
               uint8_t &fs = fillState[selectedChannel][heldStep];
               fs = (fs + 1) % 3;
               steps[selectedChannel][heldStep] = true;
               pendingToggle[heldStep] = false;
+            } else {
+              // Not p-locking: start global slide hold while encoder is pressed
+              encoderSlideHold = true;
+              focusEncoder = 3;
+              lastEncoderMoveTime = millis();
             }
           }
           else if (e == 3){
@@ -662,6 +667,13 @@ void SimpleSequencer::readEncoders(){
               for (uint8_t s=0; s<NUM_STEPS; s++) pitch[selectedChannel][s] = 255;
               updateEuclid(selectedChannel);
             }
+          }
+        }
+        else {
+          // encoder switch released — if encoder 3 was used as slide hold, clear it
+          if (e == 2) {
+            encoderSlideHold = false;
+            focusEncoder = 0;
           }
         }
       }
@@ -1052,7 +1064,8 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 
   // Save the new state for the NEXT step
   lastNotePlaying[ch] = note;
-  prevSlide[ch] = stepSlide[ch][currentStep];
+  // Consider encoder held slide as an active slide for the next step
+  prevSlide[ch] = stepSlide[ch][currentStep] || encoderSlideHold;
 
   // 3. RATCHET & GATE LENGTH
   uint8_t lenIdx = noteLen[ch][currentStep];
@@ -1098,6 +1111,17 @@ void SimpleSequencer::drawDisplay(){
 
   uint32_t now = millis();
   bool focused = (focusEncoder != 0) && ((now - lastEncoderMoveTime) < focusTimeout);
+
+  // Global visual for Encoder 3 held slide-all
+  if (encoderSlideHold) {
+    display.setTextSize(2);
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(16, 24);
+    display.print("SLIDE ALL");
+    display.display();
+    updateLEDs();
+    return;
+  }
 
   const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
   const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};

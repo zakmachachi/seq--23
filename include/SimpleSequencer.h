@@ -107,6 +107,8 @@ class SimpleSequencer {
     // debug LED for ISR activity
     volatile bool debugLedFlag;
     uint32_t debugLedOffTime;
+    // Encoder 3 (index 2) held slide modifier
+    bool encoderSlideHold = false;
 
     void setupPins();
     void readButtons();
