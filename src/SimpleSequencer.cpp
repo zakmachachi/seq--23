@@ -89,6 +89,12 @@ SimpleSequencer::SimpleSequencer()
     ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
   }
+  // initialize matrix scanner state
+  for (uint8_t k=0;k<SimpleSequencer::MATRIX_KEYS;k++){
+    matrixRawState[k] = 0;
+    matrixState[k] = false;
+    matrixLastDebounce[k] = 0;
+  }
   lastMidiClockMicros = 0;
   noteLenIdx = 4; // default to 1/16 (use shorter gate to avoid envelope collisions)
   absoluteTickCounter = 0;
@@ -197,9 +203,13 @@ void SimpleSequencer::setupPins(){
     pinMode(ENC_B[e], INPUT_PULLUP);
     pinMode(ENC_SW[e], INPUT_PULLUP);
   }
-  // 2. Setup button pins
-  for (uint8_t i=0; i<NUM_STEPS; i++){
-    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+  // 2. Setup matrix pins (rows inputs, cols outputs)
+  for (uint8_t c=0; c< (sizeof(MATRIX_COL_PINS)/sizeof(MATRIX_COL_PINS[0])); c++){
+    pinMode(MATRIX_COL_PINS[c], OUTPUT);
+    digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
+  }
+  for (uint8_t r=0; r< (sizeof(MATRIX_ROW_PINS)/sizeof(MATRIX_ROW_PINS[0])); r++){
+    pinMode(MATRIX_ROW_PINS[r], INPUT_PULLUP);
   }
   pinMode(CHANNEL_BTN_PIN, INPUT_PULLUP);
   pinMode(START_STOP_PIN, INPUT_PULLUP);
@@ -334,87 +344,101 @@ void SimpleSequencer::loop(){
 }
 
 void SimpleSequencer::readButtons(){
-  // polling-based debounce via Bounce2
-  for (uint8_t i=0;i<NUM_STEPS;i++){
-    // Arduino-style millis debounce (per-button)
-    static bool buttonState[NUM_STEPS] = {0};        // the debounced/stable state
-    static bool lastReading[NUM_STEPS] = {0};        // last raw reading
-    static unsigned long lastDebounceTime[NUM_STEPS] = {0};
-    // pendingToggle moved to member variable to allow encoder access
-    unsigned long now = millis();
-    bool reading = (digitalRead(BUTTON_PINS[i]) == LOW); // pressed = LOW
-    if (reading != lastReading[i]){
-      lastDebounceTime[i] = now;
-    }
-    if ((now - lastDebounceTime[i]) > debounceMs){
-      if (reading != buttonState[i]){
-        buttonState[i] = reading;
-        if (buttonState[i]){ // PRESSED
-          bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+  // Matrix scanning step: non-blocking single-column scan
+  scanMatrixStep();
+}
 
-          // 1. CHANNEL SELECT INTERCEPT: Pin 28 + Buttons 1-4
-          if (chanModHeld && i < NUM_CHANNELS) {
-            selectedChannel = i;
-          }
-          // 2. MUTE INTERCEPT: START (pin 27) + Buttons 1-4 => mute/unmute channel
-          else if ((digitalRead(START_STOP_PIN) == LOW) && i < NUM_CHANNELS) {
-            muted[i] = !muted[i];
-            startStopModifierFlag = true;
-          }
-          // 3. NORMAL STEP TOGGLE / P-LOCK HOLD
-          else {
-            pendingToggle[i] = true;
-            heldStep = i;
-            // Ensure UI updates to show parameter lock overlay
-            lastEncoderMoveTime = millis();
-            focusEncoder = 0; // clear encoder focus while in p-lock
-          }
-        } else { // released
-          // perform the toggle now (on release) if it was pending
-          if (pendingToggle[i]){
-            bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
-            if (startHeld) {
-              // If START is held, treat the button as a momentary trigger — do not toggle state
-              pendingToggle[i] = false;
-            } else {
-              if (euclidEnabled[selectedChannel]) {
-                // Toggle the generated euclidPattern and keep steps[] in sync
-                bool newState = !euclidPattern[selectedChannel][i];
-                euclidPattern[selectedChannel][i] = newState;
-                steps[selectedChannel][i] = newState;
-                if (newState) {
-                  // Turning ON: initialize per-step params if unset so they are remembered
-                  if (pitch[selectedChannel][i] == 255) pitch[selectedChannel][i] = channelPitch[selectedChannel];
-                  if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx;
-                  if (stepVelocity[selectedChannel][i] == 255) stepVelocity[selectedChannel][i] = channelVelocity[selectedChannel];
-                  // leave fillState/ratchet/slide as-is (user can set)
-                } else {
-                  // Turning OFF: preserve per-step params so re-enabling restores them
-                }
-              } else {
-                steps[selectedChannel][i] = !steps[selectedChannel][i];
-                // THE ERASER: If step turned OFF, reset it to Global defaults (255) and clear Fill & Ratchet
-                if (!steps[selectedChannel][i]) {
-                  noteLen[selectedChannel][i] = 255;
-                  pitch[selectedChannel][i] = 255;
-                  fillState[selectedChannel][i] = 0;
-                  stepRatchet[selectedChannel][i] = 0;
-                  stepVelocity[selectedChannel][i] = 255;
-                  stepSlide[selectedChannel][i] = false;
-                }
-              }
-              Serial.print("Ch"); Serial.print(selectedChannel+1);
-              Serial.print(" Step "); Serial.print(i);
-              Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
-              pendingToggle[i] = false;
-            }
-          }
-          if (heldStep == (int8_t)i) heldStep = -1;
+// Map row/col to linear button index (0..29)
+static inline uint8_t matrixIndex(uint8_t row, uint8_t col){
+  return (row * SimpleSequencer::MATRIX_COLS) + col;
+}
+
+// Called when a debounced press is detected
+void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
+  uint8_t i = matrixIndex(row,col);
+  // Reuse existing pressed behavior from legacy handler
+  bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+  if (chanModHeld && i < NUM_CHANNELS) {
+    selectedChannel = i;
+    return;
+  }
+  else if ((digitalRead(START_STOP_PIN) == LOW) && i < NUM_CHANNELS){
+    muted[i] = !muted[i];
+    startStopModifierFlag = true;
+    return;
+  }
+  else {
+    pendingToggle[i] = true;
+    heldStep = i;
+    lastEncoderMoveTime = millis();
+    focusEncoder = 0;
+  }
+}
+
+// Called when a debounced release is detected
+void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
+  uint8_t i = matrixIndex(row,col);
+  if (pendingToggle[i]){
+    bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+    if (startHeld) {
+      pendingToggle[i] = false;
+    } else {
+      if (euclidEnabled[selectedChannel]){
+        bool newState = !euclidPattern[selectedChannel][i];
+        euclidPattern[selectedChannel][i] = newState;
+        steps[selectedChannel][i] = newState;
+        if (newState){
+          if (pitch[selectedChannel][i] == 255) pitch[selectedChannel][i] = channelPitch[selectedChannel];
+          if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx;
+          if (stepVelocity[selectedChannel][i] == 255) stepVelocity[selectedChannel][i] = channelVelocity[selectedChannel];
+        }
+      } else {
+        steps[selectedChannel][i] = !steps[selectedChannel][i];
+        if (!steps[selectedChannel][i]){
+          noteLen[selectedChannel][i] = 255;
+          pitch[selectedChannel][i] = 255;
+          fillState[selectedChannel][i] = 0;
+          stepRatchet[selectedChannel][i] = 0;
+          stepVelocity[selectedChannel][i] = 255;
+          stepSlide[selectedChannel][i] = false;
         }
       }
+      Serial.print("Ch"); Serial.print(selectedChannel+1);
+      Serial.print(" Step "); Serial.print(i);
+      Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
+      pendingToggle[i] = false;
     }
-    lastReading[i] = reading;
   }
+  if (heldStep == (int8_t)i) heldStep = -1;
+}
+
+// Non-blocking single-column matrix scan. Call frequently (e.g., in main loop).
+void SimpleSequencer::scanMatrixStep(){
+  unsigned long now = millis();
+  // set all columns idle first
+  for (uint8_t c=0;c<MATRIX_COLS;c++) digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
+  // pull active column
+  uint8_t col = matrixScanCol;
+  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_ACTIVE);
+  delayMicroseconds(5); // settle
+  for (uint8_t r=0;r<MATRIX_ROWS;r++){
+    uint8_t raw = (digitalRead(MATRIX_ROW_PINS[r]) == LOW) ? 1 : 0; // pressed when LOW
+    uint8_t idx = matrixIndex(r,col);
+    if (raw != matrixRawState[idx]){
+      matrixRawState[idx] = raw;
+      matrixLastDebounce[idx] = now;
+    }
+    if ((now - matrixLastDebounce[idx]) > debounceMs){
+      bool pressed = (matrixRawState[idx] == 1);
+      if (pressed != matrixState[idx]){
+        matrixState[idx] = pressed;
+        if (pressed) onKeyPress(r,col); else onKeyRelease(r,col);
+      }
+    }
+  }
+  // restore column to idle and advance
+  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_IDLE);
+  matrixScanCol = (matrixScanCol + 1) % MATRIX_COLS;
 }
 
 void SimpleSequencer::readEncoders(){
@@ -1395,22 +1419,37 @@ void SimpleSequencer::drawDebugGrid(){
 void SimpleSequencer::runSwitchTest(uint32_t ms){
   Serial.print("Starting switch test for "); Serial.print(ms); Serial.println(" ms");
   Serial.println("Press buttons to see state changes.");
-  bool lastState[NUM_STEPS];
-  for (uint8_t i=0;i<NUM_STEPS;i++) lastState[i] = (digitalRead(BUTTON_PINS[i])==LOW);
+  // Build initial snapshot by scanning entire matrix
+  bool lastState[MATRIX_KEYS];
+  for (uint8_t k=0;k<MATRIX_KEYS;k++) lastState[k] = false;
+  for (uint8_t c=0;c<MATRIX_COLS;c++){
+    digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_ACTIVE);
+    delayMicroseconds(30);
+    for (uint8_t r=0;r<MATRIX_ROWS;r++){
+      uint8_t idx = matrixIndex(r,c);
+      lastState[idx] = (digitalRead(MATRIX_ROW_PINS[r]) == LOW);
+    }
+    digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
+  }
   bool lastStart = (digitalRead(START_STOP_PIN) == LOW);
   uint32_t start = millis();
   while (millis() - start < ms){
-    // buttons
-    for (uint8_t i=0;i<NUM_STEPS;i++){
-      bool s = (digitalRead(BUTTON_PINS[i])==LOW);
-      if (s != lastState[i]){
-        Serial.print("Button "); Serial.print(i); Serial.print(s?" pressed":" released"); Serial.println();
-        // blink built-in LED briefly
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(30);
-        digitalWrite(LED_BUILTIN, LOW);
-        lastState[i] = s;
+    // full matrix scan (blocking) for test
+    for (uint8_t c=0;c<MATRIX_COLS;c++){
+      digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_ACTIVE);
+      delayMicroseconds(30);
+      for (uint8_t r=0;r<MATRIX_ROWS;r++){
+        uint8_t idx = matrixIndex(r,c);
+        bool s = (digitalRead(MATRIX_ROW_PINS[r]) == LOW);
+        if (s != lastState[idx]){
+          Serial.print("Button "); Serial.print(idx); Serial.print(s?" pressed":" released"); Serial.println();
+          digitalWrite(LED_BUILTIN, HIGH);
+          delay(30);
+          digitalWrite(LED_BUILTIN, LOW);
+          lastState[idx] = s;
+        }
       }
+      digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
     }
     // start/stop button
     bool sr = (digitalRead(START_STOP_PIN) == LOW);
