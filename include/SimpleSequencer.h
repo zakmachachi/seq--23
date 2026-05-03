@@ -98,16 +98,15 @@ class SimpleSequencer {
     // button debounce parameters (Arduino example)
     const unsigned long debounceMs = 10;
     // --- Matrix keyboard state (5x6) ---
-    static const uint8_t MATRIX_ROWS = 5;
-    static const uint8_t MATRIX_COLS = 6;
-    static const uint8_t MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS; // 30
+    // Use global MATRIX_ROWS / MATRIX_COLS from SeqConfig.h
     uint8_t matrixScanCol = 0; // which column to scan next
     uint8_t matrixRawState[MATRIX_KEYS]; // raw last reading (0/1)
     bool matrixState[MATRIX_KEYS]; // debounced stable state (true = pressed)
     unsigned long matrixLastDebounce[MATRIX_KEYS];
 
-    // --- MODIFIER PINS ---
-    const uint8_t CHANNEL_BTN_PIN = 28; // channel modifier (hold + Steps 1-4 to select channel)
+    // --- MODIFIER ACCESSORS ---
+    bool isStartHeld();
+    bool isChannelHeld();
     // run state + start/stop button debounce state
     bool isRunning = false;
     bool startLastReading = false;

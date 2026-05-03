@@ -198,10 +198,10 @@ void SimpleSequencer::midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel
 
 void SimpleSequencer::setupPins(){
   // 1. Setup encoder pins FIRST
-  for (uint8_t e=0; e<4; e++){
-    pinMode(ENC_A[e], INPUT_PULLUP);
-    pinMode(ENC_B[e], INPUT_PULLUP);
-    pinMode(ENC_SW[e], INPUT_PULLUP);
+  // Pot push buttons (used as encoder switches) are configured later; no quadrature encoders present
+  // (analog pot pins do not need pinMode). Ensure pot push buttons are inputs:
+  for (uint8_t p=0; p< (sizeof(POT_BTN_PINS)/sizeof(POT_BTN_PINS[0])); p++){
+    pinMode(POT_BTN_PINS[p], INPUT_PULLUP);
   }
   // 2. Setup matrix pins (rows inputs, cols outputs)
   for (uint8_t c=0; c< (sizeof(MATRIX_COL_PINS)/sizeof(MATRIX_COL_PINS[0])); c++){
@@ -211,8 +211,7 @@ void SimpleSequencer::setupPins(){
   for (uint8_t r=0; r< (sizeof(MATRIX_ROW_PINS)/sizeof(MATRIX_ROW_PINS[0])); r++){
     pinMode(MATRIX_ROW_PINS[r], INPUT_PULLUP);
   }
-  pinMode(CHANNEL_BTN_PIN, INPUT_PULLUP);
-  pinMode(START_STOP_PIN, INPUT_PULLUP);
+  // Note: START / CHANNEL modifiers are now matrix buttons (see MATRIX_BTN_START_INDEX / MATRIX_BTN_CHANNEL_INDEX)
 
   // 3. Handle LED_BUILTIN conflict (Pin 13)
   bool isPin13Used = false;
@@ -239,8 +238,8 @@ void SimpleSequencer::handleButtonIRQ(uint8_t idx){
 }
 
 void SimpleSequencer::loop(){
-  // --- TRACK THE FILL PERFORMANCE BUTTON (Now on Pin 28) ---
-  fillModeActive = (digitalRead(CHANNEL_BTN_PIN) == LOW);
+  // --- TRACK THE FILL PERFORMANCE BUTTON (matrix mapped) ---
+  fillModeActive = isChannelHeld();
 
   // UI-only loop: read controls and update display. Time-critical MIDI work runs in engine timer.
   readButtons();
@@ -249,8 +248,8 @@ void SimpleSequencer::loop(){
   // NOTE: Start/Stop now requires BOTH the FN and FILL buttons held together (pins 27 + 28)
   unsigned long now = millis();
 
-  // require both START_STOP_PIN and CHANNEL_BTN_PIN to be held for a transport toggle
-  bool startReading = (digitalRead(START_STOP_PIN) == LOW && digitalRead(CHANNEL_BTN_PIN) == LOW);
+  // require both START and CHANNEL matrix buttons to be held for a transport toggle
+  bool startReading = (isStartHeld() && isChannelHeld());
   if (startReading != startLastReading){
     startLastDebounceTime = now;
   }
@@ -350,19 +349,18 @@ void SimpleSequencer::readButtons(){
 
 // Map row/col to linear button index (0..29)
 static inline uint8_t matrixIndex(uint8_t row, uint8_t col){
-  return (row * SimpleSequencer::MATRIX_COLS) + col;
+  return (row * MATRIX_COLS) + col;
 }
 
 // Called when a debounced press is detected
 void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   uint8_t i = matrixIndex(row,col);
   // Reuse existing pressed behavior from legacy handler
-  bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
-  if (chanModHeld && i < NUM_CHANNELS) {
+  if (isChannelHeld() && i < NUM_CHANNELS) {
     selectedChannel = i;
     return;
   }
-  else if ((digitalRead(START_STOP_PIN) == LOW) && i < NUM_CHANNELS){
+  else if (isStartHeld() && i < NUM_CHANNELS){
     muted[i] = !muted[i];
     startStopModifierFlag = true;
     return;
@@ -379,7 +377,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
 void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
   uint8_t i = matrixIndex(row,col);
   if (pendingToggle[i]){
-    bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+    bool startHeld = isStartHeld();
     if (startHeld) {
       pendingToggle[i] = false;
     } else {
@@ -439,6 +437,17 @@ void SimpleSequencer::scanMatrixStep(){
   // restore column to idle and advance
   digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_IDLE);
   matrixScanCol = (matrixScanCol + 1) % MATRIX_COLS;
+}
+
+// --- Modifier accessors using matrix indices -----------------
+bool SimpleSequencer::isStartHeld(){
+  if (MATRIX_BTN_START_INDEX < MATRIX_KEYS) return matrixState[MATRIX_BTN_START_INDEX];
+  return false;
+}
+
+bool SimpleSequencer::isChannelHeld(){
+  if (MATRIX_BTN_CHANNEL_INDEX < MATRIX_KEYS) return matrixState[MATRIX_BTN_CHANNEL_INDEX];
+  return false;
 }
 
 void SimpleSequencer::readEncoders(){
