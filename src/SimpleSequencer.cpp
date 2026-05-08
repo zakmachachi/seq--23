@@ -371,7 +371,11 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       if (isFunctionHeld()){
         muted[ch] = !muted[ch];
         startStopModifierFlag = true;
-        Serial.print("MUTE CH"); Serial.println(ch+1);
+        muteAnimCh    = ch;
+        muteAnimMuted = muted[ch];
+        muteAnimEndMs = millis() + 600;
+        Serial.print("MUTE CH"); Serial.print(ch+1);
+        Serial.println(muted[ch] ? " ON" : " OFF");
       } else {
         selectedChannel = ch;
         Serial.print("SEL CH"); Serial.println(ch+1);
@@ -478,6 +482,9 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
       pendingToggle[i] = false;
     }
   }
+  // Always release the held-step latch when this step is released, otherwise a
+  // later Function tap would keep marking the last-touched step as a fill.
+  if (heldStep == (int8_t)i) heldStep = -1;
 }
 // --- Modifier accessors using matrix indices -----------------
 bool SimpleSequencer::isFunctionHeld(){
@@ -1251,6 +1258,27 @@ void SimpleSequencer::drawDisplay(){
     fillAnimEndMs = 0;
   }
 
+  // Mute toggle splash
+  if (muteAnimEndMs && nowMs < muteAnimEndMs){
+    display.clearDisplay();
+    display.drawRect(0, 0, 128, 64, SH110X_WHITE);
+    display.setTextColor(SH110X_WHITE);
+    display.setTextSize(2);
+    display.setCursor(8, 6);
+    display.print("CH "); display.print(muteAnimCh + 1);
+    display.setTextSize(3);
+    display.setCursor(8, 30);
+    display.print(muteAnimMuted ? "MUTE" : "ON");
+    if (muteAnimMuted){
+      // Strikethrough decorate
+      display.drawLine(8, 44, 80, 44, SH110X_WHITE);
+    }
+    display.display();
+    return;
+  } else if (muteAnimEndMs && nowMs >= muteAnimEndMs){
+    muteAnimEndMs = 0;
+  }
+
   if (activeMenu == 1){ drawNotesView(); return; }
   if (activeMenu == 2){ drawEuclidView(); return; }
   if (activeMenu == 3){ drawStepVisualiser(); return; }
@@ -1727,63 +1755,66 @@ void SimpleSequencer::drawNotesView(){
   if (sm > 6) sm = 6;
   bool genOn = (sm != 0);
 
+  // ── CHANNEL STRIP: all 6 with selected + mute state ─────────
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 21;
+    bool sel = (c == selectedChannel);
+    if (sel){
+      display.fillRect(bx, 0, 20, 10, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 20, 10, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 4, 1);
+    display.print(c + 1);
+    if (muted[c]){
+      display.drawLine(bx + 1, 5, bx + 18, 5,
+                       sel ? SH110X_BLACK : SH110X_WHITE);
+    }
+  }
   display.setTextColor(SH110X_WHITE);
 
-  // ── TOP ROW: Channel + Root note ─────────────────────────────
+  // ── ROOT + SCALE ROW ────────────────────────────────────────
   uint8_t p = channelPitch[ch];
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print("CH"); display.print(ch+1);
-  // Root note bigger on the right
   display.setTextSize(2);
-  display.setCursor(48, 0);
+  display.setCursor(0, 13);
   display.print(noteNames[p % 12]); display.print((p / 12) - 1);
-  // Mute marker
-  if (muted[ch]){
-    display.setTextSize(1);
-    display.setCursor(110, 0);
-    display.print("MUT");
-  }
-  display.drawFastHLine(0, 18, 128, SH110X_WHITE);
 
-  // ── MIDDLE ROW: Scale + Generative Status ────────────────────
-  display.setTextSize(1);
-  display.setCursor(0, 23);
-  display.print("SCL:");
   display.setTextSize(2);
-  display.setCursor(28, 21);
+  display.setCursor(48, 13);
   display.print(scaleNames[sm]);
 
-  display.setTextSize(1);
-  display.setCursor(96, 23);
+  // GEN / OFF chip (top right)
   if (genOn){
-    display.fillRect(94, 21, 32, 11, SH110X_WHITE);
+    display.fillRect(108, 12, 20, 11, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
-    display.setCursor(102, 23);
+    display.setTextSize(1);
+    display.setCursor(110, 14);
     display.print("GEN");
     display.setTextColor(SH110X_WHITE);
   } else {
-    display.drawRect(94, 21, 32, 11, SH110X_WHITE);
-    display.setCursor(100, 23);
+    display.drawRect(108, 12, 20, 11, SH110X_WHITE);
+    display.setTextSize(1);
+    display.setCursor(110, 14);
     display.print("OFF");
   }
-  display.drawFastHLine(0, 36, 128, SH110X_WHITE);
+  display.drawFastHLine(0, 31, 128, SH110X_WHITE);
 
-  // ── BOTTOM ROW: Slide% / Octave / Velocity / Gate / BPM ──────
+  // ── PARAM ROWS ──────────────────────────────────────────────
   display.setTextSize(1);
-  display.setCursor(0, 41);
+  display.setCursor(0, 35);
   display.print("SLD:"); display.print(randomSlideProb[ch]); display.print("%");
-
-  display.setCursor(64, 41);
+  display.setCursor(64, 35);
   display.print("SPRD:"); display.print(octaveSpread[ch]);
 
-  display.setCursor(0, 53);
+  display.setCursor(0, 46);
   display.print("VEL:"); display.print(channelVelocity[ch]);
-
-  display.setCursor(48, 53);
+  display.setCursor(64, 46);
   display.print("GT:"); display.print(noteLenNames[noteLenIdx]);
 
-  display.setCursor(90, 53);
+  display.setCursor(0, 57);
   display.print("BPM:"); display.print(bpm);
 
   display.display();

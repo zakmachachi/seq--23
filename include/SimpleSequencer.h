@@ -98,6 +98,10 @@ class SimpleSequencer {
     uint32_t fillAnimEndMs = 0;
     uint8_t fillAnimStep = 0;
     bool fillAnimSet = false;
+    // Mute toggle feedback splash
+    uint32_t muteAnimEndMs = 0;
+    uint8_t muteAnimCh = 0;
+    bool muteAnimMuted = false;
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // --- HARDWARE LED GRID ---
