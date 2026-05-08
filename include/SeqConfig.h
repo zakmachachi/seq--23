@@ -22,12 +22,12 @@ static const uint8_t MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS;
 
 // Matrix special buttons (indexes are row-major: idx = row * MATRIX_COLS + col)
 static const uint8_t MATRIX_BTN_FUNCTION_INDEX = 22;  // Hardware: physical function/modifier key (matrix idx 22)
-static const uint8_t MATRIX_BTN_FILL_INDEX     = 15;  // Button 16 — Fill (performance)
-static const uint8_t MATRIX_BTN_PAGE_INDEX     = 16;  // Button 17 — Page (transport modifier)
-static const uint8_t MATRIX_BTN_MENU1_INDEX    = 18;  // Button 19 — Menu: Notes
-static const uint8_t MATRIX_BTN_MENU2_INDEX    = 19;  // Button 20 — Menu: Euclid
-static const uint8_t MATRIX_BTN_MENU3_INDEX    = 20;  // Button 21 — Menu: Step Visualizer
-static const uint8_t MATRIX_BTN_MENU4_INDEX    = 17;  // Button 18 — reserved
+static const uint8_t MATRIX_BTN_PAGE_INDEX     = 16;  // Page (transport modifier) — verified KEY 16
+static const uint8_t MATRIX_BTN_FILL_INDEX     = 17;  // Fill (performance) — verified KEY 17
+static const uint8_t MATRIX_BTN_MENU1_INDEX    = 18;  // Menu: Notes
+static const uint8_t MATRIX_BTN_MENU2_INDEX    = 19;  // Menu: Euclid
+static const uint8_t MATRIX_BTN_MENU3_INDEX    = 20;  // Menu: Step Visualizer
+static const uint8_t MATRIX_BTN_MENU4_INDEX    = 255; // Disabled (no physical Menu 4 button)
 // Channel select buttons (pressing alone = select, Function held = mute/unmute)
 static const uint8_t MATRIX_BTN_CH[6] = {29, 28, 26, 25, 24, 23}; // Buttons 30,29,27,26,25,24 → Ch1-6 (skip dead 27)
 // Transport: Function + Page held together = Start/Stop toggle

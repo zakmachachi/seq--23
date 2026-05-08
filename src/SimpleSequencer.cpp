@@ -677,8 +677,6 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
           }
           if (!anyActive){
             for (uint8_t s = 0; s < NUM_STEPS; s++){
-              // Skip the slot that maps to the Fill button — user can't reach it
-              if (s == MATRIX_BTN_FILL_INDEX) continue;
               steps[ch][s] = true;
             }
           }
