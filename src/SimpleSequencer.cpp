@@ -628,6 +628,18 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       if (euclidScaleMode[ch] == 0){
         if (lastScaleMode[ch] == 0) lastScaleMode[ch] = 1; // safety: fall back to Major
         euclidScaleMode[ch] = lastScaleMode[ch];
+        // First-time helper: if the user has no rhythm set on this channel
+        // (no manual steps and Euclid off), enable all 16 so they hear
+        // something immediately. Otherwise respect their existing pattern.
+        if (!euclidEnabled[ch]){
+          bool anyActive = false;
+          for (uint8_t s = 0; s < NUM_STEPS; s++){
+            if (steps[ch][s]){ anyActive = true; break; }
+          }
+          if (!anyActive){
+            for (uint8_t s = 0; s < NUM_STEPS; s++) steps[ch][s] = true;
+          }
+        }
         randomizeEuclidMelody(ch);
         Serial.print("GEN CH"); Serial.print(ch+1); Serial.println(" ON");
       } else {
@@ -920,7 +932,9 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     int v = (int)channelVelocity[ch] + random(-10, 10);
     stepVelocity[ch][s] = (uint8_t)constrain(v, 0, 127);
     noteLen[ch][s]      = noteLenIdx;
-    steps[ch][s]        = true; // generative mode plays all 16 steps
+    // Note: steps[] is intentionally NOT touched here. Whether a step fires
+    // is the user's rhythm decision (manual toggle or Euclid). Generative
+    // mode only paints the pitches.
   }
 }
 
