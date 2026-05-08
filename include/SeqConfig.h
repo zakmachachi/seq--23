@@ -11,8 +11,9 @@
 static const uint8_t MATRIX_ROW_PINS[5] = {6, 7, 8, 9, 10};   // INPUTS (use internal pull-ups, read LOW when pressed) - connect to rows of button matrix
 static const uint8_t MATRIX_COL_PINS[6] = {5,4, 3, 2, 1, 0};    // outputs (drive HIGH idle, LOW to scan)
 // Column idle/active states
-static const uint8_t MATRIX_COL_IDLE = HIGH;
-static const uint8_t MATRIX_COL_ACTIVE = LOW;
+// Column idle/active states: columns idle LOW, driven HIGH to scan (matches teensi.ino)
+static const uint8_t MATRIX_COL_IDLE = LOW;
+static const uint8_t MATRIX_COL_ACTIVE = HIGH;
 
 // Matrix dimensions (global)
 static const uint8_t MATRIX_ROWS = 5;
@@ -20,10 +21,18 @@ static const uint8_t MATRIX_COLS = 6;
 static const uint8_t MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS;
 
 // Matrix special buttons (indexes are row-major: idx = row * MATRIX_COLS + col)
-// Set START (play) to matrix element 24 for now.
-static const uint8_t MATRIX_BTN_START_INDEX = 24;
-// Channel modifier (fill) — mapped to a matrix element; set to 25 by default (adjust if different)
-static const uint8_t MATRIX_BTN_CHANNEL_INDEX = 25;
+static const uint8_t MATRIX_BTN_FUNCTION_INDEX = 21;  // Button 22 — physical function/modifier key
+static const uint8_t MATRIX_BTN_FILL_INDEX     = 15;  // Button 16 — Fill (performance)
+static const uint8_t MATRIX_BTN_PAGE_INDEX     = 16;  // Button 17 — Page (transport modifier)
+static const uint8_t MATRIX_BTN_MENU1_INDEX    = 18;  // Button 19 — Menu: Notes
+static const uint8_t MATRIX_BTN_MENU2_INDEX    = 19;  // Button 20 — Menu: Euclid
+static const uint8_t MATRIX_BTN_MENU3_INDEX    = 20;  // Button 21 — Menu: Step Visualizer
+static const uint8_t MATRIX_BTN_MENU4_INDEX    = 17;  // Button 18 — reserved
+// Channel select buttons (pressing alone = select, Function held = mute/unmute)
+static const uint8_t MATRIX_BTN_CH[6] = {29, 28, 26, 25, 24, 23}; // Buttons 30,29,27,26,25,24 → Ch1-6 (skip dead 27)
+// Transport: Function + Page held together = Start/Stop toggle
+static const uint8_t MATRIX_BTN_START_INDEX   = MATRIX_BTN_FUNCTION_INDEX; // kept for runEngine compat
+static const uint8_t MATRIX_BTN_CHANNEL_INDEX = MATRIX_BTN_PAGE_INDEX;     // kept for runEngine compat
 
 // Analog outs (for CV) #TODO: update these for new PCB when needed; not currently used but will be in future updates
 static const uint8_t MAX_MOSI = 11; // SPI MOSI pin for DAC (not used at the moment but will be in future updates)
@@ -48,12 +57,10 @@ static const uint8_t OLED2_SDA_PIN = 17;
 static const uint8_t OLED2_SCL_PIN = 16;
 
 // --- Previous encoder/button/LED mappings removed in favour of matrix/pots ---
-// NOTE: some of these new pin assignments overlap with earlier defaults (e.g. LED_DATA_PIN
-// previously used pin 16). Update wiring or LED pin if needed. Keep MIDI pins as before unless
-// your PCB remapped them.
+// NOTE: LEDs are currently disabled in firmware during button/pot bring-up.
 
 // Sequencer parameters
-static const uint8_t NUM_CHANNELS = 4;
+static const uint8_t NUM_CHANNELS = 6;
 static const uint8_t NUM_STEPS = 16;
 
 // MIDI TX/RX: keep defaults unless your PCB remapped MIDI
@@ -61,7 +68,9 @@ static const uint8_t NUM_STEPS = 16;
 static const uint8_t MIDI_TX_PIN = 20; // MIDI OUT (connect to DIN of MIDI OUT opto/driver)
 static const uint8_t MIDI_RX_PIN = 21; // MIDI IN (connect from MIDI IN opto)
 
-// LED data pin for chained per-step LEDs
-static const uint8_t LED_DATA_PIN = 29;
+// MIDI serial interface (Serial5 on Teensy 4.1 uses pins 20/21)
+#define MIDI_SERIAL Serial5
+
+// LED pin removed while LED features are disabled.
 
 #endif

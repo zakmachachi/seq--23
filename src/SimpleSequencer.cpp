@@ -1,5 +1,6 @@
 #include "SimpleSequencer.h"
 #include <IntervalTimer.h>
+#include <math.h>
 
 // Background Hardware Timer for flawless MIDI clock
 static IntervalTimer midiClockTimer;
@@ -14,7 +15,7 @@ static void internalClockTickWrapper();
 
 void sendClockISR() {
   // ISR must be as tiny as possible: emit MIDI Clock and advance internal tick counter
-  Serial8.write(0xF8);
+  MIDI_SERIAL.write(0xF8);
   internalClockTickWrapper();
 }
 // MIDI clock timing (24 PPQN)
@@ -56,74 +57,41 @@ static float getDivisionFactor(SimpleSequencer::Division d){
 
 SimpleSequencer::SimpleSequencer()
   : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0),
-    ledStrip(NUM_STEPS, 17, NEO_GRB + NEO_KHZ800)
+    ledStrip(0, 0, NEO_GRB + NEO_KHZ800)
 {
-  // Default base pitch per channel
-
   for (uint8_t c=0;c<NUM_CHANNELS;c++){
     pulses[c]=4;
     euclidOffset[c] = 0;
     retrig[c]=1;
     euclidEnabled[c]=false;
     euclidScaleMode[c] = 0;
-    muted[c]=false; // <-- All channels start unmuted
+    muted[c]=false;
     noteOffTick[c]=0;
-    for (uint8_t s=0; s<NUM_STEPS; s++) fillState[c][s] = 0;
-    for(uint8_t s=0;s<NUM_STEPS;s++){
+    for (uint8_t s=0; s<NUM_STEPS; s++){
+      fillState[c][s] = 0;
       steps[c][s]=false;
       euclidPattern[c][s]=false;
-      // --- THE FIX: 255 means "Use Global Pitch" ---
       pitch[c][s] = 255;
-      // --- THE FIX: 255 means "Use Global Length" ---
       noteLen[c][s] = 255;
-      // ratchet default: off
       stepRatchet[c][s] = 0;
-      // default Accent (Velocity) and Slide
-      stepVelocity[c][s] = 255; // use channel default
+      stepVelocity[c][s] = 255;
       stepSlide[c][s] = false;
       pendingToggle[s] = false;
     }
-    channelPitch[c] = 36; // Default each channel's base pitch to C2
-    channelVelocity[c] = 96; // default channel velocity (initialized to 96)
-    // ratchet engine defaults
+    channelPitch[c] = 36;
+    channelVelocity[c] = 96;
     ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
   }
-  // initialize matrix scanner state
-  for (uint8_t k=0;k<SimpleSequencer::MATRIX_KEYS;k++){
+  for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
     matrixState[k] = false;
     matrixLastDebounce[k] = 0;
   }
   lastMidiClockMicros = 0;
-  noteLenIdx = 4; // default to 1/16 (use shorter gate to avoid envelope collisions)
+  noteLenIdx = 4;
   absoluteTickCounter = 0;
 }
-
-// define per-button ISR forwarders (attachInterrupt requires a no-arg function)
-static void isr_btn_0() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(0); }
-static void isr_btn_1() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(1); }
-static void isr_btn_2() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(2); }
-static void isr_btn_3() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(3); }
-static void isr_btn_4() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(4); }
-static void isr_btn_5() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(5); }
-static void isr_btn_6() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(6); }
-static void isr_btn_7() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(7); }
-static void isr_btn_8() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(8); }
-static void isr_btn_9() { if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(9); }
-static void isr_btn_10(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(10); }
-static void isr_btn_11(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(11); }
-static void isr_btn_12(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(12); }
-static void isr_btn_13(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(13); }
-static void isr_btn_14(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(14); }
-static void isr_btn_15(){ if (SimpleSequencer::instancePtr) SimpleSequencer::instancePtr->handleButtonIRQ(15); }
-
-static void (* const isr_table[NUM_STEPS])() = {
-  isr_btn_0, isr_btn_1, isr_btn_2, isr_btn_3,
-  isr_btn_4, isr_btn_5, isr_btn_6, isr_btn_7,
-  isr_btn_8, isr_btn_9, isr_btn_10, isr_btn_11,
-  isr_btn_12, isr_btn_13, isr_btn_14, isr_btn_15
-};
 
 void SimpleSequencer::begin(){
   // set instance pointer for ISRs
@@ -151,15 +119,11 @@ void SimpleSequencer::begin(){
 
   // initialize display
   display.begin(0x3C);
-  // Initialize physical LEDs
-  ledStrip.begin();
-  ledStrip.setBrightness(100);
-  ledStrip.show();
-  // Run unified boot animation (LEDs + OLED)
-  bootAnimation();
+  // LEDs disabled for now (hardware bring-up)
+  // ledStrip initialization and boot animation removed.
 
-  // Initialize hardware Serial8 for MIDI at 31250 baud
-  Serial8.begin(31250);
+  // Initialize hardware MIDI_SERIAL for MIDI at 31250 baud
+  MIDI_SERIAL.begin(31250);
   // initialize high-resolution clock reference for internal MIDI output
   lastMidiClockMicros = micros();
 
@@ -176,8 +140,8 @@ void SimpleSequencer::begin(){
 // Removed helper setStepLED and refreshStepLEDs; using updateLEDs() below.
 
 void SimpleSequencer::midiSendByte(uint8_t b){
-  // Use hardware Serial8 for MIDI output (31250 baud)
-  Serial8.write(b);
+  // Use hardware MIDI_SERIAL for MIDI output (31250 baud)
+  MIDI_SERIAL.write(b);
 }
 
 void SimpleSequencer::midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel){
@@ -209,13 +173,16 @@ void SimpleSequencer::setupPins(){
     digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
   }
   for (uint8_t r=0; r< (sizeof(MATRIX_ROW_PINS)/sizeof(MATRIX_ROW_PINS[0])); r++){
-    pinMode(MATRIX_ROW_PINS[r], INPUT_PULLUP);
+    // Use pulldown on rows; columns are driven HIGH when active
+    pinMode(MATRIX_ROW_PINS[r], INPUT_PULLDOWN);
   }
   // Note: START / CHANNEL modifiers are now matrix buttons (see MATRIX_BTN_START_INDEX / MATRIX_BTN_CHANNEL_INDEX)
 
   // 3. Handle LED_BUILTIN conflict (Pin 13)
   bool isPin13Used = false;
-  for (uint8_t e=0; e<4; e++) if (ENC_SW[e] == 13) isPin13Used = true;
+  for (uint8_t p=0; p< (sizeof(POT_BTN_PINS)/sizeof(POT_BTN_PINS[0])); p++){
+    if (POT_BTN_PINS[p] == 13) { isPin13Used = true; break; }
+  }
 
   if (!isPin13Used) {
     pinMode(LED_BUILTIN, OUTPUT);
@@ -239,7 +206,7 @@ void SimpleSequencer::handleButtonIRQ(uint8_t idx){
 
 void SimpleSequencer::loop(){
   // --- TRACK THE FILL PERFORMANCE BUTTON (matrix mapped) ---
-  fillModeActive = isChannelHeld();
+  fillModeActive = isFillHeld();
 
   // UI-only loop: read controls and update display. Time-critical MIDI work runs in engine timer.
   readButtons();
@@ -249,7 +216,7 @@ void SimpleSequencer::loop(){
   unsigned long now = millis();
 
   // require both START and CHANNEL matrix buttons to be held for a transport toggle
-  bool startReading = (isStartHeld() && isChannelHeld());
+  bool startReading = isFunctionHeld() && matrixState[MATRIX_BTN_PAGE_INDEX];
   if (startReading != startLastReading){
     startLastDebounceTime = now;
   }
@@ -299,9 +266,14 @@ void SimpleSequencer::loop(){
     }
   }
   startLastReading = startReading;
-  // serial command: 't' to run a 10s switch test
+  // serial commands: drain buffer and execute only the latest typed command
   if (Serial.available()){
-    char c = Serial.read();
+    char c = 0;
+    while (Serial.available()){
+      char ch = Serial.read();
+      if (ch == '\n' || ch == '\r') continue;
+      c = ch;
+    }
     if (c == 't' || c == 'T') runSwitchTest(10000);
     if (c == 'd' || c == 'D'){
       // cycle division
@@ -342,32 +314,100 @@ void SimpleSequencer::loop(){
   }
 }
 
-void SimpleSequencer::readButtons(){
-  // Matrix scanning step: non-blocking single-column scan
-  scanMatrixStep();
-}
-
 // Map row/col to linear button index (0..29)
 static inline uint8_t matrixIndex(uint8_t row, uint8_t col){
   return (row * MATRIX_COLS) + col;
 }
 
+void SimpleSequencer::scanMatrixStep(){
+  uint32_t now = millis();
+  uint8_t col = matrixScanCol;
+
+  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_ACTIVE);
+  delayMicroseconds(5);
+
+  for (uint8_t r = 0; r < MATRIX_ROWS; r++){
+    uint8_t raw = (digitalRead(MATRIX_ROW_PINS[r]) == HIGH) ? 1 : 0; // pressed when HIGH (match teensi.ino)
+    uint8_t idx = matrixIndex(r, col);
+    if (raw != matrixRawState[idx]){
+      matrixRawState[idx] = raw;
+      matrixLastDebounce[idx] = now;
+    }
+    if ((now - matrixLastDebounce[idx]) > debounceMs){
+      bool pressed = (matrixRawState[idx] == 1);
+      if (pressed != matrixState[idx]){
+        matrixState[idx] = pressed;
+        if (pressed) onKeyPress(r, col); else onKeyRelease(r, col);
+      }
+    }
+  }
+
+  // restore column to idle and advance
+  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_IDLE);
+  matrixScanCol = (matrixScanCol + 1) % MATRIX_COLS;
+}
+
+void SimpleSequencer::readButtons(){
+  // Matrix scanning step: non-blocking single-column scan
+  scanMatrixStep();
+}
+
 // Called when a debounced press is detected
 void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
-  uint8_t i = matrixIndex(row,col);
-  // Reuse existing pressed behavior from legacy handler
-  if (isChannelHeld() && i < NUM_CHANNELS) {
-    selectedChannel = i;
+  uint8_t i = matrixIndex(row, col);
+  Serial.print("KEY "); Serial.println(i); // debug — remove once confirmed working
+
+  // --- Channel select buttons ---
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
+    if (i == MATRIX_BTN_CH[ch]){
+      if (isFunctionHeld()){
+        muted[ch] = !muted[ch];
+        startStopModifierFlag = true;
+        Serial.print("MUTE CH"); Serial.println(ch+1);
+      } else {
+        selectedChannel = ch;
+        Serial.print("SEL CH"); Serial.println(ch+1);
+      }
+      return;
+    }
+  }
+
+  // --- Function button: modifier only, no action on press ---
+  if (i == MATRIX_BTN_FUNCTION_INDEX){ return; }
+
+  // --- Fill button: state read via isFillHeld() in loop() ---
+  if (i == MATRIX_BTN_FILL_INDEX){ return; }
+
+  // --- Page button: modifier only, no action ---
+  if (i == MATRIX_BTN_PAGE_INDEX){
     return;
   }
-  else if (isStartHeld() && i < NUM_CHANNELS){
-    muted[i] = !muted[i];
-    startStopModifierFlag = true;
+
+  // --- Menu buttons ---
+  if (i == MATRIX_BTN_MENU1_INDEX){
+    activeMenu = 1;  // Notes/Scale page
+    heldStep = -1; focusEncoder = 0;
+    Serial.print("MENU1 -> activeMenu=1 (Notes)"); Serial.println();
     return;
   }
-  else {
+  if (i == MATRIX_BTN_MENU2_INDEX){
+    activeMenu = 3;  // Step page
+    heldStep = -1; focusEncoder = 0;
+    Serial.print("MENU2 -> activeMenu=3 (Step)"); Serial.println();
+    return;
+  }
+  if (i == MATRIX_BTN_MENU3_INDEX){
+    activeMenu = 2;  // Euclid page
+    heldStep = -1; focusEncoder = 0;
+    Serial.print("MENU3 -> activeMenu=2 (Euclid)"); Serial.println();
+    return;
+  }
+  if (i == MATRIX_BTN_MENU4_INDEX){ return; }
+
+  // --- Step buttons 0-15 only ---
+  if (i < NUM_STEPS){
     pendingToggle[i] = true;
-    heldStep = i;
+    heldStep = (int8_t)i;
     lastEncoderMoveTime = millis();
     focusEncoder = 0;
   }
@@ -376,6 +416,11 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
 // Called when a debounced release is detected
 void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
   uint8_t i = matrixIndex(row,col);
+  if (i >= NUM_STEPS){
+    // Non-step button released — just ensure heldStep is cleared if it was this button
+    if (heldStep == (int8_t)i) heldStep = -1;
+    return;
+  }
   if (pendingToggle[i]){
     bool startHeld = isStartHeld();
     if (startHeld) {
@@ -407,315 +452,164 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
       pendingToggle[i] = false;
     }
   }
-  if (heldStep == (int8_t)i) heldStep = -1;
 }
-
-// Non-blocking single-column matrix scan. Call frequently (e.g., in main loop).
-void SimpleSequencer::scanMatrixStep(){
-  unsigned long now = millis();
-  // set all columns idle first
-  for (uint8_t c=0;c<MATRIX_COLS;c++) digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
-  // pull active column
-  uint8_t col = matrixScanCol;
-  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_ACTIVE);
-  delayMicroseconds(5); // settle
-  for (uint8_t r=0;r<MATRIX_ROWS;r++){
-    uint8_t raw = (digitalRead(MATRIX_ROW_PINS[r]) == LOW) ? 1 : 0; // pressed when LOW
-    uint8_t idx = matrixIndex(r,col);
-    if (raw != matrixRawState[idx]){
-      matrixRawState[idx] = raw;
-      matrixLastDebounce[idx] = now;
-    }
-    if ((now - matrixLastDebounce[idx]) > debounceMs){
-      bool pressed = (matrixRawState[idx] == 1);
-      if (pressed != matrixState[idx]){
-        matrixState[idx] = pressed;
-        if (pressed) onKeyPress(r,col); else onKeyRelease(r,col);
-      }
-    }
-  }
-  // restore column to idle and advance
-  digitalWrite(MATRIX_COL_PINS[col], MATRIX_COL_IDLE);
-  matrixScanCol = (matrixScanCol + 1) % MATRIX_COLS;
-}
-
 // --- Modifier accessors using matrix indices -----------------
-bool SimpleSequencer::isStartHeld(){
-  if (MATRIX_BTN_START_INDEX < MATRIX_KEYS) return matrixState[MATRIX_BTN_START_INDEX];
-  return false;
+bool SimpleSequencer::isFunctionHeld(){
+  return (MATRIX_BTN_FUNCTION_INDEX < MATRIX_KEYS) && matrixState[MATRIX_BTN_FUNCTION_INDEX];
 }
 
-bool SimpleSequencer::isChannelHeld(){
-  if (MATRIX_BTN_CHANNEL_INDEX < MATRIX_KEYS) return matrixState[MATRIX_BTN_CHANNEL_INDEX];
-  return false;
+bool SimpleSequencer::isFillHeld(){
+  return (MATRIX_BTN_FILL_INDEX < MATRIX_KEYS) && matrixState[MATRIX_BTN_FILL_INDEX];
 }
+
+// Aliases so existing runEngine/loop code compiles without changes
+bool SimpleSequencer::isStartHeld()   { return isFunctionHeld() && matrixState[MATRIX_BTN_PAGE_INDEX]; }
+bool SimpleSequencer::isChannelHeld() { return matrixState[MATRIX_BTN_PAGE_INDEX]; }
 
 void SimpleSequencer::readEncoders(){
-  static uint8_t lastState[4] = {0,0,0,0};
-  static unsigned long lastSwDebounce[4] = {0,0,0,0};
-  static bool lastSwState[4] = {0,0,0,0};
-  static bool lastRawSwState[4] = {0,0,0,0}; // <-- THE FIX: Missing raw tracker added!
-  
-  const int8_t encTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
-  static bool encInitialized = false;
-  
-  if (!encInitialized){
-    for (uint8_t e=0;e<4;e++){
-      uint8_t a = digitalRead(ENC_A[e])==HIGH ? 1:0;
-      uint8_t b = digitalRead(ENC_B[e])==HIGH ? 1:0;
-      lastState[e] = (a<<1) | b;
+  // Replaced quadrature encoder handling with 6 potentiometers (infinite-scroll style)
+  const uint8_t POT_COUNT = (uint8_t)(sizeof(POT_A_PINS)/sizeof(POT_A_PINS[0]));
+  static float potPrevAngle[6] = {0};
+  static float potAccumulator[6] = {0};
+  static bool potFirstRun[6] = {true, true, true, true, true, true};
+  static float potMinTick[6] = {0.08f,0.08f,0.08f,0.08f,0.08f,0.08f};
+  const float TICK_ANGLE_DEFAULT = 0.08f;
+  const float MIN_TICK = 0.03f;
+  const float MAX_TICK = 0.20f;
+  const float TICK_DECAY = 0.96f;
+  const float SMALL_TICK_DIVIDER = 10.0f;
+  static int potLastTick[6] = {0,0,0,0,0,0};
+
+  // Pot button debounce (matches teensi.ino logic)
+  static bool potBtnState[6] = {false,false,false,false,false,false};
+  static bool lastPotBtnState[6] = {false,false,false,false,false,false};
+  static unsigned long lastPotBtnChange[6] = {0,0,0,0,0,0};
+  const unsigned long POT_BTN_DEBOUNCE_MS = 10;
+
+  // Scan pot buttons (active LOW)
+  for (uint8_t i=0;i<POT_COUNT;i++){
+    bool pressed = (digitalRead(POT_BTN_PINS[i]) == LOW);
+    if (pressed != lastPotBtnState[i]){
+      lastPotBtnChange[i] = millis();
+      lastPotBtnState[i] = pressed;
+    } else if (pressed != potBtnState[i]) {
+      if ((millis() - lastPotBtnChange[i]) >= POT_BTN_DEBOUNCE_MS){
+        potBtnState[i] = pressed;
+        if (pressed) {
+          onPotButtonPress(i);
+        }
+      }
     }
-    encInitialized = true;
   }
-  
-  for (uint8_t e=0;e<4;e++){
-    uint8_t a = digitalRead(ENC_A[e])==HIGH ? 1:0;
-    uint8_t b = digitalRead(ENC_B[e])==HIGH ? 1:0;
-    uint8_t st = (a<<1) | b;
-    uint8_t idx = (lastState[e] << 2) | st;
-    int8_t delta = encTable[idx & 0x0F];
-    
-      if (delta != 0){
-      static int8_t encAcc1 = 0;
-      static int encAcc2 = 0;
-      static int encAcc3 = 0;
-      static int encAcc4 = 0;
-      int encSteps = 0; 
 
-      if (e == 0){
-        encAcc1 += delta;
-        if (abs(encAcc1) >= 2) { encSteps = encAcc1 / 2; encAcc1 %= 2; }
-      } else if (e == 1){
-        if (heldStep >= 0){
-          encAcc2 += delta;
-          if (abs(encAcc2) >= 4) { encSteps = encAcc2 / 4; encAcc2 %= 4; }
-        } else {
-          encAcc2 -= delta; 
-          if (abs(encAcc2) >= 20) { encSteps = encAcc2 / 20; encAcc2 %= 20; }
-        }
-      } else if (e == 2){
-        encAcc3 += delta;
-        if (heldStep >= 0){
-          if (abs(encAcc3) >= 4) { encSteps = encAcc3 / 4; encAcc3 %= 4; }
-        } else {
-          if (abs(encAcc3) >= 20) { encSteps = encAcc3 / 20; encAcc3 %= 20; }
-        }
-      } else if (e == 3) { // ENCODER 4 GEARBOX
-        encAcc4 += delta;
-        if (abs(encAcc4) >= 4) { 
-          encSteps = encAcc4 / 4; // 4 pulses = 1 physical click
-          encAcc4 %= 4; 
-        }
-      } else {
-        encSteps = delta;
-      }
+  // Scan pots (infinite scroll algorithm)
+  for (uint8_t i=0;i<POT_COUNT;i++){
+    int valA = analogRead(POT_A_PINS[i]);
+    int valB = analogRead(POT_B_PINS[i]);
 
-      if (encSteps != 0){
-        // show encoder focus when the encoder is actively being used
-        focusEncoder = e + 1;
-        lastEncoderMoveTime = millis();
-        if (e == 0){ // Encoder 1: BPM or Ratchet when a step is held
-          if (heldStep >= 0){
-            // RATCHET GEARBOX
-            static int ratchetAcc = 0;
-            ratchetAcc += encSteps;
-            
-            if (abs(ratchetAcc) >= 2) { // 2 encSteps = 1 full physical click
-              int rSteps = ratchetAcc / 2;
-              ratchetAcc %= 2;
-              
-              pendingToggle[heldStep] = false;
-              steps[selectedChannel][heldStep] = true;
-              int val = (int)stepRatchet[selectedChannel][heldStep] + rSteps;
-              stepRatchet[selectedChannel][heldStep] = (uint8_t)constrain(val, 0, 5);
-            }
-          } else {
-            int newBpm = (int)bpm + encSteps;
-            if (newBpm < 20) newBpm = 20;
-            if (newBpm > 300) newBpm = 300;
-            bpm = newBpm;
-            if (isRunning && !externalMidiClockActive && midiTimerRunning){
-              uint32_t interval = (60000000UL / bpm) / 24;
-              midiClockTimer.update(interval);
-            }
-          }
-        } else if (e == 1){ // encoder 2: PITCH or scale-shift when Euclid active
-          // New behavior: If START/STOP (Pin 27) is held, adjust Accent (Velocity).
-          bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
-          if (startHeld) {
-            // When START is held, encoder 2 adjusts per-step velocity (if a step is held),
-            // otherwise adjust the channel default velocity.
-            if (heldStep >= 0) {
-              pendingToggle[heldStep] = false;
-              steps[selectedChannel][heldStep] = true;
-              if (stepVelocity[selectedChannel][heldStep] == 255) stepVelocity[selectedChannel][heldStep] = channelVelocity[selectedChannel];
-              int v = (int)stepVelocity[selectedChannel][heldStep] + encSteps;
-              stepVelocity[selectedChannel][heldStep] = (uint8_t)constrain(v, 0, 127);
-            } else {
-              int v = (int)channelVelocity[selectedChannel] + encSteps;
-              channelVelocity[selectedChannel] = (uint8_t)constrain(v, 0, 127);
-            }
-          } else {
-            if (heldStep >= 0){
-              // Per-step fine adjustment (P-Lock)
-              pendingToggle[heldStep] = false;
-              steps[selectedChannel][heldStep] = true;
-              if (pitch[selectedChannel][heldStep] == 255) {
-                pitch[selectedChannel][heldStep] = channelPitch[selectedChannel];
-              }
-              int note = (int)pitch[selectedChannel][heldStep] + encSteps;
-              pitch[selectedChannel][heldStep] = (uint8_t)constrain(note, 0, 127);
-            } else {
-              // If Euclidean engine is active, rotate should shift the whole scale
-              if (euclidEnabled[selectedChannel]){
-                shiftEuclidNotes(selectedChannel, encSteps);
-              } else {
-                if (encSteps != 0){
-                  int note = (int)channelPitch[selectedChannel] + encSteps;
-                  channelPitch[selectedChannel] = (uint8_t)constrain(note, 0, 127);
-                }
-              }
-            }
-          }
-        } else if (e == 2){ // encoder 3: NOTE LENGTH
-          // Encoder 3: primary function is gate/length, but when START is held allow Slide toggling
-          bool startHeldE3 = (digitalRead(START_STOP_PIN) == LOW);
-          if (startHeldE3 && heldStep >= 0) {
-            // Use turns to set/clear slide for the held step. Positive = ON, Negative = OFF
-            if (encSteps > 0) stepSlide[selectedChannel][heldStep] = true;
-            else if (encSteps < 0) stepSlide[selectedChannel][heldStep] = false;
-          } else {
-            if (heldStep >= 0){
-              pendingToggle[heldStep] = false;
-              steps[selectedChannel][heldStep] = true;
-              if (noteLen[selectedChannel][heldStep] == 255) {
-                noteLen[selectedChannel][heldStep] = noteLenIdx;
-              }
-              int idxn = (int)noteLen[selectedChannel][heldStep] + encSteps;
-              int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
-              noteLen[selectedChannel][heldStep] = (uint8_t)constrain(idxn, 0, maxIdx);
-            } else {
-              int idxn = (int)noteLenIdx + encSteps;
-              int maxIdx = (int)(sizeof(noteLenTicks)/sizeof(noteLenTicks[0])) - 1;
-              noteLenIdx = (uint8_t)constrain(idxn, 0, maxIdx);
-            }
-          }
-        } else if (e == 3){ // encoder 4: EUCLID PULSES or OFFSET
-          if (heldStep < 0) { 
-            if (euclidEnabled[selectedChannel]){
-              bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
-              
-              if (chanModHeld) {
-                // Adjust the Shift Offset
-                int o = (int)euclidOffset[selectedChannel] + encSteps;
-                while (o < 0) o += NUM_STEPS; // Safe negative wrapping
-                euclidOffset[selectedChannel] = (uint8_t)(o % NUM_STEPS);
-              } else {
-                // Adjust the Hit Pulses
-                int p = (int)pulses[selectedChannel] + encSteps;
-                if (p < 0) p = 0;
-                if (p > NUM_STEPS) p = NUM_STEPS;
-                pulses[selectedChannel] = p;
-              }
-              updateEuclid(selectedChannel);
-            }
-          }
-        }
-      }
-    }
-    lastState[e] = st;
-    
-    // --- THE FIX: Correctly structured switch debounce logic ---
-    bool sw = (digitalRead(ENC_SW[e]) == LOW);
-    unsigned long now = millis();
-    
-    // Compare against raw state!
-    if (sw != lastRawSwState[e]){
-      lastSwDebounce[e] = now;
+    float a = (valA - 512.0f) / 512.0f;
+    float b = (valB - 512.0f) / 512.0f;
+    float angle = atan2f(b, a);
+
+    if (potFirstRun[i]){ potPrevAngle[i] = angle; potFirstRun[i] = false; }
+
+    float delta = angle - potPrevAngle[i];
+    if (delta > M_PI) delta -= 2.0f * M_PI;
+    if (delta < -M_PI) delta += 2.0f * M_PI;
+    delta = -delta; // match original direction
+
+    float absDelta = fabsf(delta);
+    if (absDelta > potMinTick[i]){
+      potMinTick[i] = fmaxf(MIN_TICK, potMinTick[i] * 0.7f);
+    } else if (absDelta > 0.01f){
+      potMinTick[i] = fmaxf(MIN_TICK, potMinTick[i] * 0.97f);
+    } else {
+      potMinTick[i] = fminf(MAX_TICK, potMinTick[i] * TICK_DECAY + TICK_ANGLE_DEFAULT * (1.0f - TICK_DECAY));
     }
 
-    if ((now - lastSwDebounce[e]) > debounceMs){
-      if (sw != lastSwState[e]){
-        lastSwState[e] = sw;
-        if (sw){
-          // encoder switch pressed — show focus
-          focusEncoder = e + 1;
-          lastEncoderMoveTime = millis();
-          // PRESSED
-          if (e == 0) {
-            // Encoder 1 Click: Fn+Click = Save, Click = enable retrig/ratchet gearbox when p-locking
-            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
-            if (chanModHeld) {
-              saveState();
-            } else {
-              if (heldStep >= 0) {
-                uint8_t &r = stepRatchet[selectedChannel][heldStep];
-                r = (r == 0) ? 1 : 0; // toggle simple ratchet enable
-                pendingToggle[heldStep] = false;
-                steps[selectedChannel][heldStep] = true;
-              }
-            }
-          }
-          else if (e == 1) {
-            // Encoder 2 Click: Cycle scale modes only when Euclid is enabled
-            if (euclidEnabled[selectedChannel]){
-              euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + 1) % 4;
-              randomizeEuclidMelody(selectedChannel);
-            } else {
-              // Ensure scale mode is off and fall back to channel note
-              euclidScaleMode[selectedChannel] = 0;
-              for (uint8_t s=0; s<NUM_STEPS; s++) pitch[selectedChannel][s] = 255;
-            }
-          }
-          else if (e == 2) {
-            // Encoder 3 Click: Clear Track / Fill or start Slide hold when not p-locking
-            bool chanModHeld = (digitalRead(CHANNEL_BTN_PIN) == LOW);
-            if (chanModHeld) {
-              clearTrack(selectedChannel);
-              focusEncoder = 3;
-              lastEncoderMoveTime = millis();
-            } else if (heldStep >= 0) {
-              // P-LOCK: Toggle Fill on held step
-              uint8_t &fs = fillState[selectedChannel][heldStep];
-              fs = (fs + 1) % 3;
-              steps[selectedChannel][heldStep] = true;
-              pendingToggle[heldStep] = false;
-            } else {
-              // Not p-locking: start global slide hold while encoder is pressed
-              encoderSlideHold = true;
-              focusEncoder = 3;
-              lastEncoderMoveTime = millis();
-            }
-          }
-          else if (e == 3){
-            // Encoder 4 Click: toggle euclid engine on/off
-            euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
-            if (euclidEnabled[selectedChannel]){
-              // If enabling and a scale is selected, regenerate melody
-              if (euclidScaleMode[selectedChannel] != 0) randomizeEuclidMelody(selectedChannel);
-              updateEuclid(selectedChannel);
-            } else {
-              // Disabling Euclid: clear scale mode and revert per-step pitches to channel note
-              euclidScaleMode[selectedChannel] = 0;
-              for (uint8_t s=0; s<NUM_STEPS; s++) pitch[selectedChannel][s] = 255;
-              updateEuclid(selectedChannel);
-            }
-          }
-        }
-        else {
-          // encoder switch released — if encoder 3 was used as slide hold, clear it
-          if (e == 2) {
-            encoderSlideHold = false;
-            focusEncoder = 0;
-          }
-        }
-      }
+    float effectiveTick = potMinTick[i];
+    if (effectiveTick == MIN_TICK) effectiveTick *= SMALL_TICK_DIVIDER;
+
+    potAccumulator[i] += delta;
+    int ticks = 0;
+    while (potAccumulator[i] >= effectiveTick){ ticks++; potAccumulator[i] -= effectiveTick; }
+    while (potAccumulator[i] <= -effectiveTick){ ticks--; potAccumulator[i] += effectiveTick; }
+
+    if (ticks != 0){
+      handlePotRotation(i, ticks);
+      int target = potLastTick[i] + ticks;
+      potLastTick[i] = target;
     }
-    // Record raw state for next loop
-    lastRawSwState[e] = sw;
+
+    if (ticks == 0) potLastTick[i] = 0;
+    potPrevAngle[i] = angle;
   }
 }
 
+// --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
+void SimpleSequencer::onPotButtonPress(uint8_t pot){
+  if (activeMenu == 2){
+    // Euclid page: Pot 1 button toggles euclid on/off
+    if (pot == 0){
+      euclidEnabled[selectedChannel] = !euclidEnabled[selectedChannel];
+      if (euclidEnabled[selectedChannel]) updateEuclid(selectedChannel);
+      Serial.print("EUCLID CH"); Serial.print(selectedChannel+1);
+      Serial.println(euclidEnabled[selectedChannel] ? " ON" : " OFF");
+    }
+  } else if (activeMenu == 1){
+    // Notes page: Pot 1 button regenerates melody
+    if (pot == 0){
+      randomizeEuclidMelody(selectedChannel);
+      Serial.print("MELODY CH"); Serial.print(selectedChannel+1);
+      Serial.println(" regenerated");
+    }
+  }
+}
+
+// --- POT ROTATION HANDLER: Context-dependent parameter control -------
+void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
+  if (activeMenu != 2) return;  // Only handle Euclid page for now
+  
+  // Euclid page controls
+  switch (pot){
+    case 0:  // Pot 1: cycle through channels
+      selectedChannel = (selectedChannel + ticks + NUM_CHANNELS) % NUM_CHANNELS;
+      Serial.print("SEL CH"); Serial.println(selectedChannel+1);
+      break;
+      
+    case 1:  // Pot 2: adjust pulses (hits)
+      pulses[selectedChannel] = (uint8_t)constrain(
+        (int)pulses[selectedChannel] + ticks, 0, NUM_STEPS);
+      updateEuclid(selectedChannel);
+      Serial.print("PULSES="); Serial.println(pulses[selectedChannel]);
+      break;
+      
+    case 2:  // Pot 3: adjust offset
+      euclidOffset[selectedChannel] = 
+        (euclidOffset[selectedChannel] + ticks + NUM_STEPS) % NUM_STEPS;
+      updateEuclid(selectedChannel);
+      Serial.print("OFFSET="); Serial.println(euclidOffset[selectedChannel]);
+      break;
+      
+    case 3:  // Pot 4: cycle scale mode
+      euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + ticks + 4) % 4;
+      if (euclidEnabled[selectedChannel]) randomizeEuclidMelody(selectedChannel);
+      Serial.print("SCALE="); Serial.println(euclidScaleMode[selectedChannel]);
+      break;
+      
+    case 4:  // Pot 5: adjust velocity
+      channelVelocity[selectedChannel] = (uint8_t)constrain(
+        (int)channelVelocity[selectedChannel] + ticks, 0, 127);
+      Serial.print("VEL="); Serial.println(channelVelocity[selectedChannel]);
+      break;
+      
+    case 5:  // Pot 6: adjust note length
+      noteLenIdx = (uint8_t)constrain(
+        (int)noteLenIdx + ticks, 0, 4);
+      Serial.print("GATE="); Serial.println(noteLenIdx);
+      break;
+  }
+}
 
 void SimpleSequencer::saveState() {
   SaveData data;
@@ -961,9 +855,9 @@ void SimpleSequencer::runEngine(){
   uint32_t nowMicros = micros();
   uint32_t nowMs = nowMicros / 1000;
 
-  // 1) Process any MIDI bytes from hardware Serial8
-  while (Serial8.available() > 0){
-    uint8_t b = Serial8.read();
+  // 1) Process any MIDI bytes from hardware MIDI_SERIAL
+  while (MIDI_SERIAL.available() > 0){
+    uint8_t b = MIDI_SERIAL.read();
     if (b == 0xF8){
       externalMidiClockActive = true;
       lastExternalClockMillis = nowMs;
@@ -1140,6 +1034,10 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 // CV/Gate functions removed; using MIDI out only
 
 void SimpleSequencer::drawDisplay(){
+  if (activeMenu == 1){ drawNotesView(); return; }
+  if (activeMenu == 2){ drawEuclidView(); return; }
+  if (activeMenu == 3){ drawStepVisualiser(); return; }
+
   display.clearDisplay();
 
   uint32_t now = millis();
@@ -1156,12 +1054,13 @@ void SimpleSequencer::drawDisplay(){
     return;
   }
 
+
   const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
   const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};
   const char* ratchetNames[] = {"OFF", "1/16", "1/24", "1/32", "1/48", "1/96"};
 
-  // ── DEBUG MODE: Hold both FN + START to show full grid ─────────
-  bool debugHold = (digitalRead(CHANNEL_BTN_PIN) == LOW) && (digitalRead(START_STOP_PIN) == LOW);
+  // ── DEBUG MODE: Hold both FN + FILL to show full grid ──────────
+  bool debugHold = isFunctionHeld() && isFillHeld();
   if (debugHold){
     drawDebugGrid();
     // Thin status line at top
@@ -1220,7 +1119,7 @@ void SimpleSequencer::drawDisplay(){
     // ── ENCODER 2 ────────────────────────────────────────────────
     if (fe == 1){
       if (heldStep >= 0){
-        bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+        bool startHeld = isStartHeld();
         if (startHeld) {
           // ACCENT UI
           uint8_t v = stepVelocity[selectedChannel][heldStep];
@@ -1276,7 +1175,7 @@ void SimpleSequencer::drawDisplay(){
     // ── ENCODER 3 ────────────────────────────────────────────────
     if (fe == 2){
       if (heldStep >= 0){
-        bool startHeld = (digitalRead(START_STOP_PIN) == LOW);
+        bool startHeld = isStartHeld();
         if (startHeld) {
           // SLIDE UI
           display.setTextSize(2); display.setTextColor(SH110X_WHITE);
@@ -1346,22 +1245,23 @@ void SimpleSequencer::drawDisplay(){
 
   // Row 1: Channel indicator boxes (mute state)
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 32;
+    // 6 channels across 128px: each tab is 20px wide with 1px gap = 126px total
+    int bx = c * 21;
     if (c == selectedChannel){
-      display.fillRect(bx, 0, 30, 11, SH110X_WHITE);
+      display.fillRect(bx, 0, 20, 11, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK, SH110X_WHITE);
     } else {
       if (muted[c]){
-        display.drawRect(bx, 0, 30, 11, SH110X_WHITE);
-        display.drawLine(bx, 5, bx + 29, 5, SH110X_WHITE);
+        display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
+        display.drawLine(bx, 5, bx + 18, 5, SH110X_WHITE);
       } else {
-        display.drawRect(bx, 0, 30, 11, SH110X_WHITE);
+        display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
       }
       display.setTextColor(SH110X_WHITE, SH110X_BLACK);
     }
     display.setTextSize(1);
-    display.setCursor(bx + 5, 2);
-    display.print("CH"); display.print(c + 1);
+    display.setCursor(bx + 3, 2);
+    display.print(c + 1);
   }
   display.setTextColor(SH110X_WHITE, SH110X_BLACK);
 
@@ -1406,6 +1306,11 @@ void SimpleSequencer::drawDisplay(){
   updateLEDs();
 }
 
+// LEDs disabled: no-op implementation so calls are safe during bring-up
+void SimpleSequencer::updateLEDs(){
+  (void)0;
+}
+
 void SimpleSequencer::drawDebugGrid(){
   // replicate previous grid drawing for debugging
   const int stepW = 12, stepH = 12, startX = 6, startY = 16, spacingX = 3, spacingY = 4;
@@ -1427,29 +1332,43 @@ void SimpleSequencer::drawDebugGrid(){
 
 void SimpleSequencer::runSwitchTest(uint32_t ms){
   Serial.print("Starting switch test for "); Serial.print(ms); Serial.println(" ms");
-  Serial.println("Press buttons to see state changes.");
+  Serial.println("Press buttons to see state changes. Press 'e' to jump to pot test, or any other key to cancel.");
+  // drop any stale queued chars before starting
+  while (Serial.available()) Serial.read();
   // Build initial snapshot by scanning entire matrix
   bool lastState[MATRIX_KEYS];
   for (uint8_t k=0;k<MATRIX_KEYS;k++) lastState[k] = false;
-  for (uint8_t c=0;c<MATRIX_COLS;c++){
-    digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_ACTIVE);
-    delayMicroseconds(30);
-    for (uint8_t r=0;r<MATRIX_ROWS;r++){
-      uint8_t idx = matrixIndex(r,c);
-      lastState[idx] = (digitalRead(MATRIX_ROW_PINS[r]) == LOW);
+    for (uint8_t c=0;c<MATRIX_COLS;c++){
+      digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_ACTIVE);
+      delayMicroseconds(30);
+      for (uint8_t r=0;r<MATRIX_ROWS;r++){
+        uint8_t idx = matrixIndex(r,c);
+        lastState[idx] = (digitalRead(MATRIX_ROW_PINS[r]) == HIGH);
+      }
+      digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
     }
-    digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
-  }
-  bool lastStart = (digitalRead(START_STOP_PIN) == LOW);
+  bool lastStart = isStartHeld();
   uint32_t start = millis();
   while (millis() - start < ms){
+    if (Serial.available()){
+      char cmd = Serial.read();
+      if (cmd == 'e' || cmd == 'E'){
+        Serial.println("Switch test interrupted -> pot-button test");
+        while (Serial.available()) Serial.read();
+        runEncoderSwitchTest(10000);
+        return;
+      }
+      Serial.println("Switch test cancelled");
+      while (Serial.available()) Serial.read();
+      return;
+    }
     // full matrix scan (blocking) for test
     for (uint8_t c=0;c<MATRIX_COLS;c++){
       digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_ACTIVE);
       delayMicroseconds(30);
       for (uint8_t r=0;r<MATRIX_ROWS;r++){
         uint8_t idx = matrixIndex(r,c);
-        bool s = (digitalRead(MATRIX_ROW_PINS[r]) == LOW);
+        bool s = (digitalRead(MATRIX_ROW_PINS[r]) == HIGH);
         if (s != lastState[idx]){
           Serial.print("Button "); Serial.print(idx); Serial.print(s?" pressed":" released"); Serial.println();
           digitalWrite(LED_BUILTIN, HIGH);
@@ -1460,8 +1379,8 @@ void SimpleSequencer::runSwitchTest(uint32_t ms){
       }
       digitalWrite(MATRIX_COL_PINS[c], MATRIX_COL_IDLE);
     }
-    // start/stop button
-    bool sr = (digitalRead(START_STOP_PIN) == LOW);
+    // start/stop button (matrix-mapped)
+    bool sr = isStartHeld();
     if (sr != lastStart){
       Serial.print("Start button "); Serial.print(sr?"pressed":"released"); Serial.println();
       digitalWrite(LED_BUILTIN, HIGH);
@@ -1475,35 +1394,60 @@ void SimpleSequencer::runSwitchTest(uint32_t ms){
 }
 
 void SimpleSequencer::runEncoderSwitchTest(uint32_t ms){
-  Serial.print("Starting encoder-switch test for "); Serial.print(ms); Serial.println(" ms");
-  Serial.println("Press encoder buttons to see state changes.");
-  bool lastState[4];
-  for (uint8_t i=0;i<4;i++) lastState[i] = (digitalRead(ENC_SW[i])==LOW);
+  // Legacy name kept for compatibility; now uses exact teensi.ino debounce logic.
+  Serial.print("Starting pot-button test for "); Serial.print(ms); Serial.println(" ms");
+  Serial.println("Press pot buttons to see state changes.");
+
+  const uint8_t POT_BTN_COUNT = sizeof(POT_BTN_PINS)/sizeof(POT_BTN_PINS[0]);
+  bool potBtnState[6] = {0};
+  bool lastPotBtnState[6] = {0};
+  unsigned long lastPotBtnChange[6] = {0};
+  const unsigned long POT_BTN_DEBOUNCE_MS = 10;
+
+  // initialize last raw states
+  for (uint8_t i = 0; i < POT_BTN_COUNT; i++) {
+    bool pressed = (digitalRead(POT_BTN_PINS[i]) == LOW);
+    lastPotBtnState[i] = pressed;
+    potBtnState[i] = pressed;
+    lastPotBtnChange[i] = millis();
+  }
+
   uint32_t start = millis();
   while (millis() - start < ms){
-    for (uint8_t i=0;i<4;i++){
-      bool s = (digitalRead(ENC_SW[i])==LOW);
-      if (s != lastState[i]){
-        Serial.print("Enc button "); Serial.print(i+1); Serial.print(s?" pressed":" released"); Serial.println();
-        // blink built-in LED briefly
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(30);
-        digitalWrite(LED_BUILTIN, LOW);
-        lastState[i] = s;
+    for (uint8_t i = 0; i < POT_BTN_COUNT; i++) {
+      bool pressed = (digitalRead(POT_BTN_PINS[i]) == LOW); // Active LOW
+      if (pressed != lastPotBtnState[i]) {
+        lastPotBtnChange[i] = millis();
+        lastPotBtnState[i] = pressed;
+      } else if (pressed != potBtnState[i]) {
+        if (millis() - lastPotBtnChange[i] >= POT_BTN_DEBOUNCE_MS) {
+          potBtnState[i] = pressed;
+          if (pressed) {
+            Serial.print("Potentiometer Button ");
+            Serial.print(i + 1);
+            Serial.println(" pressed");
+          } else {
+            Serial.print("Potentiometer Button ");
+            Serial.print(i + 1);
+            Serial.println(" released");
+          }
+        }
       }
     }
-    delay(8);
+    delay(1);
   }
-  Serial.println("Encoder switch test finished");
+  Serial.println("Pot-button test finished");
 }
 
 void SimpleSequencer::printEncoderRaw(){
-  Serial.println("Encoder raw states (A B SW):");
-  for (uint8_t e=0;e<4;e++){
-    int a = digitalRead(ENC_A[e]);
-    int b = digitalRead(ENC_B[e]);
-    int sw = digitalRead(ENC_SW[e]);
-    Serial.print("Enc"); Serial.print(e+1); Serial.print(": ");
+  // Legacy name kept for compatibility; print raw potentiometer readings.
+  Serial.println("Pot raw states (A B BTN):");
+  const uint8_t potCount = sizeof(POT_A_PINS)/sizeof(POT_A_PINS[0]);
+  for (uint8_t e=0;e<potCount;e++){
+    int a = analogRead(POT_A_PINS[e]);
+    int b = analogRead(POT_B_PINS[e]);
+    int sw = digitalRead(POT_BTN_PINS[e]);
+    Serial.print("Pot"); Serial.print(e+1); Serial.print(": ");
     Serial.print(a); Serial.print(" "); Serial.print(b); Serial.print(" "); Serial.println(sw==LOW?"PRESSED":"RELEASED");
   }
 }
@@ -1529,208 +1473,11 @@ void SimpleSequencer::runMidiPinMonitor(uint32_t ms){
 // MIDI input handlers removed — processing consolidated in runEngine() to avoid concurrent Serial reads.
 
 void SimpleSequencer::bootAnimation() {
-  display.clearDisplay();
-  ledStrip.clear();
-  randomSeed(analogRead(0));
-
-  // --- LED DNA ---
-  bool useRed = (random(0, 2) == 0);
-  const uint8_t spread[4][4] = {
-    {3, 4, 11, 12}, // Zone 0: Center
-    {2, 5, 10, 13}, // Zone 1: Mid-Inner
-    {1, 6, 9, 14},  // Zone 2: Mid-Outer
-    {0, 7, 8, 15}   // Zone 3: Outer Edges
-  };
-
-  // --- OLED DNA ---
-  int cx = 64, cy = 32;
-  int branches = random(2, 6);
-  float angleStep = random(5, 20) / 100.0f;
-  float radiusStep = random(10, 50) / 100.0f;
-  float fractalTwist = random(10, 50) / 10.0f;
-  float angle = 0, radius = 0;
-
-  // MASTER LOOP: 150 Frames
-  for (int frame = 0; frame < 150; frame++) {
-    
-    // 1. Calculate the sharp sweeping peak
-    // Starts at 0.0 (Center), hits 3.0 (Edges) at frame 75, returns to 0.0 at frame 150
-    float peak = 1.5f - 1.5f * cos(frame * (TWO_PI / 150.0f)); 
-    
-    // Calculate a smooth fade-out to 0 during the final 30 frames
-    float globalFade = 1.0f;
-    if (frame > 120) {
-      globalFade = 1.0f - ((frame - 120) / 30.0f);
-    }
-    
-    for (int d = 0; d < 4; d++) {
-      // Calculate distance from the hot core of the pulse
-      float dist = abs(peak - (float)d);
-      
-      // Rapidly decaying brightness using a cubic curve (x^3)
-      float intensity = constrain(1.0f - (dist * 0.7f), 0.0f, 1.0f);
-      
-      // Apply both the pulse intensity AND the end-of-sequence fade out
-      int val = (int)(255.0f * intensity * intensity * intensity * globalFade); 
-      
-      uint8_t r = useRed ? val : (val * 180) / 255;
-      uint8_t b = useRed ? 0 : val;
-      
-      for (int i = 0; i < 4; i++) {
-        ledStrip.setPixelColor(spread[d][i], ledStrip.Color(r, 0, b));
-      }
-    }
-    ledStrip.show();
-    // 2. Calculate and push OLED fractal geometry (2 iterations per frame)
-    for (int iter = 0; iter < 2; iter++) {
-      angle += angleStep;
-      radius += radiusStep;
-      for (int b_idx = 0; b_idx < branches; b_idx++) {
-        float armAngle = angle + (b_idx * (TWO_PI / branches));
-        int x = cx + (radius * cos(armAngle));
-        int y = cy + (radius * sin(armAngle));
-        int fx = x + ((radius * 0.3f) * cos(armAngle * fractalTwist));
-        int fy = y + ((radius * 0.3f) * sin(armAngle * fractalTwist));
-        display.drawPixel(x, y, SH110X_WHITE);
-        display.drawPixel(fx, fy, SH110X_WHITE);
-      }
-    }
-    // Update screen every 2 frames to prevent I2C bottlenecking
-    if (frame % 2 == 0) display.display();
-
-    delay(12); // Master framerate clock (~80 FPS for a crisp 1.8s boot)
-  }
-
-  // --- FINALE ---
-  // (Boot text removed per user request)
-  delay(800);
-
-  // Clear everything for the sequencer
-  display.clearDisplay();
-  ledStrip.clear();
-  ledStrip.show();
-  // show boxed final text for 1 second (includes date and version)
-  display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
-  // Draw a slightly larger box to fit multiple lines
-  display.setCursor(44, 20);
-  display.print("seq-23");
-  display.setCursor(28, 30);
-  display.print("made by Bob and Zak");
-  display.setCursor(28, 40);
-  display.print("01 Mar 2026");
-  display.setCursor(28, 50);
-  display.print("v. prototype");
-  display.display();
-  delay(1000);
-
-  // final clear
-  display.clearDisplay();
-  display.display();
+  // LED boot animation disabled during bring-up; keep OLED intact
+  (void)0;
 }
 
-// LED update: new color mapping (playhead purple, fills blue, triggers red)
-void SimpleSequencer::updateLEDs() {
-  // 1. LIVE PERFORMANCE MODE: Crackling Red Glitch Strobe
-  if (fillModeActive) {
-    for (uint8_t i = 0; i < NUM_STEPS; i++) {
-      // Randomly choose which LEDs flash ON versus which stay dark/dim
-      // This creates a high-speed, chaotic red static effect across the grid at 60fps
-      if (random(0, 10) > 4) {
-        // Blinding Red Flash with slight randomized intensity for texture
-        ledStrip.setPixelColor(i, ledStrip.Color(random(150, 255), 0, 0)); 
-      } else {
-        // Very dim red or completely off for sharp contrast
-        ledStrip.setPixelColor(i, ledStrip.Color(random(0, 20), 0, 0)); 
-      }
-    }
-    ledStrip.show();
-    return; // Exit early to skip normal drawing
-  }
-  // PAUSE LIGHTSHOW: Polyrhythmic Phase-Shifting Ring
-  if (!isRunning) {
-    uint32_t now = millis();
-    
-    // Map the 16 physical LEDs into a continuous clockwise circle:
-    // Top row left-to-right (0-7), then bottom row right-to-left (15-8)
-    const uint8_t ringMap[16] = {
-      0, 1, 2, 3, 4, 5, 6, 7, 
-      15, 14, 13, 12, 11, 10, 9, 8
-    };
-    // 3 Comets with integer speed ratios: +2, -3, +5
-    // These integers guarantee they will drift out of phase and periodically perfectly realign.
-    const int speeds[3] = {2, -3, 5};
-    // Unique shades of purely red intensity for each comet
-    const float cometColors[3][3] = {
-      {45.0f, 0.0f, 0.0f},      // Dark Dark Red (Clockwise)
-      {130.0f, 0.0f, 0.0f},     // Dark Red (Anti-Clockwise)
-      {255.0f, 0.0f, 0.0f}      // Pure Red (Fast Clockwise)
-    };
-
-    float pixelR[16] = {0};
-    float pixelG[16] = {0};
-    float pixelB[16] = {0};
-    float baseCycle = 8000.0f; // Base duration in ms for speed = 1
-    for (int c = 0; c < 3; c++) {
-      // Calculate continuous position on the 0-16 ring
-      float pos = (now * speeds[c] / baseCycle) * 16.0f;
-      
-      // Safely wrap the position around the ring (handles negative anti-clockwise speeds)
-      while (pos < 0.0f) pos += 16.0f;
-      while (pos >= 16.0f) pos -= 16.0f;
-      for (int r = 0; r < 16; r++) {
-        // Shortest distance around the circular ring
-        float dist = abs((float)r - pos);
-        if (dist > 8.0f) dist = 16.0f - dist;
-        
-        // Apply cubic decay for a sharp core and soft trail
-        float intensity = constrain(1.0f - (dist * 0.45f), 0.0f, 1.0f);
-        float val = intensity * intensity * intensity;
-        
-        // Additively mix the colors on the ring
-        pixelR[r] += cometColors[c][0] * val * 0.5f; 
-        pixelG[r] += cometColors[c][1] * val * 0.5f;
-        pixelB[r] += cometColors[c][2] * val * 0.5f;
-      }
-    }
-    // Map the calculated ring back to the physical keys and push to LEDs
-    for (int i = 0; i < 16; i++) {
-       uint8_t phys = ringMap[i];
-       uint8_t r_val = (uint8_t)constrain(pixelR[i], 0.0f, 255.0f);
-       uint8_t g_val = (uint8_t)constrain(pixelG[i], 0.0f, 255.0f);
-       uint8_t b_val = (uint8_t)constrain(pixelB[i], 0.0f, 255.0f);
-       
-       ledStrip.setPixelColor(phys, ledStrip.Color(r_val, g_val, b_val));
-    }
-    ledStrip.show();
-    return; // Exit early to skip normal drawing
-  }
-  // 2. NORMAL MODE: Playhead and Triggers
-  for (uint8_t i = 0; i < NUM_STEPS; i++) {
-    bool stepActive = euclidEnabled[selectedChannel] ? euclidPattern[selectedChannel][i] : steps[selectedChannel][i];
-    uint8_t r = 0, g = 0, b = 0;
-
-    if (i == currentStep) {
-      // PLAYHEAD: Purple
-      r = 180; g = 0; b = 255; 
-    } else if (stepActive) {
-      // ACTIVE STEPS
-      uint8_t fs = fillState[selectedChannel][i];
-      if (fs == 1) {
-        // FILL STEP: Blue
-        r = 0; g = 50; b = 255;   
-      } else if (fs == 2) {
-        // ANTI-FILL: Green indicator
-        r = 0; g = 180; b = 0;
-      } else {
-        // NORMAL TRIGGER: Red
-        r = 255; g = 0; b = 0;   
-      }
-    }
-    ledStrip.setPixelColor(i, ledStrip.Color(r, g, b));
-  }
-  ledStrip.show();
-}
+// LEDs disabled: keep updateLEDs as no-op (defined earlier)
 
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
@@ -1751,4 +1498,235 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
   display.fillRect(0, 0, 128, 64, SH110X_WHITE);
   display.display();
   delay(30);
+}
+
+void SimpleSequencer::drawNotesView(){
+  // Menu 2: scale/note picker for selected channel
+  display.clearDisplay();
+  const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  const char* scaleNames[] = {"CHROM","MAJOR","MINOR","PENTA","BLUES","DORIAN","PHRYG","LYDIAN","MIXO","LOCR","DIM","ATONL"};
+
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+
+  // Header: channel + current root note
+  uint8_t p = channelPitch[selectedChannel];
+  display.setCursor(0, 0);
+  display.print("SCALE  CH"); display.print(selectedChannel+1);
+  display.setCursor(80, 0);
+  display.print("ROOT:");
+  display.print(noteNames[p % 12]);
+  display.print((p / 12) - 1);
+  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
+
+  // All 6 channel root notes in a compact grid (2 cols x 3 rows)
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    uint8_t cp = channelPitch[c];
+    int col = c % 2;
+    int row = c / 2;
+    int x = col * 64;
+    int y = 13 + row * 10;
+    bool sel = (c == selectedChannel);
+    if (sel){
+      display.fillRect(x, y-1, 62, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.setTextColor(SH110X_WHITE);
+    }
+    display.setCursor(x+1, y);
+    display.print("CH"); display.print(c+1); display.print(":");
+    display.print(noteNames[cp % 12]);
+    display.print((cp/12)-1);
+    if (muted[c]){ display.setCursor(x+48, y); display.print("M"); }
+    display.setTextColor(SH110X_WHITE);
+  }
+
+  // Scale mode for selected channel (euclidScaleMode maps to scale names)
+  display.drawFastHLine(0, 44, 128, SH110X_WHITE);
+  display.setCursor(0, 47);
+  display.print("SCL:");
+  uint8_t sm = euclidScaleMode[selectedChannel] % 4;
+  const char* smNames[] = {"OFF","LOCRIAN","DIM","ATONAL"};
+  display.print(smNames[sm]);
+  display.setCursor(64, 47);
+  display.print("VEL:"); display.print(channelVelocity[selectedChannel]);
+
+  // Bottom: gate length + BPM
+  display.setCursor(0, 57);
+  display.print("GATE:"); display.print(noteLenNames[noteLenIdx]);
+  display.setCursor(80, 57);
+  display.print("BPM:"); display.print(bpm);
+
+  display.display();
+}
+
+void SimpleSequencer::drawEuclidView(){
+  // Menu 2: show euclid params and pattern for selected channel
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  // Header
+  display.setCursor(0, 0);
+  display.print("EUCLID  CH"); display.print(selectedChannel+1);
+  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
+  // Params
+  display.setCursor(0, 12);
+  display.print("Hits:"); display.print(pulses[selectedChannel]);
+  display.setCursor(48, 12);
+  display.print("Offset:"); display.print(euclidOffset[selectedChannel]);
+  display.setCursor(96, 12);
+  display.print(euclidEnabled[selectedChannel] ? "ON" : "OFF");
+  // Pattern grid: 16 steps as small squares in one row
+  const uint8_t sq = 7, gap = 1, startX = 0, startY = 24;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    int x = startX + s * (sq + gap);
+    bool active = euclidEnabled[selectedChannel]
+                  ? euclidPattern[selectedChannel][s]
+                  : steps[selectedChannel][s];
+    bool isHead = isRunning && (s == currentStep);
+    if (isHead){
+      display.fillRect(x, startY, sq, sq, SH110X_WHITE);
+      // blink centre
+      uint32_t now = millis();
+      if ((now / 125) % 2 == 0)
+        display.fillRect(x+2, startY+2, 3, 3, SH110X_BLACK);
+    } else if (active){
+      display.fillRect(x, startY, sq, sq, SH110X_WHITE);
+    } else {
+      display.drawRect(x, startY, sq, sq, SH110X_WHITE);
+    }
+  }
+  // Velocity row for selected channel
+  display.setCursor(0, 36);
+  display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
+  display.setCursor(48, 36);
+  const char* scaleNames[] = {"OFF","LOC","DIM","ATO"};
+  display.print("Scl:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
+  // BPM bottom right
+  display.setCursor(84, 56);
+  display.print("BPM:"); display.print(bpm);
+  // Running spinner
+  const char spinFrames[] = {'-','\\','|','/'};
+  display.setCursor(0, 56);
+  display.print(isRunning ? spinFrames[(millis()/120)%4] : '.');
+  display.display();
+}
+
+void SimpleSequencer::drawStepVisualiser(){
+  display.clearDisplay();
+  uint32_t now = millis();
+
+  // ── TOP BAR: channel tabs ──────────────────────────────────────
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 21;
+    bool isSelected = (c == selectedChannel);
+    bool isMuted    = muted[c];
+    if (isSelected){
+      display.fillRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+      if (isMuted){
+        // strikethrough for muted
+        display.drawLine(bx+1, 4, bx+18, 4, SH110X_WHITE);
+      }
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 3, 1);
+    display.print(c + 1);
+  }
+  display.setTextColor(SH110X_WHITE);
+
+  // ── STEP GRID: 16 steps in 2 rows of 8 ───────────────────────
+  // Each cell is 14px wide x 16px tall with 2px gap
+  const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
+  const uint8_t gridX = 4, gridY = 13;
+
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t col = s % 8;
+    uint8_t row = s / 8;
+    int x = gridX + col * (cellW + gapX);
+    int y = gridY + row * (cellH + gapY);
+
+    bool active = euclidEnabled[selectedChannel]
+                  ? euclidPattern[selectedChannel][s]
+                  : steps[selectedChannel][s];
+
+    bool isPlayhead = isRunning && (s == currentStep);
+
+    if (isPlayhead){
+      // Animated playhead: full bright fill + blinking inner dot
+      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+      // Blink the centre pixel at 8 Hz
+      if ((now / 125) % 2 == 0){
+        display.fillRect(x+4, y+5, 6, 6, SH110X_BLACK);
+      }
+    } else if (active){
+      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+      // Show fill state markers
+      uint8_t fs = fillState[selectedChannel][s];
+      if (fs == 1){
+        // Fill-only: hollow centre
+        display.fillRect(x+3, y+4, cellW-6, cellH-8, SH110X_BLACK);
+      } else if (fs == 2){
+        // Anti-fill: X mark
+        display.drawLine(x+2, y+3, x+cellW-3, y+cellH-4, SH110X_BLACK);
+        display.drawLine(x+cellW-3, y+3, x+2, y+cellH-4, SH110X_BLACK);
+      }
+      // Slide indicator: small triangle bottom-right
+      if (stepSlide[selectedChannel][s]){
+        display.fillTriangle(x+cellW-4, y+cellH-1,
+                             x+cellW-1, y+cellH-4,
+                             x+cellW-1, y+cellH-1, SH110X_BLACK);
+      }
+    } else {
+      // Inactive step: outline only
+      display.drawRect(x, y, cellW, cellH, SH110X_WHITE);
+    }
+
+    // Ratchet indicator: small dot top-left of cell
+    if (stepRatchet[selectedChannel][s] > 0){
+      display.fillRect(x+1, y+1, 2, 2,
+        active ? SH110X_BLACK : SH110X_WHITE);
+    }
+  }
+
+  // ── BOTTOM BAR: BPM + running state + fill indicator ─────────
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+
+  // Animated running indicator: rotating dash at far left
+  const char spinFrames[] = {'-','\\','|','/'};
+  uint8_t spinFrame = (now / 120) % 4;
+  display.setCursor(0, 57);
+  if (isRunning){
+    display.print(spinFrames[spinFrame]);
+  } else {
+    display.print('.');
+  }
+
+  // BPM centre
+  display.setCursor(34, 57);
+  display.print("BPM:");
+  display.print(bpm);
+
+  // Fill active indicator right side
+  if (fillModeActive){
+    // Pulsing FILL text: show/hide at 4 Hz
+    if ((now / 250) % 2 == 0){
+      display.setCursor(100, 57);
+      display.print("FILL");
+    }
+  }
+
+  // Step counter: current step / total (only when running)
+  if (isRunning){
+    display.setCursor(100, 57);
+    display.print(currentStep + 1);
+    display.print("/");
+    display.print(NUM_STEPS);
+  }
+
+  display.display();
 }

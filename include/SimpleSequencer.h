@@ -84,6 +84,9 @@ class SimpleSequencer {
     uint32_t ratchetNextTick[NUM_CHANNELS];
     uint32_t ratchetEndTick[NUM_CHANNELS];
     uint8_t ratchetPitch[NUM_CHANNELS];
+    // UI menu state
+    bool menuMode = false;
+    uint8_t activeMenu = 0;
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // --- HARDWARE LED GRID ---
@@ -93,6 +96,9 @@ class SimpleSequencer {
     const uint32_t displayRefreshMs = 16; // display refresh interval in ms (~60Hz)
     void drawDisplay();
     void drawDebugGrid();
+    void drawNotesView();
+    void drawEuclidView();
+    void drawStepVisualiser();
     void bootAnimation();
 
     // button debounce parameters (Arduino example)
@@ -105,6 +111,9 @@ class SimpleSequencer {
     unsigned long matrixLastDebounce[MATRIX_KEYS];
 
     // --- MODIFIER ACCESSORS ---
+    bool isFunctionHeld();
+    bool isFillHeld();
+    // keep these as aliases so runEngine() compiles unchanged:
     bool isStartHeld();
     bool isChannelHeld();
     // run state + start/stop button debounce state
@@ -129,6 +138,9 @@ class SimpleSequencer {
     void shiftEuclidNotes(uint8_t ch, int steps);
     void triggerChannel(uint8_t ch);
     void clearTrack(uint8_t ch);
+    // --- CONTEXTUAL POT INPUT HANDLERS ---
+    void onPotButtonPress(uint8_t pot);
+    void handlePotRotation(uint8_t pot, int ticks);
     // --- EEPROM SAVE SYSTEM ---
     struct SaveData {
       uint32_t magicNumber;
