@@ -436,8 +436,14 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
-  // --- Fill button: state read via isFillHeld() in loop() ---
-  if (i == MATRIX_BTN_FILL_INDEX){ return; }
+  // --- Fill button: held = performance modifier; Function + Fill = clear track ---
+  if (i == MATRIX_BTN_FILL_INDEX){
+    if (isFunctionHeld()){
+      clearTrack(selectedChannel);
+      Serial.print("CLEAR CH"); Serial.println(selectedChannel + 1);
+    }
+    return;
+  }
 
   // --- Page button: modifier only, no action ---
   if (i == MATRIX_BTN_PAGE_INDEX){
@@ -637,7 +643,11 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
             if (steps[ch][s]){ anyActive = true; break; }
           }
           if (!anyActive){
-            for (uint8_t s = 0; s < NUM_STEPS; s++) steps[ch][s] = true;
+            for (uint8_t s = 0; s < NUM_STEPS; s++){
+              // Skip the slot that maps to the Fill button — user can't reach it
+              if (s == MATRIX_BTN_FILL_INDEX) continue;
+              steps[ch][s] = true;
+            }
           }
         }
         randomizeEuclidMelody(ch);
