@@ -889,6 +889,7 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     int v = (int)channelVelocity[ch] + random(-10, 10);
     stepVelocity[ch][s] = (uint8_t)constrain(v, 0, 127);
     noteLen[ch][s]      = noteLenIdx;
+    steps[ch][s]        = true; // generative mode plays all 16 steps
   }
 }
 
