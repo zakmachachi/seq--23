@@ -235,9 +235,10 @@ void SimpleSequencer::loop(){
         if (!startStopModifierFlag) {
           // toggle running state
           isRunning = !isRunning;
-          // Trigger play/stop OLED splash for ~600ms
+          // Trigger play/stop OLED splash for ~900ms
           transportAnimIsPlay = isRunning;
-          transportAnimEndMs = millis() + 600;
+          transportAnimEndMs = millis() + 900;
+          Serial.print("TRANSPORT "); Serial.println(isRunning ? "PLAY" : "STOP");
           if (isRunning){
             midiStepTickCounter = 0;
             stepAdvanceRequested = false;
@@ -389,6 +390,10 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       // Ensure step is enabled so the fill marker has something to gate
       steps[selectedChannel][heldStep] = true;
       pendingToggle[heldStep] = false; // suppress on-release toggle
+      // Visual splash
+      fillAnimStep = (uint8_t)heldStep;
+      fillAnimSet  = (fs == 1);
+      fillAnimEndMs = millis() + 700;
       Serial.print("FILL Ch"); Serial.print(selectedChannel+1);
       Serial.print(" Step ");  Serial.print(heldStep+1);
       Serial.print(" = ");     Serial.println(fs);
@@ -606,9 +611,9 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // Per-menu, per-pot sensitivity divisors (1 = native, higher = slower).
   // Notes page: pot 4 (slide%) stays at native speed; everything else dampened.
   // Euclid page: pot 1 (channel) and pot 4 (scale) extra-slow per request.
-  static const uint8_t divNotes[6]   = {3, 3, 3, 1, 3, 3};
-  static const uint8_t divEuclid[6]  = {5, 3, 3, 5, 3, 3};
-  static const uint8_t divDefault[6] = {3, 3, 3, 3, 3, 3};
+  static const uint8_t divNotes[6]   = {3, 12, 3, 1, 3, 3};
+  static const uint8_t divEuclid[6]  = {5, 12, 3, 5, 3, 3};
+  static const uint8_t divDefault[6] = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
   if (lastMenu != activeMenu){
@@ -703,11 +708,15 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
       Serial.print("OFFSET="); Serial.println(euclidOffset[selectedChannel]);
       break;
       
-    case 3:  // Pot 4: cycle scale mode
-      euclidScaleMode[selectedChannel] = (euclidScaleMode[selectedChannel] + ticks + 4) % 4;
+    case 3: { // Pot 4: cycle scale mode (0=OFF .. 6=Atonal, 7 modes)
+      int m = (int)euclidScaleMode[selectedChannel] + ticks;
+      const int N = 7;
+      m = ((m % N) + N) % N;
+      euclidScaleMode[selectedChannel] = (uint8_t)m;
       if (euclidEnabled[selectedChannel]) randomizeEuclidMelody(selectedChannel);
       Serial.print("SCALE="); Serial.println(euclidScaleMode[selectedChannel]);
       break;
+    }
       
     case 4:  // Pot 5: adjust velocity
       channelVelocity[selectedChannel] = (uint8_t)constrain(
@@ -839,12 +848,33 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     default: scale = ato; size = 13; break; // mode 6 (Atonal) and any > 6
   }
 
-  // octaveSpread = max additional octaves above root (0..5). Per-step random pick
-  // widens the spread without dragging every note off-pitch like a global shift.
-  uint8_t maxOct = octaveSpread[ch];
-  if (maxOct > 5) maxOct = 5;
+  // octaveSpread acts as a Boltzmann temperature for octave selection.
+  // T=0 → always root octave. Higher T flattens P(oct=k) ∝ exp(-k/T) so more
+  // samples land in higher octaves while the root octave stays the most likely.
+  const uint8_t MAX_OCT = 5;
+  uint8_t T = octaveSpread[ch];
+  if (T > 5) T = 5;
+
+  // Precompute cumulative weights (only used when T > 0)
+  float cumWeights[MAX_OCT + 1];
+  float total = 0.0f;
+  if (T > 0){
+    for (uint8_t k = 0; k <= MAX_OCT; k++){
+      total += expf(-(float)k / (float)T);
+      cumWeights[k] = total;
+    }
+  }
+
   for (uint8_t s = 0; s < NUM_STEPS; s++) {
-    int octShift = (maxOct == 0) ? 0 : (int)random(0, (long)maxOct + 1) * 12;
+    int octShift = 0;
+    if (T > 0){
+      float r = ((float)random(1, 1000001)) * (total / 1000000.0f);
+      uint8_t k = MAX_OCT;
+      for (uint8_t i = 0; i <= MAX_OCT; i++){
+        if (r <= cumWeights[i]){ k = i; break; }
+      }
+      octShift = (int)k * 12;
+    }
     int note = (int)root + scale[random(0, size)] + octShift;
     pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
 
@@ -1175,15 +1205,18 @@ void SimpleSequencer::drawDisplay(){
   // Transport splash — overlays everything else for ~600ms after a play/stop edge
   uint32_t nowMs = millis();
   if (transportAnimEndMs && nowMs < transportAnimEndMs){
+    // Full-screen inverse splash so it's unmistakable
     display.clearDisplay();
-    display.setTextColor(SH110X_WHITE);
+    display.fillRect(0, 0, 128, 64, SH110X_WHITE);
     if (transportAnimIsPlay){
-      display.fillTriangle(20, 18, 48, 32, 20, 46, SH110X_WHITE);
+      display.fillTriangle(16, 14, 50, 32, 16, 50, SH110X_BLACK);
+      display.setTextColor(SH110X_BLACK);
       display.setTextSize(3);
       display.setCursor(60, 22);
       display.print("PLAY");
     } else {
-      display.fillRect(20, 18, 28, 28, SH110X_WHITE);
+      display.fillRect(18, 16, 32, 32, SH110X_BLACK);
+      display.setTextColor(SH110X_BLACK);
       display.setTextSize(3);
       display.setCursor(60, 22);
       display.print("STOP");
@@ -1192,6 +1225,30 @@ void SimpleSequencer::drawDisplay(){
     return;
   } else if (transportAnimEndMs && nowMs >= transportAnimEndMs){
     transportAnimEndMs = 0;
+  }
+
+  // Fill-mark splash — shows clearly which step was just toggled
+  if (fillAnimEndMs && nowMs < fillAnimEndMs){
+    display.clearDisplay();
+    display.drawRect(0, 0, 128, 64, SH110X_WHITE);
+    display.setTextColor(SH110X_WHITE);
+    display.setTextSize(2);
+    display.setCursor(8, 6);
+    display.print("STEP "); display.print(fillAnimStep + 1);
+    display.setTextSize(3);
+    display.setCursor(8, 30);
+    display.print(fillAnimSet ? "FILL" : "NORM");
+    if (fillAnimSet){
+      display.setTextSize(1);
+      display.setCursor(80, 38);
+      display.print("on FILL");
+      display.setCursor(80, 48);
+      display.print("only");
+    }
+    display.display();
+    return;
+  } else if (fillAnimEndMs && nowMs >= fillAnimEndMs){
+    fillAnimEndMs = 0;
   }
 
   if (activeMenu == 1){ drawNotesView(); return; }
@@ -1733,23 +1790,49 @@ void SimpleSequencer::drawNotesView(){
 }
 
 void SimpleSequencer::drawEuclidView(){
-  // Menu 2: show euclid params and pattern for selected channel
+  // Menu 2: show euclid params + per-channel mute state for all tracks
   display.clearDisplay();
-  display.setTextSize(1);
+  uint32_t now = millis();
+
+  // ── TOP BAR: 6 channel tabs with selected + mute state ───────────
+  // Each chip ~21px wide, 11 tall
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 21;
+    bool sel = (c == selectedChannel);
+    if (sel){
+      display.fillRect(bx, 0, 20, 11, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 4, 2);
+    display.print(c + 1);
+    if (muted[c]){
+      // Strikethrough = muted
+      display.drawLine(bx + 1, 5, bx + 18, 5,
+                       sel ? SH110X_BLACK : SH110X_WHITE);
+    }
+  }
   display.setTextColor(SH110X_WHITE);
-  // Header
-  display.setCursor(0, 0);
-  display.print("EUCLID  CH"); display.print(selectedChannel+1);
-  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
-  // Params
-  display.setCursor(0, 12);
-  display.print("Hits:"); display.print(pulses[selectedChannel]);
-  display.setCursor(48, 12);
-  display.print("Offset:"); display.print(euclidOffset[selectedChannel]);
-  display.setCursor(96, 12);
+
+  // ── PARAMS ROW ───────────────────────────────────────────────────
+  display.setTextSize(1);
+  display.setCursor(0, 14);
+  display.print("H:"); display.print(pulses[selectedChannel]);
+  display.setCursor(28, 14);
+  display.print("O:"); display.print(euclidOffset[selectedChannel]);
+  display.setCursor(56, 14);
+  const char* scaleNames[] = {"OFF","MAJ","MIN","PEN","LOC","DIM","ATO"};
+  uint8_t sm = euclidScaleMode[selectedChannel];
+  if (sm > 6) sm = 6;
+  display.print("S:"); display.print(scaleNames[sm]);
+  display.setCursor(96, 14);
   display.print(euclidEnabled[selectedChannel] ? "ON" : "OFF");
-  // Pattern grid: 16 steps as small squares in one row
-  const uint8_t sq = 7, gap = 1, startX = 0, startY = 24;
+
+  // ── PATTERN GRID: 16 steps as small squares ──────────────────────
+  const uint8_t sq = 7, gap = 1, startX = 0, startY = 26;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     int x = startX + s * (sq + gap);
     bool active = euclidEnabled[selectedChannel]
@@ -1758,8 +1841,6 @@ void SimpleSequencer::drawEuclidView(){
     bool isHead = isRunning && (s == currentStep);
     if (isHead){
       display.fillRect(x, startY, sq, sq, SH110X_WHITE);
-      // blink centre
-      uint32_t now = millis();
       if ((now / 125) % 2 == 0)
         display.fillRect(x+2, startY+2, 3, 3, SH110X_BLACK);
     } else if (active){
@@ -1768,19 +1849,20 @@ void SimpleSequencer::drawEuclidView(){
       display.drawRect(x, startY, sq, sq, SH110X_WHITE);
     }
   }
-  // Velocity row for selected channel
-  display.setCursor(0, 36);
+
+  // ── VEL + GATE ROW ───────────────────────────────────────────────
+  display.setCursor(0, 38);
   display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
-  display.setCursor(48, 36);
-  const char* scaleNames[] = {"OFF","LOC","DIM","ATO"};
-  display.print("Scl:"); display.print(scaleNames[euclidScaleMode[selectedChannel] % 4]);
-  // BPM bottom right
-  display.setCursor(84, 56);
-  display.print("BPM:"); display.print(bpm);
-  // Running spinner
+  display.setCursor(56, 38);
+  display.print("Gate:"); display.print(noteLenNames[noteLenIdx]);
+
+  // ── BOTTOM: spinner + BPM ────────────────────────────────────────
   const char spinFrames[] = {'-','\\','|','/'};
   display.setCursor(0, 56);
-  display.print(isRunning ? spinFrames[(millis()/120)%4] : '.');
+  display.print(isRunning ? spinFrames[(now/120)%4] : '.');
+  display.setCursor(84, 56);
+  display.print("BPM:"); display.print(bpm);
+
   display.display();
 }
 
@@ -1836,13 +1918,14 @@ void SimpleSequencer::drawStepVisualiser(){
       }
     } else if (active){
       display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-      // Show fill state markers
+      // Show fill state markers — bold "F" so the user can see fill steps at a glance
       uint8_t fs = fillState[selectedChannel][s];
       if (fs == 1){
-        // Fill-only: hollow centre
-        display.fillRect(x+3, y+4, cellW-6, cellH-8, SH110X_BLACK);
+        display.setTextColor(SH110X_BLACK);
+        display.setTextSize(1);
+        display.setCursor(x + 4, y + 4);
+        display.print('F');
       } else if (fs == 2){
-        // Anti-fill: X mark
         display.drawLine(x+2, y+3, x+cellW-3, y+cellH-4, SH110X_BLACK);
         display.drawLine(x+cellW-3, y+3, x+2, y+cellH-4, SH110X_BLACK);
       }

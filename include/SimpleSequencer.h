@@ -94,6 +94,10 @@ class SimpleSequencer {
     // Transport play/stop OLED splash
     uint32_t transportAnimEndMs = 0;
     bool transportAnimIsPlay = false;
+    // Fill-mark feedback splash
+    uint32_t fillAnimEndMs = 0;
+    uint8_t fillAnimStep = 0;
+    bool fillAnimSet = false;
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // --- HARDWARE LED GRID ---
