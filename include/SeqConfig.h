@@ -21,7 +21,7 @@ static const uint8_t MATRIX_COLS = 6;
 static const uint8_t MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS;
 
 // Matrix special buttons (indexes are row-major: idx = row * MATRIX_COLS + col)
-static const uint8_t MATRIX_BTN_FUNCTION_INDEX = 21;  // Button 22 — physical function/modifier key
+static const uint8_t MATRIX_BTN_FUNCTION_INDEX = 22;  // Hardware: physical function/modifier key (matrix idx 22)
 static const uint8_t MATRIX_BTN_FILL_INDEX     = 15;  // Button 16 — Fill (performance)
 static const uint8_t MATRIX_BTN_PAGE_INDEX     = 16;  // Button 17 — Page (transport modifier)
 static const uint8_t MATRIX_BTN_MENU1_INDEX    = 18;  // Button 19 — Menu: Notes
