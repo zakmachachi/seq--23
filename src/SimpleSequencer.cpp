@@ -91,6 +91,14 @@ SimpleSequencer::SimpleSequencer()
     randomSlideProb[c] = 0;   // 0% slide by default
     octaveSpread[c]    = 0;   // 0 = no octave spread (notes stay in root octave)
     lastScaleMode[c]   = 1;   // remember Major as last-active scale
+    // Trigger machine defaults
+    trigMachine[c] = TM_OFF;
+    trigDensity[c] = 50;
+    trigShift[c]   = 0;
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      machineOverlay[c][s] = 0;
+      machinePattern[c][s] = false;
+    }
   }
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
@@ -267,7 +275,7 @@ void SimpleSequencer::loop(){
             midiSendByte(0xF8); // MIDI Clock
             currentStep = 0;
             for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-              bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+              bool isActive = isStepActive(ch, currentStep);
               if (isActive) triggerChannel(ch);
             }
             if (!externalMidiClockActive && !midiTimerRunning) {
@@ -508,10 +516,30 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     Serial.print("MENU3 -> activeMenu=2 (Euclid)"); Serial.println();
     return;
   }
-  if (i == MATRIX_BTN_MENU4_INDEX){ return; }
+  if (i == MATRIX_BTN_MENU4_INDEX){
+    activeMenu = 4;  // Trigger Machines page
+    heldStep = -1; focusEncoder = 0;
+    Serial.println("MENU4 -> activeMenu=4 (Trigger Machines)");
+    return;
+  }
 
   // --- Step buttons 0-15 only ---
   if (i < NUM_STEPS){
+    // In Menu 4 with a machine active, step buttons cycle the OVERLAY state
+    // (0=auto, 1=force-on, 2=force-off) instead of the regular steps[] toggle.
+    if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
+      uint8_t &ov = machineOverlay[selectedChannel][i];
+      ov = (ov + 1) % 3;
+      heldStep = (int8_t)i;
+      lastEncoderMoveTime = millis();
+      focusEncoder = 0;
+      pendingToggle[i] = false;  // suppress the on-release toggle below
+      Serial.print("OVERLAY Ch"); Serial.print(selectedChannel+1);
+      Serial.print(" Step "); Serial.print(i+1);
+      Serial.print(" = ");
+      Serial.println(ov == 0 ? "AUTO" : (ov == 1 ? "FORCE-ON" : "FORCE-OFF"));
+      return;
+    }
     pendingToggle[i] = true;
     heldStep = (int8_t)i;
     lastEncoderMoveTime = millis();
@@ -815,6 +843,41 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     return;
   }
 
+  // --- Menu 4: Trigger Machines page ---
+  if (activeMenu == 4){
+    uint8_t ch = selectedChannel;
+    switch (pot){
+      case 0: { // Pot 1: machine type cycle
+        int v = (int)trigMachine[ch] + ticks;
+        const int N = (int)TM_COUNT;
+        v = ((v % N) + N) % N;
+        trigMachine[ch] = (uint8_t)v;
+        if (trigMachine[ch] == TM_EUCLID) updateEuclid(ch);
+        regenerateMachinePattern(ch);
+        Serial.print("MACHINE CH"); Serial.print(ch+1);
+        Serial.print(" = "); Serial.println(trigMachine[ch]);
+        break;
+      }
+      case 1: { // Pot 2: density
+        trigDensity[ch] = (uint8_t)constrain((int)trigDensity[ch] + ticks, 0, 100);
+        regenerateMachinePattern(ch);
+        Serial.print("DENSITY="); Serial.println(trigDensity[ch]);
+        break;
+      }
+      case 2: { // Pot 3: shift
+        int v = (int)trigShift[ch] + ticks;
+        v = ((v % NUM_STEPS) + NUM_STEPS) % NUM_STEPS;
+        trigShift[ch] = (uint8_t)v;
+        regenerateMachinePattern(ch);
+        Serial.print("SHIFT="); Serial.println(trigShift[ch]);
+        break;
+      }
+      // Pots 4-6 reserved for future per-machine params (kick fill, ratchet density, etc.)
+      default: break;
+    }
+    return;
+  }
+
   if (activeMenu != 2) return;  // Other menus: only Euclid handles rotation
 
   // Euclid page controls (reorganized: P1=pulses, P2=offset, P3=scale, P4=vel, P5=gate)
@@ -862,7 +925,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572471; // Unique signature (v5 — adds per-channel MIDI Out)
+  data.magicNumber = 13572472; // Unique signature (v6 — adds trigger machines)
   data.savedBpm = bpm;
   data.savedNoteLenIdx = noteLenIdx;
 
@@ -887,6 +950,12 @@ void SimpleSequencer::saveState() {
     data.savedRandomSlideProb[c] = randomSlideProb[c];
     data.savedOctaveSpread[c]    = octaveSpread[c];
     data.savedMidiChannel[c]     = midiChannel[c];
+    data.savedTrigMachine[c]     = trigMachine[c];
+    data.savedTrigDensity[c]     = trigDensity[c];
+    data.savedTrigShift[c]       = trigShift[c];
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      data.savedMachineOverlay[c][s] = machineOverlay[c][s];
+    }
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -905,7 +974,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572471) {
+  if (data.magicNumber == 13572472) {
     bpm = data.savedBpm;
     noteLenIdx = data.savedNoteLenIdx;
     if (noteLenIdx >= NOTE_LEN_COUNT) noteLenIdx = NOTE_LEN_DEFAULT_IDX;
@@ -934,13 +1003,114 @@ void SimpleSequencer::loadState() {
       randomSlideProb[c] = (data.savedRandomSlideProb[c] <= 100) ? data.savedRandomSlideProb[c] : 0;
       octaveSpread[c]    = (data.savedOctaveSpread[c] <= 60)     ? data.savedOctaveSpread[c]    : 0;
       midiChannel[c]     = (data.savedMidiChannel[c] < 16)       ? data.savedMidiChannel[c]     : c;
+      trigMachine[c]     = (data.savedTrigMachine[c] < TM_COUNT) ? data.savedTrigMachine[c]     : TM_OFF;
+      trigDensity[c]     = (data.savedTrigDensity[c] <= 100)     ? data.savedTrigDensity[c]     : 50;
+      trigShift[c]       = (data.savedTrigShift[c] < NUM_STEPS)  ? data.savedTrigShift[c]       : 0;
+      for (uint8_t s = 0; s < NUM_STEPS; s++){
+        uint8_t ov = data.savedMachineOverlay[c][s];
+        machineOverlay[c][s] = (ov <= 2) ? ov : 0;
+      }
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       if (euclidEnabled[c]) updateEuclid(c);
+      regenerateMachinePattern(c);
     }
-    Serial.println("State loaded from EEPROM (v5).");
+    Serial.println("State loaded from EEPROM (v6).");
   } else {
-    Serial.println("No saved state (v5) found. Booting blank.");
+    Serial.println("No saved state (v6) found. Booting blank.");
   }
+}
+
+// --- TRIGGER MACHINE WEIGHT TABLES ----------------------------------
+// Each table is 16 entries (one per step, 0-indexed). Higher weight = more
+// likely to be active for a given density. A step is on iff weight >= (100-density).
+// Weight 100 means "always on at any density >= 0".
+// Step indices below are 0-based: step 1 in the user's terminology = idx 0.
+
+// KICK: 4-on-the-floor base (idx 0,4,8,12). Density adds 1/8 offbeats (2,6,10,14)
+// then 1/16 in-betweens. Onbeats are weight 100 so they survive any density.
+static const uint8_t W_KICK[16] = {
+  100, 25, 60, 25, 100, 25, 60, 25, 100, 25, 60, 25, 100, 25, 60, 35
+};
+
+// HIHAT: starts dense at high density, erodes at low density. Offbeats (2,6,10,14)
+// are most resistant; downbeats (0,4,8,12) next; other 1/16ths least resistant.
+static const uint8_t W_HIHAT[16] = {
+  80, 50, 100, 50, 80, 50, 100, 50, 80, 50, 100, 50, 80, 50, 100, 50
+};
+
+// SNARE: backbeats on idx 4 and 12 dominate. Light fills around them.
+static const uint8_t W_SNARE[16] = {
+  10, 10, 10, 20, 100, 20, 10, 25, 10, 10, 10, 25, 100, 25, 15, 30
+};
+
+// ANTI-KICK: triggers between kicks. 1/8 offbeats (2,6,10,14) are primary;
+// 1/16 in-betweens fill in at higher density.
+static const uint8_t W_ANTIKICK[16] = {
+  10, 40, 100, 40, 10, 40, 100, 40, 10, 40, 100, 40, 10, 40, 100, 40
+};
+
+// PERC: even 1/16ths with weighting toward both onbeats and offbeats.
+static const uint8_t W_PERC[16] = {
+  90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50
+};
+
+static const uint8_t* getMachineWeights(uint8_t machine){
+  switch (machine){
+    case SimpleSequencer::TM_KICK:     return W_KICK;
+    case SimpleSequencer::TM_HIHAT:    return W_HIHAT;
+    case SimpleSequencer::TM_SNARE:    return W_SNARE;
+    case SimpleSequencer::TM_ANTIKICK: return W_ANTIKICK;
+    case SimpleSequencer::TM_PERC:     return W_PERC;
+    default: return nullptr;
+  }
+}
+
+void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
+  uint8_t m = trigMachine[ch];
+  uint8_t density = trigDensity[ch];
+  uint8_t shift = trigShift[ch] % NUM_STEPS;
+
+  // Threshold: a step is on iff weight >= (100 - density).
+  // density 0   -> threshold 100 -> only weight==100 steps on (machine "skeleton")
+  // density 100 -> threshold 0   -> every step with weight > 0 on
+  int threshold = 100 - (int)density;
+
+  if (m == TM_OFF || m >= TM_COUNT){
+    for (uint8_t s = 0; s < NUM_STEPS; s++) machinePattern[ch][s] = false;
+    return;
+  }
+  if (m == TM_EUCLID){
+    // Euclid uses pulses[]/euclidOffset[] machinery. Fill machinePattern
+    // from the existing euclidPattern so the same trigger path applies.
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+      machinePattern[ch][s] = euclidPattern[ch][src];
+    }
+    return;
+  }
+  const uint8_t* w = getMachineWeights(m);
+  if (!w){
+    for (uint8_t s = 0; s < NUM_STEPS; s++) machinePattern[ch][s] = false;
+    return;
+  }
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+    machinePattern[ch][s] = ((int)w[src] >= threshold);
+  }
+}
+
+// Combined activity check: machine + overlay, falling back to legacy
+// euclid/steps[] when no machine is active.
+bool SimpleSequencer::isStepActive(uint8_t ch, uint8_t step){
+  if (step >= NUM_STEPS) return false;
+  if (trigMachine[ch] != TM_OFF){
+    uint8_t ov = machineOverlay[ch][step];
+    if (ov == 1) return true;
+    if (ov == 2) return false;
+    return machinePattern[ch][step];
+  }
+  if (euclidEnabled[ch]) return euclidPattern[ch][step];
+  return steps[ch][step];
 }
 
 // Helper: get the active scale array for a given mode. Returns size.
@@ -1224,7 +1394,7 @@ void SimpleSequencer::runEngine(){
       currentStep = 0;
       // immediately trigger steps at position 0
       for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-        bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+        bool isActive = isStepActive(ch, currentStep);
         if (isActive) triggerChannel(ch);
       }
     }
@@ -1278,7 +1448,7 @@ void SimpleSequencer::runEngine(){
       currentStep = (currentStep + 1) % NUM_STEPS;
       // trigger channels that have the step enabled
         for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-          bool isActive = euclidEnabled[ch] ? euclidPattern[ch][currentStep] : steps[ch][currentStep];
+          bool isActive = isStepActive(ch, currentStep);
           if (isActive) triggerChannel(ch);
         }
     }
@@ -1498,6 +1668,7 @@ void SimpleSequencer::drawDisplay(){
   if (activeMenu == 1){ drawNotesView(); return; }
   if (activeMenu == 2){ drawEuclidView(); return; }
   if (activeMenu == 3){ drawStepVisualiser(); return; }
+  if (activeMenu == 4){ drawTrigMachineView(); return; }
 
   display.clearDisplay();
 
@@ -1951,11 +2122,16 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
     stepVelocity[ch][s] = 255;
     stepSlide[ch][s] = false;
     euclidPattern[ch][s] = false;
+    machineOverlay[ch][s] = 0;
+    machinePattern[ch][s] = false;
   }
   euclidEnabled[ch] = false;
   euclidScaleMode[ch] = 0;
   pulses[ch] = 4;
   euclidOffset[ch] = 0;
+  trigMachine[ch] = TM_OFF;
+  trigDensity[ch] = 50;
+  trigShift[ch] = 0;
   // Silence any sustaining note on this channel
   if (lastNotePlaying[ch] < 128){
     midiSendNoteOff(midiChannel[ch] & 0x0F, lastNotePlaying[ch], 0);
@@ -2235,6 +2411,83 @@ void SimpleSequencer::drawStepVisualiser(){
     display.print(currentStep + 1);
     display.print("/");
     display.print(NUM_STEPS);
+  }
+
+  display.display();
+}
+
+void SimpleSequencer::drawTrigMachineView(){
+  display.clearDisplay();
+  static const char* machineNames[TM_COUNT] = {
+    "OFF", "KICK", "HIHAT", "SNARE", "ANTIK", "PERC", "EUCL"
+  };
+
+  // Top: channel tabs
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 21;
+    if (c == selectedChannel){
+      display.fillRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+      if (muted[c]) display.drawLine(bx+1, 4, bx+18, 4, SH110X_WHITE);
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 3, 1);
+    display.print(c + 1);
+  }
+  display.setTextColor(SH110X_WHITE);
+
+  // Param row: machine | density | shift
+  uint8_t ch = selectedChannel;
+  uint8_t m = trigMachine[ch];
+  if (m >= TM_COUNT) m = 0;
+  display.setTextSize(1);
+  display.setCursor(2, 12);
+  display.print("M:"); display.print(machineNames[m]);
+  display.setCursor(56, 12);
+  display.print("D:"); display.print(trigDensity[ch]);
+  display.setCursor(94, 12);
+  display.print("S:"); display.print(trigShift[ch]);
+
+  // Step grid: 2 rows x 8 cols, showing machine + overlay state
+  // Empty box = machine off, no override
+  // Filled box = machine on, no override (auto-on)
+  // Box with X = forced on by overlay
+  // Box with - through it = forced off by overlay
+  const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
+  const uint8_t startX = 4, startY = 24;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t col = s % 8;
+    uint8_t row = s / 8;
+    int x = startX + col * (cellW + gapX);
+    int y = startY + row * (cellH + gapY);
+    bool autoOn = (m != TM_OFF) ? machinePattern[ch][s] : steps[ch][s];
+    uint8_t ov = machineOverlay[ch][s];
+    bool finalOn = isStepActive(ch, s);
+
+    if (finalOn){
+      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+      if (ov == 1){
+        // Force-on marker: small black plus inside
+        display.drawLine(x+5, y+5, x+5, y+10, SH110X_BLACK);
+        display.drawLine(x+3, y+7, x+9, y+7, SH110X_BLACK);
+      }
+    } else {
+      display.drawRect(x, y, cellW, cellH, SH110X_WHITE);
+      if (ov == 2){
+        // Force-off marker: line through it
+        display.drawLine(x+1, y+cellH/2, x+cellW-2, y+cellH/2, SH110X_WHITE);
+      } else if (autoOn){
+        // Hint: machine wanted this on but overlay turned it off
+        display.drawPixel(x + cellW/2, y + cellH/2, SH110X_WHITE);
+      }
+    }
+    // Current step playhead
+    if (s == currentStep){
+      display.drawFastHLine(x, y + cellH + 1, cellW, SH110X_WHITE);
+    }
   }
 
   display.display();

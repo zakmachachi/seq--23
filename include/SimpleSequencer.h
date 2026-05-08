@@ -14,6 +14,9 @@ class SimpleSequencer {
   public:
     // step division relative to quarter note (musical denominations)
     enum Division { DIV_WHOLE = 0, DIV_HALF, DIV_QUARTER, DIV_EIGHTH, DIV_SIXTEENTH };
+    enum TrigMachine : uint8_t {
+      TM_OFF = 0, TM_KICK, TM_HIHAT, TM_SNARE, TM_ANTIKICK, TM_PERC, TM_EUCLID, TM_COUNT
+    };
     SimpleSequencer();
     void begin();
     void loop();
@@ -65,6 +68,16 @@ class SimpleSequencer {
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
+
+    // --- TRIGGER MACHINES (Menu 4) ---
+    uint8_t trigMachine[NUM_CHANNELS];           // active machine type per channel
+    uint8_t trigDensity[NUM_CHANNELS];           // 0..100 density / threshold
+    uint8_t trigShift[NUM_CHANNELS];             // 0..15 step shift
+    uint8_t machineOverlay[NUM_CHANNELS][NUM_STEPS]; // 0=auto, 1=force-on, 2=force-off
+    bool machinePattern[NUM_CHANNELS][NUM_STEPS];    // cached pattern from generator
+    void regenerateMachinePattern(uint8_t ch);
+    bool isStepActive(uint8_t ch, uint8_t step);
+    void drawTrigMachineView();
 
     // runtime
     uint32_t bpm;
@@ -192,6 +205,11 @@ class SimpleSequencer {
       uint8_t savedOctaveSpread[NUM_CHANNELS];
       // Persisted per-channel MIDI Out channel
       uint8_t savedMidiChannel[NUM_CHANNELS];
+      // Persisted trigger-machine state (v6)
+      uint8_t savedTrigMachine[NUM_CHANNELS];
+      uint8_t savedTrigDensity[NUM_CHANNELS];
+      uint8_t savedTrigShift[NUM_CHANNELS];
+      uint8_t savedMachineOverlay[NUM_CHANNELS][NUM_STEPS];
     };
     void saveState();
     void loadState();

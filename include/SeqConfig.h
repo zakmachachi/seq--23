@@ -27,7 +27,7 @@ static const uint8_t MATRIX_BTN_FILL_INDEX     = 17;  // Fill (performance) — 
 static const uint8_t MATRIX_BTN_MENU1_INDEX    = 18;  // Menu: Notes
 static const uint8_t MATRIX_BTN_MENU2_INDEX    = 19;  // Menu: Euclid
 static const uint8_t MATRIX_BTN_MENU3_INDEX    = 20;  // Menu: Step Visualizer
-static const uint8_t MATRIX_BTN_MENU4_INDEX    = 255; // Disabled (no physical Menu 4 button)
+static const uint8_t MATRIX_BTN_MENU4_INDEX    = 21;  // Menu: Trigger Machines (button right of MENU3)
 // Channel select buttons (pressing alone = select, Function held = mute/unmute)
 static const uint8_t MATRIX_BTN_CH[6] = {29, 28, 26, 25, 24, 23}; // Buttons 30,29,27,26,25,24 → Ch1-6 (skip dead 27)
 // Transport: Function + Page held together = Start/Stop toggle
