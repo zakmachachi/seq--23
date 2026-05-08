@@ -1437,6 +1437,23 @@ void SimpleSequencer::drawDisplay(){
     muteAnimEndMs = 0;
   }
 
+  // Clear-track splash
+  if (clearAnimEndMs && nowMs < clearAnimEndMs){
+    display.clearDisplay();
+    display.fillRect(0, 0, 128, 64, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
+    display.setTextSize(3);
+    display.setCursor(8, 8);
+    display.print("CLEAR");
+    display.setTextSize(2);
+    display.setCursor(8, 40);
+    display.print("CH "); display.print(clearAnimCh + 1);
+    display.display();
+    return;
+  } else if (clearAnimEndMs && nowMs >= clearAnimEndMs){
+    clearAnimEndMs = 0;
+  }
+
   // Function + Pot1 BPM splash: shows current BPM while editing
   if (bpmFocusEndMs && nowMs < bpmFocusEndMs){
     display.clearDisplay();
@@ -1933,15 +1950,22 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
     stepRatchet[ch][s] = 0;
     stepVelocity[ch][s] = 255;
     stepSlide[ch][s] = false;
+    euclidPattern[ch][s] = false;
   }
   euclidEnabled[ch] = false;
+  euclidScaleMode[ch] = 0;
   pulses[ch] = 4;
   euclidOffset[ch] = 0;
-  
-  display.clearDisplay();
-  display.fillRect(0, 0, 128, 64, SH110X_WHITE);
-  display.display();
-  delay(30);
+  // Silence any sustaining note on this channel
+  if (lastNotePlaying[ch] < 128){
+    midiSendNoteOff(midiChannel[ch] & 0x0F, lastNotePlaying[ch], 0);
+    lastNotePlaying[ch] = 255;
+  }
+  noteOffTick[ch] = 0;
+  ratchetIntervalTicks[ch] = 0;
+  // Splash for visual feedback
+  clearAnimCh = ch;
+  clearAnimEndMs = millis() + 700;
 }
 
 void SimpleSequencer::drawNotesView(){

@@ -107,6 +107,9 @@ class SimpleSequencer {
     bool muteAnimMuted = false;
     // Function + Pot1 BPM editing splash
     uint32_t bpmFocusEndMs = 0;
+    // Clear-track feedback splash
+    uint32_t clearAnimEndMs = 0;
+    uint8_t clearAnimCh = 0;
     // Channel-button held: when >= 0, OLED shows that channel's params (mute, MIDI out)
     int8_t heldChannel = -1;
     bool fillBtnLastState = false; // for transition logging
