@@ -153,15 +153,20 @@ void SimpleSequencer::midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel)
   midiSendByte(status);
   midiSendByte(note & 0x7F);
   midiSendByte(vel & 0x7F);
+  // DIAGNOSTIC — confirm notes are being sent. Remove once verified working.
+  Serial.print("NOTE_ON  ch="); Serial.print(channel + 1);
+  Serial.print(" note="); Serial.print(note);
+  Serial.print(" vel="); Serial.println(vel);
 }
 
 void SimpleSequencer::midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel){
   // Some Elektron devices expect Note-Offs as Note-On with velocity 0.
-  // Send a Note-On (0x90) with velocity 0 to be compatible.
   uint8_t status = 0x90 | (channel & 0x0F);
   midiSendByte(status);
   midiSendByte(note & 0x7F);
   midiSendByte(0);
+  Serial.print("NOTE_OFF ch="); Serial.print(channel + 1);
+  Serial.print(" note="); Serial.println(note);
 }
 
 void SimpleSequencer::setupPins(){
@@ -309,6 +314,32 @@ void SimpleSequencer::loop(){
     if (c == 'e' || c == 'E'){
       // run encoder switch test for 10s
       runEncoderSwitchTest(10000);
+    }
+    if (c == 'g' || c == 'G'){
+      // Diagnostic: dump current channel state to track down silent triggers
+      Serial.println("--- DIAG ---");
+      Serial.print("running="); Serial.print(isRunning);
+      Serial.print(" bpm="); Serial.print(bpm);
+      Serial.print(" sel=CH"); Serial.print(selectedChannel + 1);
+      Serial.print(" gateIdx="); Serial.println(noteLenIdx);
+      for (uint8_t cc = 0; cc < NUM_CHANNELS; cc++){
+        uint8_t activeSteps = 0, fillSteps = 0;
+        for (uint8_t s = 0; s < NUM_STEPS; s++){
+          if (steps[cc][s]) activeSteps++;
+          if (fillState[cc][s] == 1) fillSteps++;
+        }
+        Serial.print("CH"); Serial.print(cc + 1);
+        Serial.print(" muted="); Serial.print(muted[cc]);
+        Serial.print(" eucEn="); Serial.print(euclidEnabled[cc]);
+        Serial.print(" scale="); Serial.print(euclidScaleMode[cc]);
+        Serial.print(" pulses="); Serial.print(pulses[cc]);
+        Serial.print(" rootPitch="); Serial.print(channelPitch[cc]);
+        Serial.print(" vel="); Serial.print(channelVelocity[cc]);
+        Serial.print(" activeSteps="); Serial.print(activeSteps);
+        Serial.print(" fillSteps="); Serial.println(fillSteps);
+      }
+      Serial.print("fillModeActive="); Serial.println(fillModeActive);
+      Serial.println("------------");
     }
   }
   // MIDI clock generation and external MIDI handling moved to `runEngine()` only to avoid race conditions.
