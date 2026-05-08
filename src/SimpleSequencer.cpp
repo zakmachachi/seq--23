@@ -315,6 +315,18 @@ void SimpleSequencer::loop(){
       // run encoder switch test for 10s
       runEncoderSwitchTest(10000);
     }
+    // MIDI test notes: send one NoteOn at a known pitch on ch 1, then NoteOff
+    // 100ms later, ignoring sequencer state. Used to find which MIDI note
+    // actually triggers a pad on the Rytm. Press the corresponding key in
+    // the serial monitor and listen.
+    if (c == '1' || c == '2' || c == '3' || c == '4' || c == '5' || c == '6'){
+      static const uint8_t testNotes[6] = {24, 36, 48, 60, 72, 84}; // C1..C6
+      uint8_t n = testNotes[c - '1'];
+      Serial.print("TEST note "); Serial.print(n); Serial.println(" on ch 1");
+      midiSendNoteOn(0, n, 100);
+      delay(120);
+      midiSendNoteOff(0, n, 0);
+    }
     if (c == 'g' || c == 'G'){
       // Diagnostic: dump current channel state to track down silent triggers
       Serial.println("--- DIAG ---");
