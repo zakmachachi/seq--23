@@ -58,10 +58,13 @@ class SimpleSequencer {
     uint8_t channelPitch[NUM_CHANNELS]; // per-channel base pitch (used when per-step pitch == 255)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
     uint8_t channelVelocity[NUM_CHANNELS]; // default velocity per channel (0-127)
+    uint8_t midiChannel[NUM_CHANNELS];     // per-channel MIDI Out channel (0..15 = MIDI ch 1..16)
     // --- GENERATIVE PARAMETERS (Menu 1: Notes Page) ---
     uint8_t randomSlideProb[NUM_CHANNELS]; // Probability 0-100 a generated step has Slide
-    uint8_t octaveSpread[NUM_CHANNELS];    // 0..5 = max octaves above root for random per-step picks
+    uint8_t octaveSpread[NUM_CHANNELS];    // 0..60 = max semitones above root for random per-step picks
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
+    void rerollSlides(uint8_t ch);
+    void transposeChannelNotes(uint8_t ch, int semitones);
 
     // runtime
     uint32_t bpm;
@@ -102,6 +105,11 @@ class SimpleSequencer {
     uint32_t muteAnimEndMs = 0;
     uint8_t muteAnimCh = 0;
     bool muteAnimMuted = false;
+    // Function + Pot1 BPM editing splash
+    uint32_t bpmFocusEndMs = 0;
+    // Channel-button held: when >= 0, OLED shows that channel's params (mute, MIDI out)
+    int8_t heldChannel = -1;
+    bool fillBtnLastState = false; // for transition logging
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // --- HARDWARE LED GRID ---
@@ -179,6 +187,8 @@ class SimpleSequencer {
       // Persisted generative parameters
       uint8_t savedRandomSlideProb[NUM_CHANNELS];
       uint8_t savedOctaveSpread[NUM_CHANNELS];
+      // Persisted per-channel MIDI Out channel
+      uint8_t savedMidiChannel[NUM_CHANNELS];
     };
     void saveState();
     void loadState();
