@@ -58,6 +58,10 @@ class SimpleSequencer {
     uint8_t channelPitch[NUM_CHANNELS]; // per-channel base pitch (used when per-step pitch == 255)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
     uint8_t channelVelocity[NUM_CHANNELS]; // default velocity per channel (0-127)
+    // --- GENERATIVE PARAMETERS (Menu 1: Notes Page) ---
+    uint8_t randomSlideProb[NUM_CHANNELS]; // Probability 0-100 a generated step has Slide
+    uint8_t octaveSpread[NUM_CHANNELS];    // Index 0..5 → octave offset -2..+3 (idx-2)
+    uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
 
     // runtime
     uint32_t bpm;
@@ -161,6 +165,9 @@ class SimpleSequencer {
       uint8_t savedStepVelocity[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedStepSlide[NUM_CHANNELS][NUM_STEPS];
       uint8_t savedChannelVelocity[NUM_CHANNELS];
+      // Persisted generative parameters
+      uint8_t savedRandomSlideProb[NUM_CHANNELS];
+      uint8_t savedOctaveSpread[NUM_CHANNELS];
     };
     void saveState();
     void loadState();

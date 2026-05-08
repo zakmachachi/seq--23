@@ -82,6 +82,10 @@ SimpleSequencer::SimpleSequencer()
     channelVelocity[c] = 96;
     ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
+    // Generative defaults
+    randomSlideProb[c] = 0;   // 0% slide by default
+    octaveSpread[c]    = 2;   // index 2 → 0 octave offset
+    lastScaleMode[c]   = 1;   // remember Major as last-active scale
   }
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
@@ -557,19 +561,86 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       Serial.println(euclidEnabled[selectedChannel] ? " ON" : " OFF");
     }
   } else if (activeMenu == 1){
-    // Notes page: Pot 1 button regenerates melody
+    // Notes page generative controls
     if (pot == 0){
+      // Toggle Generative Mode: swap euclidScaleMode between 0 and lastScaleMode
+      uint8_t ch = selectedChannel;
+      if (euclidScaleMode[ch] == 0){
+        if (lastScaleMode[ch] == 0) lastScaleMode[ch] = 1; // safety: fall back to Major
+        euclidScaleMode[ch] = lastScaleMode[ch];
+        randomizeEuclidMelody(ch);
+        Serial.print("GEN CH"); Serial.print(ch+1); Serial.println(" ON");
+      } else {
+        lastScaleMode[ch] = euclidScaleMode[ch];
+        euclidScaleMode[ch] = 0;
+        randomizeEuclidMelody(ch); // clears per-step pitches back to default
+        Serial.print("GEN CH"); Serial.print(ch+1); Serial.println(" OFF");
+      }
+    } else if (pot == 1){
+      // Regenerate notes using current settings
       randomizeEuclidMelody(selectedChannel);
-      Serial.print("MELODY CH"); Serial.print(selectedChannel+1);
-      Serial.println(" regenerated");
+      Serial.print("REGEN CH"); Serial.println(selectedChannel+1);
     }
   }
 }
 
 // --- POT ROTATION HANDLER: Context-dependent parameter control -------
 void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
-  if (activeMenu != 2) return;  // Only handle Euclid page for now
-  
+  if (activeMenu == 1){
+    uint8_t ch = selectedChannel;
+    switch (pot){
+      case 0: { // Channel select
+        selectedChannel = (selectedChannel + ticks + NUM_CHANNELS) % NUM_CHANNELS;
+        Serial.print("SEL CH"); Serial.println(selectedChannel+1);
+        break;
+      }
+      case 1: { // Scale selection (cycle modes 1..6: Maj/Min/Pent/Loc/Dim/Atonal)
+        int mode = (int)euclidScaleMode[ch];
+        if (mode <= 0) mode = 1;
+        mode += ticks;
+        // Wrap into 1..6 inclusive
+        const int N = 6;
+        mode = ((mode - 1) % N + N) % N + 1;
+        euclidScaleMode[ch] = (uint8_t)mode;
+        lastScaleMode[ch]   = (uint8_t)mode;
+        randomizeEuclidMelody(ch);
+        Serial.print("SCALE="); Serial.println(mode);
+        break;
+      }
+      case 2: { // Gate length (global)
+        int prev = noteLenIdx;
+        noteLenIdx = (uint8_t)constrain((int)noteLenIdx + ticks, 0, 4);
+        // Propagate to all generated steps so live tweaks are audible immediately
+        if (noteLenIdx != prev && euclidScaleMode[ch] != 0){
+          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][s] = noteLenIdx;
+        }
+        Serial.print("GATE="); Serial.println(noteLenIdx);
+        break;
+      }
+      case 3: { // Random Slide probability 0..100
+        randomSlideProb[ch] = (uint8_t)constrain(
+          (int)randomSlideProb[ch] + ticks, 0, 100);
+        Serial.print("SLIDE%="); Serial.println(randomSlideProb[ch]);
+        break;
+      }
+      case 4: { // Base velocity 0..127
+        channelVelocity[ch] = (uint8_t)constrain(
+          (int)channelVelocity[ch] + ticks, 0, 127);
+        Serial.print("VEL="); Serial.println(channelVelocity[ch]);
+        break;
+      }
+      case 5: { // Octave spread 0..5 (mapped -2..+3)
+        octaveSpread[ch] = (uint8_t)constrain(
+          (int)octaveSpread[ch] + ticks, 0, 5);
+        Serial.print("OCT="); Serial.println((int)octaveSpread[ch] - 2);
+        break;
+      }
+    }
+    return;
+  }
+
+  if (activeMenu != 2) return;  // Other menus: only Euclid handles rotation
+
   // Euclid page controls
   switch (pot){
     case 0:  // Pot 1: cycle through channels
@@ -613,10 +684,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572469; // Unique signature (v3)
+  data.magicNumber = 13572470; // Unique signature (v4 — adds generative params)
   data.savedBpm = bpm;
   data.savedNoteLenIdx = noteLenIdx;
-  
+
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
     data.savedChannelPitch[c] = channelPitch[c];
     data.savedMuted[c] = muted[c];
@@ -624,7 +695,7 @@ void SimpleSequencer::saveState() {
     data.savedPulses[c] = pulses[c];
     data.savedEuclidOffset[c] = euclidOffset[c];
     data.savedEuclidScaleMode[c] = euclidScaleMode[c];
-    
+
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
       data.savedSteps[c][s] = steps[c][s];
       data.savedPitch[c][s] = pitch[c][s];
@@ -635,6 +706,8 @@ void SimpleSequencer::saveState() {
       data.savedStepSlide[c][s] = stepSlide[c][s] ? 1 : 0;
     }
     data.savedChannelVelocity[c] = channelVelocity[c];
+    data.savedRandomSlideProb[c] = randomSlideProb[c];
+    data.savedOctaveSpread[c]    = octaveSpread[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -653,7 +726,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572469) {
+  if (data.magicNumber == 13572470) {
     bpm = data.savedBpm;
     noteLenIdx = data.savedNoteLenIdx;
 
@@ -664,7 +737,7 @@ void SimpleSequencer::loadState() {
       pulses[c] = data.savedPulses[c];
       euclidOffset[c] = data.savedEuclidOffset[c];
       euclidScaleMode[c] = data.savedEuclidScaleMode[c];
-      
+
       for (uint8_t s = 0; s < NUM_STEPS; s++) {
         steps[c][s] = data.savedSteps[c][s];
         pitch[c][s] = data.savedPitch[c][s];
@@ -677,43 +750,63 @@ void SimpleSequencer::loadState() {
         stepSlide[c][s] = (data.savedStepSlide[c][s] != 0);
       }
       channelVelocity[c] = data.savedChannelVelocity[c];
-      // If saved velocity is unexpectedly high (old TD-3 defaults), normalize to requested default
       if (channelVelocity[c] > 120) channelVelocity[c] = 96;
+      randomSlideProb[c] = (data.savedRandomSlideProb[c] <= 100) ? data.savedRandomSlideProb[c] : 0;
+      octaveSpread[c]    = (data.savedOctaveSpread[c] <= 5)      ? data.savedOctaveSpread[c]    : 2;
+      // lastScaleMode not persisted — derived from euclidScaleMode if non-zero
+      if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       // Regenerate Euclidean patterns if enabled
       if (euclidEnabled[c]) updateEuclid(c);
     }
-    Serial.println("State loaded from EEPROM.");
+    Serial.println("State loaded from EEPROM (v4).");
   } else {
-    Serial.println("No saved state found. Booting blank.");
+    Serial.println("No saved state (v4) found. Booting blank.");
   }
 }
 
 void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   uint8_t mode = euclidScaleMode[ch];
-  
   if (mode == 0) {
-    // MODE 0: OFF (Clear all 16 pitches back to the base drum sound)
+    // OFF: clear per-step generative overrides; steps fall back to channel pitch
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
-      pitch[ch][s] = 255; 
+      pitch[ch][s]       = 255;
+      stepSlide[ch][s]   = false;
+      stepVelocity[ch][s] = 255; // use channel default
+      noteLen[ch][s]     = 255; // use global gate
     }
     return;
   }
-  // MODES 1-3: Generate Scale for ALL 16 STEPS (1=Locrian, 2=Diminished, 3=Atonal)
+
   uint8_t root = channelPitch[ch];
 
-  const uint8_t locrian[] = {0, 1, 3, 5, 6, 8, 10, 12};
-  const uint8_t diminished[] = {0, 1, 3, 4, 6, 7, 9, 10, 12};
-  const uint8_t atonal[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  // Scale Definitions (mode 1..6 → Major/Minor/Pent/Locrian/Dim/Atonal)
+  static const uint8_t maj[] = {0,2,4,5,7,9,11,12};
+  static const uint8_t min[] = {0,2,3,5,7,8,10,12};
+  static const uint8_t pen[] = {0,2,4,7,9,12};
+  static const uint8_t loc[] = {0,1,3,5,6,8,10,12};
+  static const uint8_t dim[] = {0,1,3,4,6,7,9,10,12};
+  static const uint8_t ato[] = {0,1,2,3,4,5,6,7,8,9,10,11,12};
+
+  const uint8_t* scale;
+  uint8_t size;
+  switch (mode) {
+    case 1: scale = maj; size = 8;  break;
+    case 2: scale = min; size = 8;  break;
+    case 3: scale = pen; size = 6;  break;
+    case 4: scale = loc; size = 8;  break;
+    case 5: scale = dim; size = 9;  break;
+    default: scale = ato; size = 13; break; // mode 6 (Atonal) and any > 6
+  }
 
   for (uint8_t s = 0; s < NUM_STEPS; s++) {
-    uint8_t interval = 0;
-    if (mode == 1) interval = locrian[random(0, 8)];
-    else if (mode == 2) interval = diminished[random(0, 9)];
-    else if (mode == 3) interval = atonal[random(0, 13)];
-
-    // Randomly drop some notes down an octave for bass movement
-    int note = root + interval - (random(0, 2) * 12); 
+    int octOffset = ((int)octaveSpread[ch] - 2) * 12; // -2..+3 octaves
+    int note = (int)root + scale[random(0, size)] + octOffset;
     pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
+
+    stepSlide[ch][s]    = (random(0, 101) <= randomSlideProb[ch]);
+    int v = (int)channelVelocity[ch] + random(-10, 10);
+    stepVelocity[ch][s] = (uint8_t)constrain(v, 0, 127);
+    noteLen[ch][s]      = noteLenIdx;
   }
 }
 
@@ -1501,60 +1594,75 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
 }
 
 void SimpleSequencer::drawNotesView(){
-  // Menu 2: scale/note picker for selected channel
+  // Menu 1: Generative performance page for the selected channel
   display.clearDisplay();
-  const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-  const char* scaleNames[] = {"CHROM","MAJOR","MINOR","PENTA","BLUES","DORIAN","PHRYG","LYDIAN","MIXO","LOCR","DIM","ATONL"};
+  const char* noteNames[]   = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  const char* scaleNames[]  = {"OFF","MAJOR","MINOR","PENTA","LOCR","DIM","ATONL"};
+  uint8_t ch  = selectedChannel;
+  uint8_t sm  = euclidScaleMode[ch];
+  if (sm > 6) sm = 6;
+  bool genOn = (sm != 0);
 
-  display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
 
-  // Header: channel + current root note
-  uint8_t p = channelPitch[selectedChannel];
+  // ── TOP ROW: Channel + Root note ─────────────────────────────
+  uint8_t p = channelPitch[ch];
+  display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print("SCALE  CH"); display.print(selectedChannel+1);
-  display.setCursor(80, 0);
-  display.print("ROOT:");
-  display.print(noteNames[p % 12]);
-  display.print((p / 12) - 1);
-  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
-
-  // All 6 channel root notes in a compact grid (2 cols x 3 rows)
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    uint8_t cp = channelPitch[c];
-    int col = c % 2;
-    int row = c / 2;
-    int x = col * 64;
-    int y = 13 + row * 10;
-    bool sel = (c == selectedChannel);
-    if (sel){
-      display.fillRect(x, y-1, 62, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.setTextColor(SH110X_WHITE);
-    }
-    display.setCursor(x+1, y);
-    display.print("CH"); display.print(c+1); display.print(":");
-    display.print(noteNames[cp % 12]);
-    display.print((cp/12)-1);
-    if (muted[c]){ display.setCursor(x+48, y); display.print("M"); }
-    display.setTextColor(SH110X_WHITE);
+  display.print("CH"); display.print(ch+1);
+  // Root note bigger on the right
+  display.setTextSize(2);
+  display.setCursor(48, 0);
+  display.print(noteNames[p % 12]); display.print((p / 12) - 1);
+  // Mute marker
+  if (muted[ch]){
+    display.setTextSize(1);
+    display.setCursor(110, 0);
+    display.print("MUT");
   }
+  display.drawFastHLine(0, 18, 128, SH110X_WHITE);
 
-  // Scale mode for selected channel (euclidScaleMode maps to scale names)
-  display.drawFastHLine(0, 44, 128, SH110X_WHITE);
-  display.setCursor(0, 47);
+  // ── MIDDLE ROW: Scale + Generative Status ────────────────────
+  display.setTextSize(1);
+  display.setCursor(0, 23);
   display.print("SCL:");
-  uint8_t sm = euclidScaleMode[selectedChannel] % 4;
-  const char* smNames[] = {"OFF","LOCRIAN","DIM","ATONAL"};
-  display.print(smNames[sm]);
-  display.setCursor(64, 47);
-  display.print("VEL:"); display.print(channelVelocity[selectedChannel]);
+  display.setTextSize(2);
+  display.setCursor(28, 21);
+  display.print(scaleNames[sm]);
 
-  // Bottom: gate length + BPM
-  display.setCursor(0, 57);
-  display.print("GATE:"); display.print(noteLenNames[noteLenIdx]);
-  display.setCursor(80, 57);
+  display.setTextSize(1);
+  display.setCursor(96, 23);
+  if (genOn){
+    display.fillRect(94, 21, 32, 11, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
+    display.setCursor(102, 23);
+    display.print("GEN");
+    display.setTextColor(SH110X_WHITE);
+  } else {
+    display.drawRect(94, 21, 32, 11, SH110X_WHITE);
+    display.setCursor(100, 23);
+    display.print("OFF");
+  }
+  display.drawFastHLine(0, 36, 128, SH110X_WHITE);
+
+  // ── BOTTOM ROW: Slide% / Octave / Velocity / Gate / BPM ──────
+  display.setTextSize(1);
+  display.setCursor(0, 41);
+  display.print("SLD:"); display.print(randomSlideProb[ch]); display.print("%");
+
+  display.setCursor(64, 41);
+  int oct = (int)octaveSpread[ch] - 2;
+  display.print("OCT:");
+  if (oct > 0) display.print("+");
+  display.print(oct);
+
+  display.setCursor(0, 53);
+  display.print("VEL:"); display.print(channelVelocity[ch]);
+
+  display.setCursor(48, 53);
+  display.print("GT:"); display.print(noteLenNames[noteLenIdx]);
+
+  display.setCursor(90, 53);
   display.print("BPM:"); display.print(bpm);
 
   display.display();
