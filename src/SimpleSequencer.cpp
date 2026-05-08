@@ -98,6 +98,7 @@ SimpleSequencer::SimpleSequencer()
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       machineOverlay[c][s] = 0;
       machinePattern[c][s] = false;
+      machineRatchet[c][s] = 0;
     }
   }
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
@@ -742,9 +743,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // Per-menu, per-pot sensitivity divisors (1 = native, higher = slower).
   // Notes page: pot 4 (slide%) stays at native speed; everything else dampened.
   // Euclid page: pulses=fast(3), offset=fast(3), scale=slow(5), velocity=med(3), gate=med(3).
-  static const uint8_t divNotes[6]   = {3, 12, 3, 1, 3, 3};
-  static const uint8_t divEuclid[6]  = {3, 3, 5, 3, 3, 3};
-  static const uint8_t divDefault[6] = {3, 12, 3, 3, 3, 3};
+  static const uint8_t divNotes[6]       = {3, 12, 3, 1, 3, 3};
+  static const uint8_t divEuclid[6]      = {3, 3, 5, 3, 3, 3};
+  static const uint8_t divTrigMachine[6] = {5, 1, 2, 3, 3, 3}; // density (pot2) fast
+  static const uint8_t divDefault[6]     = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
   if (lastMenu != activeMenu){
@@ -754,6 +756,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   const uint8_t* divTable = divDefault;
   if (activeMenu == 1) divTable = divNotes;
   else if (activeMenu == 2) divTable = divEuclid;
+  else if (activeMenu == 4) divTable = divTrigMachine;
   int dv = (pot < 6 && divTable[pot] > 0) ? (int)divTable[pot] : 1;
   potAcc[pot] += ticks;
   int forward = potAcc[pot] / dv;
@@ -1096,6 +1099,22 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
     machinePattern[ch][s] = ((int)w[src] >= threshold);
+    machineRatchet[ch][s] = 0;
+  }
+
+  // KICK fill notes: at higher density, non-base steps get ratchets.
+  // Higher density and lower-weighted (rarer) steps get faster ratchets.
+  if (m == TM_KICK && density >= 65){
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      if (!machinePattern[ch][s]) continue;
+      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+      if (W_KICK[src] == 100) continue; // skip 4-on-the-floor base
+      // Map density to ratchet count: higher density + lower weight => more hits
+      uint8_t r = 1;
+      if (density >= 85 && W_KICK[src] < 50) r = 3;
+      else if (density >= 75) r = 2;
+      machineRatchet[ch][s] = r;
+    }
   }
 }
 
@@ -1502,6 +1521,11 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   if (lenIdx == 255) lenIdx = noteLenIdx;
 
   uint8_t rIdx = stepRatchet[ch][currentStep];
+  // Merge machine-driven ratchets (e.g., kick fill notes) with user P-Locks
+  if (trigMachine[ch] != TM_OFF){
+    uint8_t mr = machineRatchet[ch][currentStep];
+    if (mr > rIdx) rIdx = mr;
+  }
   if (rIdx > 0) {
     const uint8_t rTicks[] = {0, 6, 4, 3, 2, 1};
     uint8_t ticksPerHit = rTicks[rIdx];
@@ -2124,6 +2148,7 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
     euclidPattern[ch][s] = false;
     machineOverlay[ch][s] = 0;
     machinePattern[ch][s] = false;
+    machineRatchet[ch][s] = 0;
   }
   euclidEnabled[ch] = false;
   euclidScaleMode[ch] = 0;

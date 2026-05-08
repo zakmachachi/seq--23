@@ -75,6 +75,7 @@ class SimpleSequencer {
     uint8_t trigShift[NUM_CHANNELS];             // 0..15 step shift
     uint8_t machineOverlay[NUM_CHANNELS][NUM_STEPS]; // 0=auto, 1=force-on, 2=force-off
     bool machinePattern[NUM_CHANNELS][NUM_STEPS];    // cached pattern from generator
+    uint8_t machineRatchet[NUM_CHANNELS][NUM_STEPS]; // 0..5 ratchet count from machine (kick fills)
     void regenerateMachinePattern(uint8_t ch);
     bool isStepActive(uint8_t ch, uint8_t step);
     void drawTrigMachineView();
