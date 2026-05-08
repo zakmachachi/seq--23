@@ -445,20 +445,32 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   // --- Function button ---
   // Modifier in most contexts. Elektron-style: while a step is held, tapping
   // Function flips that step's Fill state (0 = normal, 1 = fill-only).
+  // Also: 5 quick taps in a row (no step held) saves the patch to EEPROM.
   if (i == MATRIX_BTN_FUNCTION_INDEX){
     if (heldStep >= 0 && heldStep < (int8_t)NUM_STEPS){
       uint8_t &fs = fillState[selectedChannel][heldStep];
       fs = (fs == 1) ? 0 : 1;
-      // Ensure step is enabled so the fill marker has something to gate
       steps[selectedChannel][heldStep] = true;
-      pendingToggle[heldStep] = false; // suppress on-release toggle
-      // Visual splash
+      pendingToggle[heldStep] = false;
       fillAnimStep = (uint8_t)heldStep;
       fillAnimSet  = (fs == 1);
       fillAnimEndMs = millis() + 700;
       Serial.print("FILL Ch"); Serial.print(selectedChannel+1);
       Serial.print(" Step ");  Serial.print(heldStep+1);
       Serial.print(" = ");     Serial.println(fs);
+    } else {
+      // Tap-counter for save: 5 quick taps within 2s of each other.
+      static uint8_t fnTapCount = 0;
+      static uint32_t fnLastTapMs = 0;
+      uint32_t now = millis();
+      if (now - fnLastTapMs > 2000) fnTapCount = 0;
+      fnTapCount++;
+      fnLastTapMs = now;
+      Serial.print("FN tap "); Serial.print(fnTapCount); Serial.println("/5");
+      if (fnTapCount >= 5){
+        fnTapCount = 0;
+        saveState(); // shows its own SAVED splash
+      }
     }
     return;
   }
