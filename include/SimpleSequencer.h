@@ -60,7 +60,7 @@ class SimpleSequencer {
     uint8_t channelVelocity[NUM_CHANNELS]; // default velocity per channel (0-127)
     // --- GENERATIVE PARAMETERS (Menu 1: Notes Page) ---
     uint8_t randomSlideProb[NUM_CHANNELS]; // Probability 0-100 a generated step has Slide
-    uint8_t octaveSpread[NUM_CHANNELS];    // Index 0..5 → octave offset -2..+3 (idx-2)
+    uint8_t octaveSpread[NUM_CHANNELS];    // 0..5 = max octaves above root for random per-step picks
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
 
     // runtime
@@ -91,6 +91,9 @@ class SimpleSequencer {
     // UI menu state
     bool menuMode = false;
     uint8_t activeMenu = 0;
+    // Transport play/stop OLED splash
+    uint32_t transportAnimEndMs = 0;
+    bool transportAnimIsPlay = false;
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // --- HARDWARE LED GRID ---

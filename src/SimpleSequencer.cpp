@@ -84,7 +84,7 @@ SimpleSequencer::SimpleSequencer()
     lastNotePlaying[c] = 255;
     // Generative defaults
     randomSlideProb[c] = 0;   // 0% slide by default
-    octaveSpread[c]    = 2;   // index 2 → 0 octave offset
+    octaveSpread[c]    = 0;   // 0 = no octave spread (notes stay in root octave)
     lastScaleMode[c]   = 1;   // remember Major as last-active scale
   }
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
@@ -235,6 +235,9 @@ void SimpleSequencer::loop(){
         if (!startStopModifierFlag) {
           // toggle running state
           isRunning = !isRunning;
+          // Trigger play/stop OLED splash for ~600ms
+          transportAnimIsPlay = isRunning;
+          transportAnimEndMs = millis() + 600;
           if (isRunning){
             midiStepTickCounter = 0;
             stepAdvanceRequested = false;
@@ -376,8 +379,22 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     }
   }
 
-  // --- Function button: modifier only, no action on press ---
-  if (i == MATRIX_BTN_FUNCTION_INDEX){ return; }
+  // --- Function button ---
+  // Modifier in most contexts. Elektron-style: while a step is held, tapping
+  // Function flips that step's Fill state (0 = normal, 1 = fill-only).
+  if (i == MATRIX_BTN_FUNCTION_INDEX){
+    if (heldStep >= 0 && heldStep < (int8_t)NUM_STEPS){
+      uint8_t &fs = fillState[selectedChannel][heldStep];
+      fs = (fs == 1) ? 0 : 1;
+      // Ensure step is enabled so the fill marker has something to gate
+      steps[selectedChannel][heldStep] = true;
+      pendingToggle[heldStep] = false; // suppress on-release toggle
+      Serial.print("FILL Ch"); Serial.print(selectedChannel+1);
+      Serial.print(" Step ");  Serial.print(heldStep+1);
+      Serial.print(" = ");     Serial.println(fs);
+    }
+    return;
+  }
 
   // --- Fill button: state read via isFillHeld() in loop() ---
   if (i == MATRIX_BTN_FILL_INDEX){ return; }
@@ -586,6 +603,28 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
 
 // --- POT ROTATION HANDLER: Context-dependent parameter control -------
 void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
+  // Per-menu, per-pot sensitivity divisors (1 = native, higher = slower).
+  // Notes page: pot 4 (slide%) stays at native speed; everything else dampened.
+  // Euclid page: pot 1 (channel) and pot 4 (scale) extra-slow per request.
+  static const uint8_t divNotes[6]   = {3, 3, 3, 1, 3, 3};
+  static const uint8_t divEuclid[6]  = {5, 3, 3, 5, 3, 3};
+  static const uint8_t divDefault[6] = {3, 3, 3, 3, 3, 3};
+  static int potAcc[6] = {0,0,0,0,0,0};
+  static uint8_t lastMenu = 0;
+  if (lastMenu != activeMenu){
+    for (uint8_t i = 0; i < 6; i++) potAcc[i] = 0;
+    lastMenu = activeMenu;
+  }
+  const uint8_t* divTable = divDefault;
+  if (activeMenu == 1) divTable = divNotes;
+  else if (activeMenu == 2) divTable = divEuclid;
+  int dv = (pot < 6 && divTable[pot] > 0) ? (int)divTable[pot] : 1;
+  potAcc[pot] += ticks;
+  int forward = potAcc[pot] / dv;
+  potAcc[pot] -= forward * dv;
+  if (forward == 0) return;
+  ticks = forward;
+
   if (activeMenu == 1){
     uint8_t ch = selectedChannel;
     switch (pot){
@@ -629,10 +668,12 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("VEL="); Serial.println(channelVelocity[ch]);
         break;
       }
-      case 5: { // Octave spread 0..5 (mapped -2..+3)
+      case 5: { // Octave spread 0..5 (max additional octaves above root)
         octaveSpread[ch] = (uint8_t)constrain(
           (int)octaveSpread[ch] + ticks, 0, 5);
-        Serial.print("OCT="); Serial.println((int)octaveSpread[ch] - 2);
+        // Re-roll generated notes so spread change is audible immediately
+        if (euclidScaleMode[ch] != 0) randomizeEuclidMelody(ch);
+        Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
         break;
       }
     }
@@ -752,7 +793,7 @@ void SimpleSequencer::loadState() {
       channelVelocity[c] = data.savedChannelVelocity[c];
       if (channelVelocity[c] > 120) channelVelocity[c] = 96;
       randomSlideProb[c] = (data.savedRandomSlideProb[c] <= 100) ? data.savedRandomSlideProb[c] : 0;
-      octaveSpread[c]    = (data.savedOctaveSpread[c] <= 5)      ? data.savedOctaveSpread[c]    : 2;
+      octaveSpread[c]    = (data.savedOctaveSpread[c] <= 5)      ? data.savedOctaveSpread[c]    : 0;
       // lastScaleMode not persisted — derived from euclidScaleMode if non-zero
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       // Regenerate Euclidean patterns if enabled
@@ -798,9 +839,13 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     default: scale = ato; size = 13; break; // mode 6 (Atonal) and any > 6
   }
 
+  // octaveSpread = max additional octaves above root (0..5). Per-step random pick
+  // widens the spread without dragging every note off-pitch like a global shift.
+  uint8_t maxOct = octaveSpread[ch];
+  if (maxOct > 5) maxOct = 5;
   for (uint8_t s = 0; s < NUM_STEPS; s++) {
-    int octOffset = ((int)octaveSpread[ch] - 2) * 12; // -2..+3 octaves
-    int note = (int)root + scale[random(0, size)] + octOffset;
+    int octShift = (maxOct == 0) ? 0 : (int)random(0, (long)maxOct + 1) * 12;
+    int note = (int)root + scale[random(0, size)] + octShift;
     pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
 
     stepSlide[ch][s]    = (random(0, 101) <= randomSlideProb[ch]);
@@ -1127,6 +1172,28 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 // CV/Gate functions removed; using MIDI out only
 
 void SimpleSequencer::drawDisplay(){
+  // Transport splash — overlays everything else for ~600ms after a play/stop edge
+  uint32_t nowMs = millis();
+  if (transportAnimEndMs && nowMs < transportAnimEndMs){
+    display.clearDisplay();
+    display.setTextColor(SH110X_WHITE);
+    if (transportAnimIsPlay){
+      display.fillTriangle(20, 18, 48, 32, 20, 46, SH110X_WHITE);
+      display.setTextSize(3);
+      display.setCursor(60, 22);
+      display.print("PLAY");
+    } else {
+      display.fillRect(20, 18, 28, 28, SH110X_WHITE);
+      display.setTextSize(3);
+      display.setCursor(60, 22);
+      display.print("STOP");
+    }
+    display.display();
+    return;
+  } else if (transportAnimEndMs && nowMs >= transportAnimEndMs){
+    transportAnimEndMs = 0;
+  }
+
   if (activeMenu == 1){ drawNotesView(); return; }
   if (activeMenu == 2){ drawEuclidView(); return; }
   if (activeMenu == 3){ drawStepVisualiser(); return; }
@@ -1651,10 +1718,7 @@ void SimpleSequencer::drawNotesView(){
   display.print("SLD:"); display.print(randomSlideProb[ch]); display.print("%");
 
   display.setCursor(64, 41);
-  int oct = (int)octaveSpread[ch] - 2;
-  display.print("OCT:");
-  if (oct > 0) display.print("+");
-  display.print(oct);
+  display.print("SPRD:"); display.print(octaveSpread[ch]);
 
   display.setCursor(0, 53);
   display.print("VEL:"); display.print(channelVelocity[ch]);
