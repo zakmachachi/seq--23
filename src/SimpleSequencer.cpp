@@ -78,7 +78,7 @@ SimpleSequencer::SimpleSequencer()
       stepSlide[c][s] = false;
       pendingToggle[s] = false;
     }
-    channelPitch[c] = 36;
+    channelPitch[c] = 60; // default C4 — matches Rytm MK2 default TRIG NOTE range
     channelVelocity[c] = 96;
     ratchetIntervalTicks[c] = 0;
     lastNotePlaying[c] = 255;
@@ -705,9 +705,12 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (activeMenu == 1){
     uint8_t ch = selectedChannel;
     switch (pot){
-      case 0: { // Channel select
-        selectedChannel = (selectedChannel + ticks + NUM_CHANNELS) % NUM_CHANNELS;
-        Serial.print("SEL CH"); Serial.println(selectedChannel+1);
+      case 0: { // Root note (channel select is on the dedicated CH buttons)
+        int p = (int)channelPitch[ch] + ticks;
+        channelPitch[ch] = (uint8_t)constrain(p, 0, 127);
+        // Re-roll generated notes around the new root if gen mode is on
+        if (euclidScaleMode[ch] != 0) randomizeEuclidMelody(ch);
+        Serial.print("ROOT="); Serial.println(channelPitch[ch]);
         break;
       }
       case 1: { // Scale selection (cycle modes 1..6: Maj/Min/Pent/Loc/Dim/Atonal)
