@@ -71,6 +71,9 @@ static const uint8_t MIDI_RX_PIN = 21; // MIDI IN (connect from MIDI IN opto)
 // MIDI serial interface (Serial5 on Teensy 4.1 uses pins 20/21)
 #define MIDI_SERIAL Serial5
 
-// LED pin removed while LED features are disabled.
+// --- WS2812 step LEDs (one per step button) ---
+static const uint8_t LED_PIN = 29;
+static const uint8_t LED_COUNT = NUM_STEPS; // 16 LEDs, one per step
+static const uint8_t LED_BRIGHTNESS = 80;   // 0..255
 
 #endif

@@ -61,7 +61,7 @@ static float getDivisionFactor(SimpleSequencer::Division d){
 
 SimpleSequencer::SimpleSequencer()
   : bpm(200), lastStepMillis(0), currentStep(0), selectedChannel(0),
-    ledStrip(0, 0, NEO_GRB + NEO_KHZ800)
+    ledStrip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800)
 {
   for (uint8_t c=0;c<NUM_CHANNELS;c++){
     pulses[c]=4;
@@ -137,8 +137,12 @@ void SimpleSequencer::begin(){
 
   // initialize display
   display.begin(0x3C);
-  // LEDs disabled for now (hardware bring-up)
-  // ledStrip initialization and boot animation removed.
+  // Initialize WS2812 step LED strip (16 LEDs at LED_PIN)
+  ledStrip.begin();
+  ledStrip.setBrightness(LED_BRIGHTNESS);
+  ledStrip.clear();
+  ledStrip.show();
+  bootAnimation();
 
   // Initialize hardware MIDI_SERIAL for MIDI at 31250 baud
   MIDI_SERIAL.begin(31250);
@@ -1964,7 +1968,57 @@ void SimpleSequencer::drawDisplay(){
 
 // LEDs disabled: no-op implementation so calls are safe during bring-up
 void SimpleSequencer::updateLEDs(){
-  (void)0;
+  // One LED per step. Show the active channel's pattern + playhead.
+  // Per-channel hue distinguishes which channel is selected.
+  static const uint32_t channelColors[NUM_CHANNELS] = {
+    0xFF2020, // CH1 red
+    0xFF6800, // CH2 orange
+    0xC8C800, // CH3 yellow
+    0x10A040, // CH4 green
+    0x1060FF, // CH5 blue
+    0x9020D0  // CH6 purple
+  };
+  uint32_t chCol = channelColors[selectedChannel % NUM_CHANNELS];
+  uint8_t cr = (chCol >> 16) & 0xFF;
+  uint8_t cg = (chCol >> 8) & 0xFF;
+  uint8_t cb = chCol & 0xFF;
+
+  for (uint8_t s = 0; s < LED_COUNT && s < NUM_STEPS; s++){
+    bool active = isStepActive(selectedChannel, s);
+    bool isPlayhead = isRunning && (s == currentStep);
+
+    if (isPlayhead){
+      // Bright white for playhead — overrides everything
+      ledStrip.setPixelColor(s, ledStrip.Color(255, 255, 255));
+    } else if (active){
+      // Channel hue at full
+      ledStrip.setPixelColor(s, ledStrip.Color(cr, cg, cb));
+    } else {
+      // Dim hint color for off-steps so the grid is visible even at rest
+      ledStrip.setPixelColor(s, ledStrip.Color(cr / 16, cg / 16, cb / 16));
+    }
+
+    // Decorations for Menu 4 overlay state and fill marks
+    if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
+      uint8_t ov = machineOverlay[selectedChannel][s];
+      if (!isPlayhead){
+        if (ov == 1){
+          // Force-on: solid white
+          ledStrip.setPixelColor(s, ledStrip.Color(180, 180, 180));
+        } else if (ov == 2){
+          // Force-off: dim red to mark a mask
+          ledStrip.setPixelColor(s, ledStrip.Color(40, 0, 0));
+        }
+      }
+    } else if (fillState[selectedChannel][s] == 1 && !isPlayhead){
+      // Fill-only step tint (greenish overlay) when not playing
+      ledStrip.setPixelColor(s, ledStrip.Color(0, 60, 0));
+      if (active && fillModeActive){
+        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 0));
+      }
+    }
+  }
+  ledStrip.show();
 }
 
 void SimpleSequencer::drawDebugGrid(){
@@ -2129,11 +2183,16 @@ void SimpleSequencer::runMidiPinMonitor(uint32_t ms){
 // MIDI input handlers removed — processing consolidated in runEngine() to avoid concurrent Serial reads.
 
 void SimpleSequencer::bootAnimation() {
-  // LED boot animation disabled during bring-up; keep OLED intact
-  (void)0;
+  // Quick LED sweep across the strip on boot for a visible "alive" signal.
+  for (uint8_t i = 0; i < LED_COUNT; i++){
+    ledStrip.clear();
+    ledStrip.setPixelColor(i, ledStrip.Color(0, 0, 200));
+    ledStrip.show();
+    delay(25);
+  }
+  ledStrip.clear();
+  ledStrip.show();
 }
-
-// LEDs disabled: keep updateLEDs as no-op (defined earlier)
 
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
