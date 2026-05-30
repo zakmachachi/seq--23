@@ -29,8 +29,8 @@ static const uint8_t MATRIX_BTN_MENU2_INDEX    = 19;  // Menu: Euclid
 static const uint8_t MATRIX_BTN_MENU3_INDEX    = 20;  // Menu: Step Visualizer
 static const uint8_t MATRIX_BTN_MENU4_INDEX    = 21;  // Menu: Trigger Machines (button right of MENU3)
 // Channel select buttons (pressing alone = select, Function held = mute/unmute)
-// PCB v2: idx 27 is fixed, so all 6 are now consecutive in reverse order.
-static const uint8_t MATRIX_BTN_CH[6] = {29, 28, 27, 26, 25, 24}; // Ch1-6 → matrix idx 29,28,27,26,25,24
+// PCB v2: 7 consecutive channel buttons (idx 23..29 in reverse).
+static const uint8_t MATRIX_BTN_CH[7] = {29, 28, 27, 26, 25, 24, 23}; // Ch1-7 → matrix idx 29..23
 // Transport: Function + Page held together = Start/Stop toggle
 static const uint8_t MATRIX_BTN_START_INDEX   = MATRIX_BTN_FUNCTION_INDEX; // kept for runEngine compat
 static const uint8_t MATRIX_BTN_CHANNEL_INDEX = MATRIX_BTN_PAGE_INDEX;     // kept for runEngine compat
@@ -61,7 +61,7 @@ static const uint8_t OLED2_SCL_PIN = 16;
 // NOTE: LEDs are currently disabled in firmware during button/pot bring-up.
 
 // Sequencer parameters
-static const uint8_t NUM_CHANNELS = 6;
+static const uint8_t NUM_CHANNELS = 7;
 static const uint8_t NUM_STEPS = 16;
 
 // MIDI TX/RX: keep defaults unless your PCB remapped MIDI

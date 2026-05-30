@@ -938,7 +938,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572472; // Unique signature (v6 — adds trigger machines)
+  data.magicNumber = 13572473; // Unique signature (v7 — NUM_CHANNELS=7)
   data.savedBpm = bpm;
   data.savedNoteLenIdx = noteLenIdx;
 
@@ -987,7 +987,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572472) {
+  if (data.magicNumber == 13572473) {
     bpm = data.savedBpm;
     noteLenIdx = data.savedNoteLenIdx;
     if (noteLenIdx >= NOTE_LEN_COUNT) noteLenIdx = NOTE_LEN_DEFAULT_IDX;
@@ -1027,9 +1027,9 @@ void SimpleSequencer::loadState() {
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
-    Serial.println("State loaded from EEPROM (v6).");
+    Serial.println("State loaded from EEPROM (v7).");
   } else {
-    Serial.println("No saved state (v6) found. Booting blank.");
+    Serial.println("No saved state (v7) found. Booting blank.");
   }
 }
 
@@ -1911,17 +1911,17 @@ void SimpleSequencer::drawDisplay(){
 
   // Row 1: Channel indicator boxes (mute state)
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    // 6 channels across 128px: each tab is 20px wide with 1px gap = 126px total
-    int bx = c * 21;
+    // 7 channels across 128px: each tab is 17px wide with 1px gap = 125px total
+    int bx = c * 18;
     if (c == selectedChannel){
-      display.fillRect(bx, 0, 20, 11, SH110X_WHITE);
+      display.fillRect(bx, 0, 17, 11, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK, SH110X_WHITE);
     } else {
       if (muted[c]){
-        display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
-        display.drawLine(bx, 5, bx + 18, 5, SH110X_WHITE);
+        display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
+        display.drawLine(bx, 5, bx + 15, 5, SH110X_WHITE);
       } else {
-        display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
+        display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
       }
       display.setTextColor(SH110X_WHITE, SH110X_BLACK);
     }
@@ -1979,11 +1979,12 @@ void SimpleSequencer::updateLEDs(){
   // Hues spaced widely to be visually distinct on WS2812s.
   static const uint32_t channelColors[NUM_CHANNELS] = {
     0xFF0000, // CH1 red
-    0xFF6000, // CH2 amber/orange  (more green than CH1 so it reads clearly)
+    0xFF6000, // CH2 amber
     0xE0D000, // CH3 yellow
     0x00C040, // CH4 green
-    0x0080FF, // CH5 cyan-blue
-    0xC000FF  // CH6 magenta
+    0x00B0B0, // CH5 teal
+    0x0060FF, // CH6 blue
+    0xC000FF  // CH7 magenta
   };
   uint32_t chCol = channelColors[selectedChannel % NUM_CHANNELS];
   uint8_t cr = (chCol >> 16) & 0xFF;
@@ -2256,22 +2257,22 @@ void SimpleSequencer::drawNotesView(){
   if (sm > 6) sm = 6;
   bool genOn = (sm != 0);
 
-  // ── CHANNEL STRIP: all 6 with selected + mute state ─────────
+  // ── CHANNEL STRIP: all 7 with selected + mute state ─────────
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 21;
+    int bx = c * 18;
     bool sel = (c == selectedChannel);
     if (sel){
-      display.fillRect(bx, 0, 20, 10, SH110X_WHITE);
+      display.fillRect(bx, 0, 17, 10, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 20, 10, SH110X_WHITE);
+      display.drawRect(bx, 0, 17, 10, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 4, 1);
     display.print(c + 1);
     if (muted[c]){
-      display.drawLine(bx + 1, 5, bx + 18, 5,
+      display.drawLine(bx + 1, 5, bx + 15, 5,
                        sel ? SH110X_BLACK : SH110X_WHITE);
     }
   }
@@ -2326,24 +2327,23 @@ void SimpleSequencer::drawEuclidView(){
   display.clearDisplay();
   uint32_t now = millis();
 
-  // ── TOP BAR: 6 channel tabs with selected + mute state ───────────
-  // Each chip ~21px wide, 11 tall
+  // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
+  // Each chip 17px wide, 11 tall
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 21;
+    int bx = c * 18;
     bool sel = (c == selectedChannel);
     if (sel){
-      display.fillRect(bx, 0, 20, 11, SH110X_WHITE);
+      display.fillRect(bx, 0, 17, 11, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 20, 11, SH110X_WHITE);
+      display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 4, 2);
     display.print(c + 1);
     if (muted[c]){
-      // Strikethrough = muted
-      display.drawLine(bx + 1, 5, bx + 18, 5,
+      display.drawLine(bx + 1, 5, bx + 15, 5,
                        sel ? SH110X_BLACK : SH110X_WHITE);
     }
   }
@@ -2404,18 +2404,17 @@ void SimpleSequencer::drawStepVisualiser(){
 
   // ── TOP BAR: channel tabs ──────────────────────────────────────
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 21;
+    int bx = c * 18;
     bool isSelected = (c == selectedChannel);
     bool isMuted    = muted[c];
     if (isSelected){
-      display.fillRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
       if (isMuted){
-        // strikethrough for muted
-        display.drawLine(bx+1, 4, bx+18, 4, SH110X_WHITE);
+        display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
       }
     }
     display.setTextSize(1);
@@ -2526,14 +2525,14 @@ void SimpleSequencer::drawTrigMachineView(){
 
   // Top: channel tabs
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 21;
+    int bx = c * 18;
     if (c == selectedChannel){
-      display.fillRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 20, 9, SH110X_WHITE);
+      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
-      if (muted[c]) display.drawLine(bx+1, 4, bx+18, 4, SH110X_WHITE);
+      if (muted[c]) display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 3, 1);
