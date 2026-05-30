@@ -1970,31 +1970,39 @@ void SimpleSequencer::drawDisplay(){
 void SimpleSequencer::updateLEDs(){
   // One LED per step. Show the active channel's pattern + playhead.
   // Per-channel hue distinguishes which channel is selected.
+  // Hues spaced widely to be visually distinct on WS2812s.
   static const uint32_t channelColors[NUM_CHANNELS] = {
-    0xFF2020, // CH1 red
-    0xFF6800, // CH2 orange
-    0xC8C800, // CH3 yellow
-    0x10A040, // CH4 green
-    0x1060FF, // CH5 blue
-    0x9020D0  // CH6 purple
+    0xFF0000, // CH1 red
+    0xFF6000, // CH2 amber/orange  (more green than CH1 so it reads clearly)
+    0xE0D000, // CH3 yellow
+    0x00C040, // CH4 green
+    0x0080FF, // CH5 cyan-blue
+    0xC000FF  // CH6 magenta
   };
   uint32_t chCol = channelColors[selectedChannel % NUM_CHANNELS];
   uint8_t cr = (chCol >> 16) & 0xFF;
   uint8_t cg = (chCol >> 8) & 0xFF;
   uint8_t cb = chCol & 0xFF;
 
+  // Slow pulse phase for blinking decorations (0..255 sine-ish ramp)
+  uint8_t pulse = (uint8_t)((millis() / 4) & 0xFF);
+  uint8_t pulseBri = (pulse < 128) ? (pulse * 2) : (255 - (pulse - 128) * 2);
+
   for (uint8_t s = 0; s < LED_COUNT && s < NUM_STEPS; s++){
     bool active = isStepActive(selectedChannel, s);
     bool isPlayhead = isRunning && (s == currentStep);
 
     if (isPlayhead){
-      // Bright white for playhead — overrides everything
-      ledStrip.setPixelColor(s, ledStrip.Color(255, 255, 255));
+      // Playhead: white normally, green when Fill is held (so you see when fill is active)
+      if (fillModeActive){
+        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 80));
+      } else {
+        ledStrip.setPixelColor(s, ledStrip.Color(255, 255, 255));
+      }
     } else if (active){
-      // Channel hue at full
       ledStrip.setPixelColor(s, ledStrip.Color(cr, cg, cb));
     } else {
-      // Dim hint color for off-steps so the grid is visible even at rest
+      // Dim hint so the grid is visible even at rest
       ledStrip.setPixelColor(s, ledStrip.Color(cr / 16, cg / 16, cb / 16));
     }
 
@@ -2003,16 +2011,20 @@ void SimpleSequencer::updateLEDs(){
       uint8_t ov = machineOverlay[selectedChannel][s];
       if (!isPlayhead){
         if (ov == 1){
-          // Force-on: solid white
           ledStrip.setPixelColor(s, ledStrip.Color(180, 180, 180));
         } else if (ov == 2){
-          // Force-off: dim red to mark a mask
           ledStrip.setPixelColor(s, ledStrip.Color(40, 0, 0));
         }
       }
     } else if (fillState[selectedChannel][s] == 1 && !isPlayhead){
-      // Fill-only step tint (greenish overlay) when not playing
-      ledStrip.setPixelColor(s, ledStrip.Color(0, 60, 0));
+      // Fill-only step: solid green when Fill is held (the step will trigger),
+      // gentle pulse green when Fill not held (so you can see fills exist).
+      if (fillModeActive){
+        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 60));
+      } else {
+        uint8_t g = 40 + (pulseBri / 3); // 40..125 pulsing
+        ledStrip.setPixelColor(s, ledStrip.Color(0, g, 0));
+      }
       if (active && fillModeActive){
         ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 0));
       }
