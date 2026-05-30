@@ -549,7 +549,13 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     heldStep = (int8_t)i;
     lastEncoderMoveTime = millis();
     focusEncoder = 0;
+    Serial.print("STEP_PRESS idx="); Serial.print(i);
+    Serial.print(" -> step "); Serial.println(i + 1);
+    return;
   }
+
+  // Fell through everything: orphan key, print so user knows it was ignored
+  Serial.print("UNHANDLED KEY "); Serial.println(i);
 }
 
 // Called when a debounced release is detected
