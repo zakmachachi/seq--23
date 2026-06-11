@@ -137,6 +137,21 @@ void SimpleSequencer::begin(){
 
   // initialize display
   display.begin(0x3C);
+  display.setRotation(2); // PCB mounts the OLED upside down — flip 180°
+
+  // second I2C bus + second OLED (overview screen)
+  Wire1.begin();
+  Wire1.setClock(400000);
+  // probe address 0x3C on Wire1 before begin() — avoids long blocking init if absent
+  Wire1.beginTransmission(0x3C);
+  if (Wire1.endTransmission() == 0){
+    display2.begin(0x3C);
+    display2.setRotation(2); // same upside-down mounting on PCB
+    display2Present = true;
+    Serial.println("OLED2 detected on Wire1");
+  } else {
+    Serial.println("OLED2 NOT found on Wire1 (skipping)");
+  }
   // Initialize WS2812 step LED strip (16 LEDs at LED_PIN)
   ledStrip.begin();
   ledStrip.setBrightness(LED_BRIGHTNESS);
@@ -388,6 +403,7 @@ void SimpleSequencer::loop(){
   if (millis() - lastDisplayMillis > displayRefreshMs){
     updateLEDs();
     drawDisplay();
+    if (display2Present) drawOverview();
     lastDisplayMillis = millis();
   }
 }
@@ -2592,4 +2608,103 @@ void SimpleSequencer::drawTrigMachineView(){
   }
 
   display.display();
+}
+
+// --- Secondary OLED: global overview dashboard ------------------------------
+// Layout (128x64):
+//   Top bar  (y=0..11):  ▶/■ transport, BPM, step counter
+//   Playhead arrow at y=12 above the grid
+//   Channel grid (y=14..48): 7 rows × 16 steps, channel number on left, mute marker right
+//   Footer (y=52..63):  active menu name + held channel
+void SimpleSequencer::drawOverview(){
+  display2.clearDisplay();
+  display2.setTextColor(SH110X_WHITE);
+  display2.setTextSize(1);
+
+  // --- Top bar ---
+  if (isRunning){
+    display2.fillTriangle(0, 0, 0, 8, 6, 4, SH110X_WHITE); // play triangle
+  } else {
+    display2.fillRect(0, 1, 7, 7, SH110X_WHITE); // stop square
+  }
+  display2.setCursor(10, 1);
+  display2.print(bpm);
+  display2.print(" BPM");
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%02u/%u", (unsigned)(currentStep + 1), (unsigned)NUM_STEPS);
+  display2.setCursor(128 - 6 * (int)strlen(buf), 1);
+  display2.print(buf);
+  display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
+
+  // --- Channel grid geometry ---
+  const int gridX = 8;          // step grid start x (after channel-number column)
+  const int gridY = 15;         // grid start y
+  const int rowH  = 5;          // pixels per channel row (4 content + 1 gap)
+  const int stepW = 7;          // pixels per step column (6 content + 1 gap) → 7*16 = 112 px
+  const int cellW = stepW - 1;
+  const int cellH = rowH - 1;
+  const int gridBottom = gridY + NUM_CHANNELS * rowH; // y just below the grid
+
+  // --- Playhead arrow above grid column ---
+  int phX = gridX + currentStep * stepW + cellW / 2;
+  display2.fillTriangle(phX - 2, 12, phX + 2, 12, phX, 14, SH110X_WHITE);
+
+  // --- Channel rows ---
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
+    int y = gridY + ch * rowH;
+
+    // channel number on the left
+    display2.setCursor(0, y - 1);
+    display2.print((int)(ch + 1));
+
+    bool isMuted = muted[ch];
+
+    // step cells
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      int x = gridX + s * stepW;
+      bool active = isStepActive(ch, s);
+      if (active){
+        if (isMuted){
+          display2.drawRect(x, y, cellW, cellH, SH110X_WHITE); // outline-only when muted
+        } else {
+          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        }
+      } else if (s % 4 == 0){
+        // downbeat marker on empty cells (every 4 steps)
+        display2.drawPixel(x + cellW / 2, y + cellH / 2, SH110X_WHITE);
+      }
+    }
+
+    // mute indicator on right edge
+    if (isMuted){
+      int mx = gridX + NUM_STEPS * stepW + 1;
+      display2.drawLine(mx, y, mx + 3, y + cellH - 1, SH110X_WHITE);
+      display2.drawLine(mx + 3, y, mx, y + cellH - 1, SH110X_WHITE);
+    }
+  }
+
+  // --- Footer ---
+  display2.drawFastHLine(0, gridBottom + 1, 128, SH110X_WHITE);
+  const char* menuName = "MAIN";
+  if (menuMode){
+    switch (activeMenu){
+      case 1: menuName = "NOTES";    break;
+      case 2: menuName = "EUCLID";   break;
+      case 3: menuName = "STEPVIZ";  break;
+      case 4: menuName = "TRIGMACH"; break;
+      default: menuName = "MENU";    break;
+    }
+  }
+  display2.setCursor(0, 55);
+  display2.print(menuName);
+  if (heldChannel >= 0){
+    display2.setCursor(80, 55);
+    display2.print("HOLD CH");
+    display2.print((int)(heldChannel + 1));
+  } else if (fillModeActive){
+    display2.setCursor(98, 55);
+    display2.print("FILL");
+  }
+
+  display2.display();
 }

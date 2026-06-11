@@ -129,12 +129,16 @@ class SimpleSequencer {
     bool fillBtnLastState = false; // for transition logging
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
+    // secondary OLED on Wire1 (Teensy 4.1: SDA1=17, SCL1=16) — global overview screen
+    Adafruit_SH1106G display2{128, 64, &Wire1};
+    bool display2Present = false;
     // --- HARDWARE LED GRID ---
     Adafruit_NeoPixel ledStrip;
     void updateLEDs();
     uint32_t lastDisplayMillis;
     const uint32_t displayRefreshMs = 16; // display refresh interval in ms (~60Hz)
     void drawDisplay();
+    void drawOverview(); // secondary OLED: global state dashboard
     void drawDebugGrid();
     void drawNotesView();
     void drawEuclidView();
