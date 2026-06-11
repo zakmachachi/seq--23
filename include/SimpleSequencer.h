@@ -136,7 +136,7 @@ class SimpleSequencer {
     Adafruit_NeoPixel ledStrip;
     void updateLEDs();
     uint32_t lastDisplayMillis;
-    const uint32_t displayRefreshMs = 16; // display refresh interval in ms (~60Hz)
+    const uint32_t displayRefreshMs = 33; // OLED refresh interval (~30Hz). LEDs refresh independently in loop().
     void drawDisplay();
     void drawOverview(); // secondary OLED: global state dashboard
     void drawDebugGrid();

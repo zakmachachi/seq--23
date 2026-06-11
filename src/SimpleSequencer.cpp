@@ -399,12 +399,18 @@ void SimpleSequencer::loop(){
   // MIDI clock generation and external MIDI handling moved to `runEngine()` only to avoid race conditions.
 
   // Time-critical MIDI processing (advancing steps/note-offs/MIDI RX) now runs in the engine timer.
-  // update display at configured refresh interval
-  if (millis() - lastDisplayMillis > displayRefreshMs){
+  // LEDs refresh fast and independently so button presses feel instant — the
+  // WS2812 push is ~500us. The OLED transfer is ~20ms so we keep that gated.
+  static uint32_t lastLedMillis = 0;
+  uint32_t nowMs = millis();
+  if (nowMs - lastLedMillis >= 8){
     updateLEDs();
+    lastLedMillis = nowMs;
+  }
+  if (nowMs - lastDisplayMillis > displayRefreshMs){
     drawDisplay();
     if (display2Present) drawOverview();
-    lastDisplayMillis = millis();
+    lastDisplayMillis = nowMs;
   }
 }
 
@@ -2450,10 +2456,7 @@ void SimpleSequencer::drawStepVisualiser(){
     int x = gridX + col * (cellW + gapX);
     int y = gridY + row * (cellH + gapY);
 
-    bool active = euclidEnabled[selectedChannel]
-                  ? euclidPattern[selectedChannel][s]
-                  : steps[selectedChannel][s];
-
+    bool active = isStepActive(selectedChannel, s);
     bool isPlayhead = isRunning && (s == currentStep);
 
     if (isPlayhead){
