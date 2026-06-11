@@ -777,7 +777,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // Notes page: pot 4 (slide%) stays at native speed; everything else dampened.
   // Euclid page: pulses=fast(3), offset=fast(3), scale=slow(5), velocity=med(3), gate=med(3).
   static const uint8_t divNotes[6]       = {3, 12, 3, 1, 3, 3};
-  static const uint8_t divEuclid[6]      = {3, 3, 5, 3, 3, 3};
+  static const uint8_t divEuclid[6]      = {3, 3, 5, 3, 3, 1}; // pot 6 = slide%, native sensitivity
   static const uint8_t divTrigMachine[6] = {5, 1, 2, 3, 3, 3}; // density (pot2) fast
   static const uint8_t divDefault[6]     = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
@@ -954,8 +954,13 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
       Serial.print("GATE="); Serial.println(noteLenIdx);
       break;
 
-    case 5:  // Pot 6: unused for now (was channel; channel select is via dedicated CH buttons)
+    case 5: { // Pot 6: slide probability — re-rolls slides immediately (mirrors Menu 1)
+      randomSlideProb[selectedChannel] = (uint8_t)constrain(
+        (int)randomSlideProb[selectedChannel] + ticks, 0, 100);
+      rerollSlides(selectedChannel);
+      Serial.print("SLIDE%="); Serial.println(randomSlideProb[selectedChannel]);
       break;
+    }
   }
 }
 
@@ -2408,11 +2413,13 @@ void SimpleSequencer::drawEuclidView(){
     }
   }
 
-  // ── VEL + GATE ROW ───────────────────────────────────────────────
+  // ── VEL + GATE + SLD ROW ─────────────────────────────────────────
   display.setCursor(2, 38);
   display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
   display.setCursor(56, 38);
   display.print("Gate:"); display.print(noteLenNames[noteLenIdx]);
+  display.setCursor(2, 46);
+  display.print("Sld:"); display.print(randomSlideProb[selectedChannel]); display.print("%");
 
   // ── BOTTOM: spinner + BPM ────────────────────────────────────────
   const char spinFrames[] = {'-','\\','|','/'};
@@ -2718,6 +2725,28 @@ void SimpleSequencer::drawOverview(){
     static const int8_t offsY[16] = {-18,-17,-13, -7,  0,  7, 13, 17, 18, 17, 13,  7,  0, -7,-13,-17};
     const int cx = 64, cy = 22;
 
+    // Pass 1: draw "slide chains" UNDER the dots. For each active sliding
+    // step, draw a line from it to the next active step's dot so the user
+    // can see exactly which notes glide into which.
+    if (enabled){
+      for (uint8_t s = 0; s < NUM_STEPS; s++){
+        if (!euclidPattern[ch][s]) continue;
+        if (!stepSlide[ch][s]) continue;
+        uint8_t next = s;
+        for (uint8_t i = 1; i <= NUM_STEPS; i++){
+          uint8_t cand = (s + i) % NUM_STEPS;
+          if (euclidPattern[ch][cand]){ next = cand; break; }
+        }
+        if (next == s) continue;
+        int x1 = cx + offsX[s];
+        int y1 = cy + offsY[s];
+        int x2 = cx + offsX[next];
+        int y2 = cy + offsY[next];
+        display2.drawLine(x1, y1, x2, y2, SH110X_WHITE);
+      }
+    }
+
+    // Pass 2: dots + playhead on top of the chains
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       int dx = cx + offsX[s];
       int dy = cy + offsY[s];
