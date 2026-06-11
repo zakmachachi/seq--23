@@ -2422,116 +2422,106 @@ void SimpleSequencer::drawEuclidView(){
 }
 
 void SimpleSequencer::drawStepVisualiser(){
+  // Multi-channel overview: all 7 channels x 16 steps in one grid.
+  // Far more useful than a single-channel view, and avoids cramming a
+  // 7-tab strip into 128px.
   display.clearDisplay();
   uint32_t now = millis();
 
-  // ── TOP BAR: channel tabs ──────────────────────────────────────
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 18;
-    bool isSelected = (c == selectedChannel);
-    bool isMuted    = muted[c];
-    if (isSelected){
-      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-      if (isMuted){
-        display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
-      }
-    }
-    display.setTextSize(1);
-    display.setCursor(bx + 3, 1);
-    display.print(c + 1);
-  }
-  display.setTextColor(SH110X_WHITE);
+  // Layout: 8px label column on the left, 6x6 step cells with 1px gap.
+  // 7 rows total (one per channel) below a 10px header.
+  const uint8_t labelW = 8;          // x = 0..7 for channel digit
+  const uint8_t cellW = 6, cellH = 6, gapX = 1, gapY = 1;
+  const uint8_t gridX = labelW + 2;  // start of grid (x=10)
+  const uint8_t gridY = 11;          // start of grid (y=11)
 
-  // ── STEP GRID: 16 steps in 2 rows of 8 ───────────────────────
-  // Each cell is 14px wide x 16px tall with 2px gap
-  const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
-  const uint8_t gridX = 4, gridY = 13;
-
-  for (uint8_t s = 0; s < NUM_STEPS; s++){
-    uint8_t col = s % 8;
-    uint8_t row = s / 8;
-    int x = gridX + col * (cellW + gapX);
-    int y = gridY + row * (cellH + gapY);
-
-    bool active = isStepActive(selectedChannel, s);
-    bool isPlayhead = isRunning && (s == currentStep);
-
-    if (isPlayhead){
-      // Animated playhead: full bright fill + blinking inner dot
-      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-      // Blink the centre pixel at 8 Hz
-      if ((now / 125) % 2 == 0){
-        display.fillRect(x+4, y+5, 6, 6, SH110X_BLACK);
-      }
-    } else if (active){
-      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-      // Show fill state markers — bold "F" so the user can see fill steps at a glance
-      uint8_t fs = fillState[selectedChannel][s];
-      if (fs == 1){
-        display.setTextColor(SH110X_BLACK);
-        display.setTextSize(1);
-        display.setCursor(x + 4, y + 4);
-        display.print('F');
-      } else if (fs == 2){
-        display.drawLine(x+2, y+3, x+cellW-3, y+cellH-4, SH110X_BLACK);
-        display.drawLine(x+cellW-3, y+3, x+2, y+cellH-4, SH110X_BLACK);
-      }
-      // Slide indicator: small triangle bottom-right
-      if (stepSlide[selectedChannel][s]){
-        display.fillTriangle(x+cellW-4, y+cellH-1,
-                             x+cellW-1, y+cellH-4,
-                             x+cellW-1, y+cellH-1, SH110X_BLACK);
-      }
-    } else {
-      // Inactive step: outline only
-      display.drawRect(x, y, cellW, cellH, SH110X_WHITE);
-    }
-
-    // Ratchet indicator: small dot top-left of cell
-    if (stepRatchet[selectedChannel][s] > 0){
-      display.fillRect(x+1, y+1, 2, 2,
-        active ? SH110X_BLACK : SH110X_WHITE);
-    }
-  }
-
-  // ── BOTTOM BAR: BPM + running state + fill indicator ─────────
+  // ── HEADER: STEP n/16, BPM, FILL indicator ────────────────────
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-
-  // Animated running indicator: rotating dash at far left
-  const char spinFrames[] = {'-','\\','|','/'};
-  uint8_t spinFrame = (now / 120) % 4;
-  display.setCursor(0, 57);
+  display.setCursor(0, 1);
   if (isRunning){
-    display.print(spinFrames[spinFrame]);
-  } else {
-    display.print('.');
-  }
-
-  // BPM centre
-  display.setCursor(34, 57);
-  display.print("BPM:");
-  display.print(bpm);
-
-  // Fill active indicator right side
-  if (fillModeActive){
-    // Pulsing FILL text: show/hide at 4 Hz
-    if ((now / 250) % 2 == 0){
-      display.setCursor(100, 57);
-      display.print("FILL");
-    }
-  }
-
-  // Step counter: current step / total (only when running)
-  if (isRunning){
-    display.setCursor(100, 57);
+    display.print("STEP ");
+    if (currentStep + 1 < 10) display.print(' ');
     display.print(currentStep + 1);
     display.print("/");
     display.print(NUM_STEPS);
+  } else {
+    display.print("STOPPED      ");
+  }
+  display.setCursor(68, 1);
+  display.print("BPM:");
+  display.print(bpm);
+  if (fillModeActive && ((now / 250) % 2 == 0)){
+    display.fillRect(118, 0, 10, 9, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
+    display.setCursor(120, 1);
+    display.print('F');
+    display.setTextColor(SH110X_WHITE);
+  }
+  // Thin separator
+  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
+
+  // ── GRID: 7 channels × 16 steps ───────────────────────────────
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int y = gridY + c * (cellH + gapY);
+    bool isSelected = (c == selectedChannel);
+
+    // Channel label on the left
+    if (isSelected){
+      // Filled box for the selected channel's label
+      display.fillRect(0, y, labelW, cellH, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.setTextColor(SH110X_WHITE);
+    }
+    display.setTextSize(1);
+    display.setCursor(2, y);
+    display.print(c + 1);
+    // Strikethrough = muted
+    if (muted[c]){
+      display.drawLine(0, y + cellH/2, labelW - 1, y + cellH/2,
+                       isSelected ? SH110X_BLACK : SH110X_WHITE);
+    }
+    display.setTextColor(SH110X_WHITE);
+
+    // Step cells for this channel
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      int x = gridX + s * (cellW + gapX);
+      bool active = isStepActive(c, s);
+      bool isPlayhead = isRunning && (s == currentStep);
+
+      if (isPlayhead){
+        // Playhead column: full bright across all channels
+        display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        // If the step is OFF on this channel, punch a hole so playhead is still
+        // visible but distinguishable from an active step
+        if (!active){
+          display.fillRect(x + 1, y + 1, cellW - 2, cellH - 2, SH110X_BLACK);
+          display.drawPixel(x + cellW/2, y + cellH/2, SH110X_WHITE);
+        }
+      } else if (active){
+        display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        // Fill-state marker: small dark dot in the middle of fill steps
+        uint8_t fs = fillState[c][s];
+        if (fs == 1){
+          display.drawPixel(x + cellW/2, y + cellH/2, SH110X_BLACK);
+        }
+      } else {
+        // Inactive step: just outline corners to keep grid readable
+        display.drawPixel(x, y, SH110X_WHITE);
+        display.drawPixel(x + cellW - 1, y, SH110X_WHITE);
+        display.drawPixel(x, y + cellH - 1, SH110X_WHITE);
+        display.drawPixel(x + cellW - 1, y + cellH - 1, SH110X_WHITE);
+      }
+
+      // Ratchet pip in top-left
+      uint8_t rIdx = stepRatchet[c][s];
+      if (rIdx == 0 && trigMachine[c] != TM_OFF) rIdx = machineRatchet[c][s];
+      if (rIdx > 0){
+        display.fillRect(x + 1, y + 1, 1, 1,
+                         active || isPlayhead ? SH110X_BLACK : SH110X_WHITE);
+      }
+    }
   }
 
   display.display();
