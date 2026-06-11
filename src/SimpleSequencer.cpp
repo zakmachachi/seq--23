@@ -2708,9 +2708,86 @@ void SimpleSequencer::drawOverview(){
     return;
   }
 
+  // ── Menu 3 (activeMenu==2): Euclid extension ────────────────────
+  if (activeMenu == 2){
+    bool enabled = euclidEnabled[ch];
+
+    // 16 dot positions on a circle of radius 18 around centre (64, 22).
+    // Precomputed to avoid sin/cos in the inner loop.
+    static const int8_t offsX[16] = { 0,  7, 13, 17, 18, 17, 13,  7,  0, -7,-13,-17,-18,-17,-13, -7};
+    static const int8_t offsY[16] = {-18,-17,-13, -7,  0,  7, 13, 17, 18, 17, 13,  7,  0, -7,-13,-17};
+    const int cx = 64, cy = 22;
+
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      int dx = cx + offsX[s];
+      int dy = cy + offsY[s];
+      bool active = enabled ? euclidPattern[ch][s] : false;
+
+      if (active){
+        display2.fillCircle(dx, dy, 2, SH110X_WHITE);
+      } else {
+        display2.drawPixel(dx, dy, SH110X_WHITE);
+      }
+
+      // Playhead: ring around the current step
+      if (enabled && isRunning && s == currentStep){
+        display2.drawCircle(dx, dy, 4, SH110X_WHITE);
+      }
+    }
+
+    // Centre dot tinted by enabled state — quick visual on/off cue
+    if (enabled){
+      display2.fillCircle(cx, cy, 1, SH110X_WHITE);
+    }
+
+    // Status text below the circle (size 2 if OFF, size 1 status line if ON)
+    display2.setTextColor(SH110X_WHITE);
+    if (!enabled){
+      // Big "OFF" centred
+      display2.setTextSize(2);
+      const char* txt = "OFF";
+      int tw = (int)strlen(txt) * 12;
+      display2.setCursor((128 - tw) / 2, 44);
+      display2.print(txt);
+    } else {
+      // "P 6/16  O 2" status line
+      char buf[16];
+      snprintf(buf, sizeof(buf), "P %u/16  O %u",
+               (unsigned)pulses[ch], (unsigned)euclidOffset[ch]);
+      int tw = (int)strlen(buf) * 6;
+      display2.setTextSize(1);
+      display2.setCursor((128 - tw) / 2, 46);
+      display2.print(buf);
+    }
+
+    // Pulses fill bar at the bottom (Digitone-style 16 segments)
+    const int barX = 4, barY = 56, barW = 120, barH = 7;
+    display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
+    int p = enabled ? pulses[ch] : 0;
+    if (p > NUM_STEPS) p = NUM_STEPS;
+    int fillW = (p * (barW - 2)) / NUM_STEPS;
+    if (fillW > 0){
+      display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
+      for (int i = 1; i < NUM_STEPS; i++){
+        int sx = barX + 1 + (i * (barW - 2)) / NUM_STEPS;
+        if (sx < barX + 1 + fillW){
+          display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
+        }
+      }
+      // Pulsing leading edge to give a "filling" feel when sweeping Pot 1
+      int pulsePos = barX + 1 + fillW - 1;
+      if ((now / 100) % 2 == 0){
+        display2.drawFastVLine(pulsePos, barY, barH, SH110X_WHITE);
+      }
+    }
+
+    display2.display();
+    return;
+  }
+
   // ── Other menus: placeholder until we redesign each ─────────────
   display2.setTextSize(1);
-  display2.setCursor(0, 2);
+  display2.setCursor(2, 2);
   display2.print("MENU ");
   display2.print((int)activeMenu);
   display2.display();
