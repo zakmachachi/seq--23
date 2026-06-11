@@ -3053,6 +3053,108 @@ void SimpleSequencer::drawOverview(){
     return;
   }
 
+  // ── Menu 2 (activeMenu==3): Step Visualizer — full 7-channel overview ──
+  if (activeMenu == 3){
+    // Layout
+    //   y0..9   : header (step number + a few markers)
+    //   y12..60 : 7 rows of 6px cell + 1px gap = 7*7 = 49 px
+    //   y62..63 : reserved for future indicators
+    display2.setTextColor(SH110X_WHITE);
+    display2.setTextSize(1);
+
+    // ── Header ───────────────────────────────────────────────────
+    if (isRunning){
+      char buf[12];
+      snprintf(buf, sizeof(buf), "STEP %02u/%02u",
+               (unsigned)(currentStep + 1), (unsigned)NUM_STEPS);
+      display2.setCursor(2, 1);
+      display2.print(buf);
+    } else {
+      display2.setCursor(2, 1);
+      display2.print("STOPPED");
+    }
+    // Right side: fill indicator
+    if (fillModeActive && ((now / 250) % 2 == 0)){
+      display2.fillRect(108, 0, 18, 9, SH110X_WHITE);
+      display2.setTextColor(SH110X_BLACK);
+      display2.setCursor(110, 1);
+      display2.print("FILL");
+      display2.setTextColor(SH110X_WHITE);
+    }
+    display2.drawFastHLine(2, 10, 124, SH110X_WHITE);
+
+    // ── Multi-channel grid ───────────────────────────────────────
+    const int gridX = 10;   // step cells start here (channel digit lives in x=0..7)
+    const int gridY = 13;
+    const int cellW = 6, cellH = 6, gapX = 1, gapY = 1;
+
+    // Playhead column emphasis — bright vertical guide across all rows
+    if (isRunning){
+      int phX = gridX + currentStep * (cellW + gapX);
+      // 2 px wide soft guide around the cell column for high contrast
+      display2.drawFastVLine(phX - 1, gridY, 7 * (cellH + gapY) - gapY, SH110X_WHITE);
+      display2.drawFastVLine(phX + cellW, gridY, 7 * (cellH + gapY) - gapY, SH110X_WHITE);
+    }
+
+    for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+      int y = gridY + c * (cellH + gapY);
+      bool isSelected = (c == selectedChannel);
+
+      // Channel digit / mute marker on the left
+      if (isSelected){
+        display2.fillRect(0, y, 8, cellH, SH110X_WHITE);
+        display2.setTextColor(SH110X_BLACK);
+      } else {
+        display2.setTextColor(SH110X_WHITE);
+      }
+      display2.setCursor(2, y);
+      display2.print(c + 1);
+      if (muted[c]){
+        display2.drawLine(0, y + cellH/2, 7, y + cellH/2,
+                          isSelected ? SH110X_BLACK : SH110X_WHITE);
+      }
+      display2.setTextColor(SH110X_WHITE);
+
+      // Step cells for this channel
+      for (uint8_t s = 0; s < NUM_STEPS; s++){
+        int x = gridX + s * (cellW + gapX);
+        bool active = isStepActive(c, s);
+        bool isPhCol = isRunning && (s == currentStep);
+
+        if (isPhCol && active){
+          // Playhead + active = full bright (the cell stands out clearly inside
+          // the bracketed playhead guide drawn above)
+          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        } else if (isPhCol){
+          // Playhead but inactive: light an outline so the column still reads
+          display2.drawRect(x, y, cellW, cellH, SH110X_WHITE);
+        } else if (active){
+          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+          // Fill-only marker = small dark dot
+          if (fillState[c][s] == 1){
+            display2.drawPixel(x + cellW/2, y + cellH/2, SH110X_BLACK);
+          }
+        } else {
+          // Inactive: 4 corner dots for grid readability
+          display2.drawPixel(x, y, SH110X_WHITE);
+          display2.drawPixel(x + cellW - 1, y, SH110X_WHITE);
+          display2.drawPixel(x, y + cellH - 1, SH110X_WHITE);
+          display2.drawPixel(x + cellW - 1, y + cellH - 1, SH110X_WHITE);
+        }
+
+        // Ratchet pip in the top-left corner of any cell that has ratchets
+        uint8_t rIdx = stepRatchet[c][s];
+        if (rIdx == 0 && trigMachine[c] != TM_OFF) rIdx = machineRatchet[c][s];
+        if (rIdx > 0){
+          display2.drawPixel(x + 1, y + 1,
+                             (active || isPhCol) ? SH110X_BLACK : SH110X_WHITE);
+        }
+      }
+    }
+    display2.display();
+    return;
+  }
+
   // ── Other menus: placeholder until we redesign each ─────────────
   display2.setTextSize(1);
   display2.setCursor(2, 2);
