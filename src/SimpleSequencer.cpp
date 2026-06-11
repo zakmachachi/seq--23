@@ -2422,106 +2422,96 @@ void SimpleSequencer::drawEuclidView(){
 }
 
 void SimpleSequencer::drawStepVisualiser(){
-  // Multi-channel overview: all 7 channels x 16 steps in one grid.
-  // Far more useful than a single-channel view, and avoids cramming a
-  // 7-tab strip into 128px.
+  // Original single-channel grid layout, restored.
   display.clearDisplay();
   uint32_t now = millis();
 
-  // Layout: 8px label column on the left, 6x6 step cells with 1px gap.
-  // 7 rows total (one per channel) below a 10px header.
-  const uint8_t labelW = 8;          // x = 0..7 for channel digit
-  const uint8_t cellW = 6, cellH = 6, gapX = 1, gapY = 1;
-  const uint8_t gridX = labelW + 2;  // start of grid (x=10)
-  const uint8_t gridY = 11;          // start of grid (y=11)
+  // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = c * 18;
+    bool isSelected = (c == selectedChannel);
+    bool isMuted    = muted[c];
+    if (isSelected){
+      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+      if (isMuted){
+        display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
+      }
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 3, 1);
+    display.print(c + 1);
+  }
+  display.setTextColor(SH110X_WHITE);
 
-  // ── HEADER: STEP n/16, BPM, FILL indicator ────────────────────
+  // ── STEP GRID: 16 steps in 2 rows of 8 ───────────────────────
+  // Each cell is 14px wide x 16px tall with 2px gap. gridX=1 to fit cleanly.
+  const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
+  const uint8_t gridX = 1, gridY = 13;
+
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t col = s % 8;
+    uint8_t row = s / 8;
+    int x = gridX + col * (cellW + gapX);
+    int y = gridY + row * (cellH + gapY);
+
+    bool active = isStepActive(selectedChannel, s);
+    bool isPlayhead = isRunning && (s == currentStep);
+
+    if (isPlayhead){
+      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+      if ((now / 125) % 2 == 0){
+        display.fillRect(x+4, y+5, 6, 6, SH110X_BLACK);
+      }
+    } else if (active){
+      display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+      uint8_t fs = fillState[selectedChannel][s];
+      if (fs == 1){
+        display.setTextColor(SH110X_BLACK);
+        display.setTextSize(1);
+        display.setCursor(x + 4, y + 4);
+        display.print('F');
+      } else if (fs == 2){
+        display.drawLine(x+2, y+3, x+cellW-3, y+cellH-4, SH110X_BLACK);
+        display.drawLine(x+cellW-3, y+3, x+2, y+cellH-4, SH110X_BLACK);
+      }
+      if (stepSlide[selectedChannel][s]){
+        display.fillTriangle(x+cellW-4, y+cellH-1,
+                             x+cellW-1, y+cellH-4,
+                             x+cellW-1, y+cellH-1, SH110X_BLACK);
+      }
+    } else {
+      display.drawRect(x, y, cellW, cellH, SH110X_WHITE);
+    }
+
+    uint8_t rIdx = stepRatchet[selectedChannel][s];
+    if (rIdx == 0 && trigMachine[selectedChannel] != TM_OFF) rIdx = machineRatchet[selectedChannel][s];
+    if (rIdx > 0){
+      display.fillRect(x+1, y+1, 2, 2, active ? SH110X_BLACK : SH110X_WHITE);
+    }
+  }
+
+  // ── BOTTOM BAR ───────────────────────────────────────────────
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 1);
-  if (isRunning){
-    display.print("STEP ");
-    if (currentStep + 1 < 10) display.print(' ');
-    display.print(currentStep + 1);
-    display.print("/");
-    display.print(NUM_STEPS);
-  } else {
-    display.print("STOPPED      ");
-  }
-  display.setCursor(68, 1);
+  const char spinFrames[] = {'-','\\','|','/'};
+  uint8_t spinFrame = (now / 120) % 4;
+  display.setCursor(0, 57);
+  display.print(isRunning ? spinFrames[spinFrame] : '.');
+  display.setCursor(34, 57);
   display.print("BPM:");
   display.print(bpm);
   if (fillModeActive && ((now / 250) % 2 == 0)){
-    display.fillRect(118, 0, 10, 9, SH110X_WHITE);
-    display.setTextColor(SH110X_BLACK);
-    display.setCursor(120, 1);
-    display.print('F');
-    display.setTextColor(SH110X_WHITE);
-  }
-  // Thin separator
-  display.drawFastHLine(0, 9, 128, SH110X_WHITE);
-
-  // ── GRID: 7 channels × 16 steps ───────────────────────────────
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int y = gridY + c * (cellH + gapY);
-    bool isSelected = (c == selectedChannel);
-
-    // Channel label on the left
-    if (isSelected){
-      // Filled box for the selected channel's label
-      display.fillRect(0, y, labelW, cellH, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.setTextColor(SH110X_WHITE);
-    }
-    display.setTextSize(1);
-    display.setCursor(2, y);
-    display.print(c + 1);
-    // Strikethrough = muted
-    if (muted[c]){
-      display.drawLine(0, y + cellH/2, labelW - 1, y + cellH/2,
-                       isSelected ? SH110X_BLACK : SH110X_WHITE);
-    }
-    display.setTextColor(SH110X_WHITE);
-
-    // Step cells for this channel
-    for (uint8_t s = 0; s < NUM_STEPS; s++){
-      int x = gridX + s * (cellW + gapX);
-      bool active = isStepActive(c, s);
-      bool isPlayhead = isRunning && (s == currentStep);
-
-      if (isPlayhead){
-        // Playhead column: full bright across all channels
-        display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-        // If the step is OFF on this channel, punch a hole so playhead is still
-        // visible but distinguishable from an active step
-        if (!active){
-          display.fillRect(x + 1, y + 1, cellW - 2, cellH - 2, SH110X_BLACK);
-          display.drawPixel(x + cellW/2, y + cellH/2, SH110X_WHITE);
-        }
-      } else if (active){
-        display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-        // Fill-state marker: small dark dot in the middle of fill steps
-        uint8_t fs = fillState[c][s];
-        if (fs == 1){
-          display.drawPixel(x + cellW/2, y + cellH/2, SH110X_BLACK);
-        }
-      } else {
-        // Inactive step: just outline corners to keep grid readable
-        display.drawPixel(x, y, SH110X_WHITE);
-        display.drawPixel(x + cellW - 1, y, SH110X_WHITE);
-        display.drawPixel(x, y + cellH - 1, SH110X_WHITE);
-        display.drawPixel(x + cellW - 1, y + cellH - 1, SH110X_WHITE);
-      }
-
-      // Ratchet pip in top-left
-      uint8_t rIdx = stepRatchet[c][s];
-      if (rIdx == 0 && trigMachine[c] != TM_OFF) rIdx = machineRatchet[c][s];
-      if (rIdx > 0){
-        display.fillRect(x + 1, y + 1, 1, 1,
-                         active || isPlayhead ? SH110X_BLACK : SH110X_WHITE);
-      }
-    }
+    display.setCursor(100, 57);
+    display.print("FILL");
+  } else if (isRunning){
+    display.setCursor(100, 57);
+    display.print(currentStep + 1);
+    display.print("/");
+    display.print(NUM_STEPS);
   }
 
   display.display();
@@ -2610,94 +2600,153 @@ void SimpleSequencer::drawTrigMachineView(){
 //   Playhead arrow at y=12 above the grid
 //   Channel grid (y=14..48): 7 rows × 16 steps, channel number on left, mute marker right
 //   Footer (y=52..63):  active menu name + held channel
+// Helper: draw a small icon chip (12x9). Filled when active, outline when inactive.
+static void drawIconChip(Adafruit_SH1106G& d, int x, int y, char glyph, bool active){
+  if (active){
+    d.fillRect(x, y, 12, 9, SH110X_WHITE);
+    d.setTextColor(SH110X_BLACK);
+  } else {
+    d.drawRect(x, y, 12, 9, SH110X_WHITE);
+    d.setTextColor(SH110X_WHITE);
+  }
+  d.setTextSize(1);
+  d.setCursor(x + 4, y + 1);
+  d.print(glyph);
+}
+
 void SimpleSequencer::drawOverview(){
+  // Parameter dashboard: focuses on the most relevant params for what the user
+  // is currently editing on screen 1. Digitakt 2 / Digitone 2 inspired filling
+  // bars with active-state icon row at the bottom.
   display2.clearDisplay();
   display2.setTextColor(SH110X_WHITE);
   display2.setTextSize(1);
+  uint32_t now = millis();
 
-  // --- Top bar ---
+  uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
+
+  // ── TOP BAR ─────────────────────────────────────────────────────
+  // Play/stop icon, BPM, step counter, channel name
   if (isRunning){
-    display2.fillTriangle(0, 0, 0, 8, 6, 4, SH110X_WHITE); // play triangle
+    display2.fillTriangle(0, 0, 0, 8, 6, 4, SH110X_WHITE);
   } else {
-    display2.fillRect(0, 1, 7, 7, SH110X_WHITE); // stop square
+    display2.fillRect(0, 1, 7, 7, SH110X_WHITE);
   }
   display2.setCursor(10, 1);
   display2.print(bpm);
-  display2.print(" BPM");
+  display2.print("BPM");
+  // Step counter centred
   char buf[12];
   snprintf(buf, sizeof(buf), "%02u/%u", (unsigned)(currentStep + 1), (unsigned)NUM_STEPS);
-  display2.setCursor(128 - 6 * (int)strlen(buf), 1);
+  display2.setCursor(54, 1);
   display2.print(buf);
+  // Channel + MIDI on the right
+  display2.setCursor(86, 1);
+  display2.print("CH"); display2.print(ch + 1);
+  display2.print(">M"); display2.print(midiChannel[ch] + 1);
   display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
 
-  // --- Channel grid geometry ---
-  const int gridX = 8;          // step grid start x (after channel-number column)
-  const int gridY = 15;         // grid start y
-  const int rowH  = 5;          // pixels per channel row (4 content + 1 gap)
-  const int stepW = 7;          // pixels per step column (6 content + 1 gap) → 7*16 = 112 px
-  const int cellW = stepW - 1;
-  const int cellH = rowH - 1;
-  const int gridBottom = gridY + NUM_CHANNELS * rowH; // y just below the grid
-
-  // --- Playhead arrow above grid column ---
-  int phX = gridX + currentStep * stepW + cellW / 2;
-  display2.fillTriangle(phX - 2, 12, phX + 2, 12, phX, 14, SH110X_WHITE);
-
-  // --- Channel rows ---
-  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
-    int y = gridY + ch * rowH;
-
-    // channel number on the left
-    display2.setCursor(0, y - 1);
-    display2.print((int)(ch + 1));
-
-    bool isMuted = muted[ch];
-
-    // step cells
-    for (uint8_t s = 0; s < NUM_STEPS; s++){
-      int x = gridX + s * stepW;
-      bool active = isStepActive(ch, s);
-      if (active){
-        if (isMuted){
-          display2.drawRect(x, y, cellW, cellH, SH110X_WHITE); // outline-only when muted
-        } else {
-          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-        }
-      } else if (s % 4 == 0){
-        // downbeat marker on empty cells (every 4 steps)
-        display2.drawPixel(x + cellW / 2, y + cellH / 2, SH110X_WHITE);
-      }
-    }
-
-    // mute indicator on right edge
-    if (isMuted){
-      int mx = gridX + NUM_STEPS * stepW + 1;
-      display2.drawLine(mx, y, mx + 3, y + cellH - 1, SH110X_WHITE);
-      display2.drawLine(mx + 3, y, mx, y + cellH - 1, SH110X_WHITE);
-    }
+  // ── BIG NOTE / FOCUS AREA (left half, x0-50, y12-31) ───────────
+  static const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  uint8_t rootNote = channelPitch[ch];
+  display2.setTextSize(3);
+  display2.setCursor(2, 13);
+  display2.print(noteNames[rootNote % 12]);
+  if (rootNote % 12 < 12 && noteNames[rootNote % 12][1] == 0){
+    // single-char note (C, D, E, F, G, A, B) — add octave next to it
+    display2.print((int)((rootNote / 12) - 1));
+  } else {
+    // sharp note — octave goes below at smaller size to fit
+    display2.setTextSize(2);
+    display2.setCursor(40, 18);
+    display2.print((int)((rootNote / 12) - 1));
   }
 
-  // --- Footer ---
-  display2.drawFastHLine(0, gridBottom + 1, 128, SH110X_WHITE);
-  const char* menuName = "MAIN";
-  if (menuMode){
-    switch (activeMenu){
-      case 1: menuName = "NOTES";    break;
-      case 2: menuName = "EUCLID";   break;
-      case 3: menuName = "STEPVIZ";  break;
-      case 4: menuName = "TRIGMACH"; break;
-      default: menuName = "MENU";    break;
+  // Scale name below the big note
+  static const char* scaleNames[] = {"OFF","MAJ","MIN","PEN","LOC","DIM","ATO"};
+  display2.setTextSize(1);
+  display2.setCursor(2, 34);
+  display2.print(scaleNames[euclidScaleMode[ch] % 7]);
+
+  // ── PARAM BARS (right side, x0-127 actually because they're full width) ──
+  // We stack bars in the right half (x=52+) — but our drawParamBar is full
+  // width, so we shift down. Reuse the helper for cleanest look:
+  //   y=12-19, 22-29, 32-39, 42-49
+  // Page-specific param choices:
+  // Menu 1 (Notes): VEL, GATE, SLD%, SPRD
+  // Menu 2 (Euclid): VEL, GATE, PLS, OFFS
+  // Menu 3 (Step Viz): VEL, GATE, SLD%, SPRD (default channel params)
+  // Menu 4 (TrigMach): VEL, DENS, SHFT, MACH-info
+  // Otherwise (main view): VEL, GATE, SLD%, SPRD
+
+  // Use a compact mini-bar at x=52 onwards (76px available) so the big note
+  // on the left stays visible.
+  auto miniBar = [&](const char* label, int val, int max, int y){
+    display2.setTextSize(1);
+    display2.setTextColor(SH110X_WHITE);
+    display2.setCursor(52, y);
+    display2.print(label);
+    int barX = 76, barY = y, barW = 36, barH = 7;
+    display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
+    if (val > 0 && max > 0){
+      int fillW = ((val * (barW - 2)) + max/2) / max;
+      if (fillW > barW - 2) fillW = barW - 2;
+      if (fillW > 0) display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
     }
+    display2.setCursor(115, y);
+    if (val < 10) display2.print(' ');
+    if (val < 100) display2.print(' ');
+    display2.print(val);
+  };
+
+  static const uint8_t noteLenTicksLocal[] = { 96, 72, 48, 36, 24, 18, 12, 9, 6, 4, 3 };
+  static const uint8_t NLT_COUNT = sizeof(noteLenTicksLocal)/sizeof(noteLenTicksLocal[0]);
+
+  if (activeMenu == 2){
+    // Euclid context
+    miniBar("PLS",  pulses[ch],         NUM_STEPS, 13);
+    miniBar("OFS",  euclidOffset[ch],   NUM_STEPS, 22);
+    miniBar("VEL",  channelVelocity[ch], 127,       31);
+    miniBar("GAT",  NLT_COUNT - 1 - noteLenIdx, NLT_COUNT - 1, 40);
+  } else if (activeMenu == 4){
+    // Trig Machines context
+    static const char* mNames[] = {"OFF","KCK","HAT","SNR","ANT","PRC","EUC"};
+    display2.setTextSize(1);
+    display2.setCursor(52, 13);
+    display2.print("MACHN ");
+    display2.print(mNames[trigMachine[ch] % 7]);
+    miniBar("DEN",  trigDensity[ch], 100,       22);
+    miniBar("SHF",  trigShift[ch],   NUM_STEPS-1, 31);
+    miniBar("VEL",  channelVelocity[ch], 127,    40);
+  } else {
+    // Notes / Step Viz / default: show generative + velocity params
+    miniBar("VEL",  channelVelocity[ch],  127, 13);
+    miniBar("GAT",  NLT_COUNT - 1 - noteLenIdx, NLT_COUNT - 1, 22);
+    miniBar("SLD",  randomSlideProb[ch],  100, 31);
+    miniBar("SPR",  octaveSpread[ch],     60,  40);
   }
-  display2.setCursor(0, 55);
-  display2.print(menuName);
-  if (heldChannel >= 0){
-    display2.setCursor(80, 55);
-    display2.print("HOLD CH");
-    display2.print((int)(heldChannel + 1));
-  } else if (fillModeActive){
-    display2.setCursor(98, 55);
-    display2.print("FILL");
+
+  // ── BOTTOM ICON STRIP (y52-63) ──────────────────────────────────
+  // SLIDE | FILL | EUCL | GEN | MACH | MUTE | (room for one more)
+  // Icons are 12x9 wide with 2px gaps -> 7 icons * 14 - 2 = 96 px, start x=16
+  // Active state lights them up.
+  int ix = 4;
+  drawIconChip(display2, ix, 53, 'S', randomSlideProb[ch] > 0);            ix += 14;
+  drawIconChip(display2, ix, 53, 'F', fillModeActive);                     ix += 14;
+  drawIconChip(display2, ix, 53, 'E', euclidEnabled[ch]);                  ix += 14;
+  drawIconChip(display2, ix, 53, 'G', euclidScaleMode[ch] != 0);           ix += 14;
+  drawIconChip(display2, ix, 53, 'M', trigMachine[ch] != TM_OFF);          ix += 14;
+  drawIconChip(display2, ix, 53, 'X', muted[ch]);                          ix += 14;
+  // Page indicator (1/2/3/4)
+  display2.setTextColor(SH110X_WHITE);
+  display2.setTextSize(1);
+  display2.setCursor(ix + 1, 54);
+  display2.print('P');
+  display2.print((int)activeMenu);
+
+  // Subtle hold-channel hint above the icon strip if a channel button is held
+  if (heldChannel >= 0 && ((now / 250) % 2 == 0)){
+    display2.fillRect(0, 51, 128, 1, SH110X_WHITE); // thin bright line
   }
 
   display2.display();
