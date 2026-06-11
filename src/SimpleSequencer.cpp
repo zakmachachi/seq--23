@@ -1935,16 +1935,16 @@ void SimpleSequencer::drawDisplay(){
   // Row 1: Channel indicator boxes (mute state)
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
     // 7 channels across 128px: each tab is 17px wide with 1px gap = 125px total
-    int bx = c * 18;
+    int bx = 2 + c * 17;
     if (c == selectedChannel){
-      display.fillRect(bx, 0, 17, 11, SH110X_WHITE);
+      display.fillRect(bx, 0, 16, 11, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK, SH110X_WHITE);
     } else {
       if (muted[c]){
-        display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
-        display.drawLine(bx, 5, bx + 15, 5, SH110X_WHITE);
+        display.drawRect(bx, 0, 16, 11, SH110X_WHITE);
+        display.drawLine(bx, 5, bx + 14, 5, SH110X_WHITE);
       } else {
-        display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
+        display.drawRect(bx, 0, 16, 11, SH110X_WHITE);
       }
       display.setTextColor(SH110X_WHITE, SH110X_BLACK);
     }
@@ -2282,20 +2282,20 @@ void SimpleSequencer::drawNotesView(){
 
   // ── CHANNEL STRIP: all 7 with selected + mute state ─────────
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 18;
+    int bx = 2 + c * 17;
     bool sel = (c == selectedChannel);
     if (sel){
-      display.fillRect(bx, 0, 17, 10, SH110X_WHITE);
+      display.fillRect(bx, 0, 16, 10, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 17, 10, SH110X_WHITE);
+      display.drawRect(bx, 0, 16, 10, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 4, 1);
     display.print(c + 1);
     if (muted[c]){
-      display.drawLine(bx + 1, 5, bx + 15, 5,
+      display.drawLine(bx + 1, 5, bx + 14, 5,
                        sel ? SH110X_BLACK : SH110X_WHITE);
     }
   }
@@ -2304,42 +2304,43 @@ void SimpleSequencer::drawNotesView(){
   // ── ROOT + SCALE ROW ────────────────────────────────────────
   uint8_t p = channelPitch[ch];
   display.setTextSize(2);
-  display.setCursor(0, 13);
+  display.setCursor(2, 13);
   display.print(noteNames[p % 12]); display.print((p / 12) - 1);
 
-  display.setTextSize(2);
-  display.setCursor(48, 13);
+  // Scale name in size-1 so it doesn't fight the GEN chip for the right side
+  display.setTextSize(1);
+  display.setCursor(44, 17);
   display.print(scaleNames[sm]);
 
-  // GEN / OFF chip (top right)
+  // GEN / OFF chip (top right) — pulled in 4px so it stops at x=124
   if (genOn){
-    display.fillRect(108, 12, 20, 11, SH110X_WHITE);
+    display.fillRect(102, 12, 20, 11, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
     display.setTextSize(1);
-    display.setCursor(110, 14);
+    display.setCursor(104, 14);
     display.print("GEN");
     display.setTextColor(SH110X_WHITE);
   } else {
-    display.drawRect(108, 12, 20, 11, SH110X_WHITE);
+    display.drawRect(102, 12, 20, 11, SH110X_WHITE);
     display.setTextSize(1);
-    display.setCursor(110, 14);
+    display.setCursor(104, 14);
     display.print("OFF");
   }
-  display.drawFastHLine(0, 31, 128, SH110X_WHITE);
+  display.drawFastHLine(2, 31, 124, SH110X_WHITE);
 
   // ── PARAM ROWS ──────────────────────────────────────────────
   display.setTextSize(1);
-  display.setCursor(0, 35);
+  display.setCursor(2, 35);
   display.print("SLD:"); display.print(randomSlideProb[ch]); display.print("%");
   display.setCursor(64, 35);
   display.print("SPRD:"); display.print(octaveSpread[ch]);
 
-  display.setCursor(0, 46);
+  display.setCursor(2, 46);
   display.print("VEL:"); display.print(channelVelocity[ch]);
   display.setCursor(64, 46);
   display.print("GT:"); display.print(noteLenNames[noteLenIdx]);
 
-  display.setCursor(0, 57);
+  display.setCursor(2, 57);
   display.print("BPM:"); display.print(bpm);
 
   display.display();
@@ -2353,20 +2354,20 @@ void SimpleSequencer::drawEuclidView(){
   // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
   // Each chip 17px wide, 11 tall
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 18;
+    int bx = 2 + c * 17;
     bool sel = (c == selectedChannel);
     if (sel){
-      display.fillRect(bx, 0, 17, 11, SH110X_WHITE);
+      display.fillRect(bx, 0, 16, 11, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 17, 11, SH110X_WHITE);
+      display.drawRect(bx, 0, 16, 11, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 4, 2);
     display.print(c + 1);
     if (muted[c]){
-      display.drawLine(bx + 1, 5, bx + 15, 5,
+      display.drawLine(bx + 1, 5, bx + 14, 5,
                        sel ? SH110X_BLACK : SH110X_WHITE);
     }
   }
@@ -2374,7 +2375,7 @@ void SimpleSequencer::drawEuclidView(){
 
   // ── PARAMS ROW ───────────────────────────────────────────────────
   display.setTextSize(1);
-  display.setCursor(0, 14);
+  display.setCursor(2, 14);
   display.print("H:"); display.print(pulses[selectedChannel]);
   display.setCursor(28, 14);
   display.print("O:"); display.print(euclidOffset[selectedChannel]);
@@ -2387,7 +2388,9 @@ void SimpleSequencer::drawEuclidView(){
   display.print(euclidEnabled[selectedChannel] ? "ON" : "OFF");
 
   // ── PATTERN GRID: 16 steps as small squares ──────────────────────
-  const uint8_t sq = 7, gap = 1, startX = 0, startY = 26;
+  // sq=7 + gap=1 = 8 per cell. 16 cells = 128 — at the edge. Shrink to sq=6
+  // (gap stays 1) so the grid is 16*7 - 1 = 111px, sitting inside startX=4.
+  const uint8_t sq = 6, gap = 1, startX = 4, startY = 26;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     int x = startX + s * (sq + gap);
     bool active = euclidEnabled[selectedChannel]
@@ -2406,14 +2409,14 @@ void SimpleSequencer::drawEuclidView(){
   }
 
   // ── VEL + GATE ROW ───────────────────────────────────────────────
-  display.setCursor(0, 38);
+  display.setCursor(2, 38);
   display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
   display.setCursor(56, 38);
   display.print("Gate:"); display.print(noteLenNames[noteLenIdx]);
 
   // ── BOTTOM: spinner + BPM ────────────────────────────────────────
   const char spinFrames[] = {'-','\\','|','/'};
-  display.setCursor(0, 56);
+  display.setCursor(2, 56);
   display.print(isRunning ? spinFrames[(now/120)%4] : '.');
   display.setCursor(84, 56);
   display.print("BPM:"); display.print(bpm);
@@ -2428,17 +2431,17 @@ void SimpleSequencer::drawStepVisualiser(){
 
   // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 18;
+    int bx = 2 + c * 17;
     bool isSelected = (c == selectedChannel);
     bool isMuted    = muted[c];
     if (isSelected){
-      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.fillRect(bx, 0, 16, 9, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.drawRect(bx, 0, 16, 9, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
       if (isMuted){
-        display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
+        display.drawLine(bx+1, 4, bx+14, 4, SH110X_WHITE);
       }
     }
     display.setTextSize(1);
@@ -2499,16 +2502,16 @@ void SimpleSequencer::drawStepVisualiser(){
   display.setTextColor(SH110X_WHITE);
   const char spinFrames[] = {'-','\\','|','/'};
   uint8_t spinFrame = (now / 120) % 4;
-  display.setCursor(0, 57);
+  display.setCursor(2, 57);
   display.print(isRunning ? spinFrames[spinFrame] : '.');
   display.setCursor(34, 57);
   display.print("BPM:");
   display.print(bpm);
   if (fillModeActive && ((now / 250) % 2 == 0)){
-    display.setCursor(100, 57);
+    display.setCursor(98, 57);
     display.print("FILL");
   } else if (isRunning){
-    display.setCursor(100, 57);
+    display.setCursor(98, 57);
     display.print(currentStep + 1);
     display.print("/");
     display.print(NUM_STEPS);
@@ -2525,14 +2528,14 @@ void SimpleSequencer::drawTrigMachineView(){
 
   // Top: channel tabs
   for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = c * 18;
+    int bx = 2 + c * 17;
     if (c == selectedChannel){
-      display.fillRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.fillRect(bx, 0, 16, 9, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
-      display.drawRect(bx, 0, 17, 9, SH110X_WHITE);
+      display.drawRect(bx, 0, 16, 9, SH110X_WHITE);
       display.setTextColor(SH110X_WHITE);
-      if (muted[c]) display.drawLine(bx+1, 4, bx+15, 4, SH110X_WHITE);
+      if (muted[c]) display.drawLine(bx+1, 4, bx+14, 4, SH110X_WHITE);
     }
     display.setTextSize(1);
     display.setCursor(bx + 3, 1);
@@ -2557,7 +2560,9 @@ void SimpleSequencer::drawTrigMachineView(){
   // Filled box = machine on, no override (auto-on)
   // Box with X = forced on by overlay
   // Box with - through it = forced off by overlay
-  const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
+  // Cell width 13 + 2px gap = 15 per step. 8 cells = 118 px starting at x=4
+  // → last cell ends at x=122, inside the safe area.
+  const uint8_t cellW = 13, cellH = 16, gapX = 2, gapY = 3;
   const uint8_t startX = 4, startY = 24;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t col = s % 8;
