@@ -444,8 +444,13 @@ void SimpleSequencer::scanMatrixStep(){
 }
 
 void SimpleSequencer::readButtons(){
-  // Matrix scanning step: non-blocking single-column scan
-  scanMatrixStep();
+  // Scan all 6 columns each call (~250us total). Matrix is now sampled at
+  // full speed every loop iteration, including just after the 17ms OLED
+  // I2C transfer, so no key-press goes longer than one loop iteration
+  // before being seen.
+  for (uint8_t c = 0; c < MATRIX_COLS; c++){
+    scanMatrixStep();
+  }
 }
 
 // Called when a debounced press is detected
