@@ -1609,17 +1609,19 @@ void SimpleSequencer::drawDisplay(){
     // Full-screen inverse splash so it's unmistakable
     display.clearDisplay();
     display.fillRect(0, 0, 128, 64, SH110X_WHITE);
+    // Icon on the left, text fits within the right side (4 chars * 18px = 72px).
+    // Cursor at x=54 puts visible glyphs in 54..120, well inside 128.
     if (transportAnimIsPlay){
-      display.fillTriangle(16, 14, 50, 32, 16, 50, SH110X_BLACK);
+      display.fillTriangle(12, 12, 46, 32, 12, 52, SH110X_BLACK);
       display.setTextColor(SH110X_BLACK);
       display.setTextSize(3);
-      display.setCursor(60, 22);
+      display.setCursor(54, 22);
       display.print("PLAY");
     } else {
-      display.fillRect(18, 16, 32, 32, SH110X_BLACK);
+      display.fillRect(14, 16, 32, 32, SH110X_BLACK);
       display.setTextColor(SH110X_BLACK);
       display.setTextSize(3);
-      display.setCursor(60, 22);
+      display.setCursor(54, 22);
       display.print("STOP");
     }
     display.display();
