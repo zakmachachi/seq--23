@@ -2600,154 +2600,113 @@ void SimpleSequencer::drawTrigMachineView(){
 //   Playhead arrow at y=12 above the grid
 //   Channel grid (y=14..48): 7 rows × 16 steps, channel number on left, mute marker right
 //   Footer (y=52..63):  active menu name + held channel
-// Helper: draw a small icon chip (12x9). Filled when active, outline when inactive.
-static void drawIconChip(Adafruit_SH1106G& d, int x, int y, char glyph, bool active){
-  if (active){
-    d.fillRect(x, y, 12, 9, SH110X_WHITE);
-    d.setTextColor(SH110X_BLACK);
-  } else {
-    d.drawRect(x, y, 12, 9, SH110X_WHITE);
-    d.setTextColor(SH110X_WHITE);
+// Draw a stylised machine icon centred at (cx, cy). Used for Menu 4 screen 2.
+static void drawMachineIcon(Adafruit_SH1106G& d, int cx, int cy, uint8_t machine){
+  switch (machine){
+    case SimpleSequencer::TM_KICK: {
+      // Solid filled circle — heavy thump
+      d.fillCircle(cx, cy, 14, SH110X_WHITE);
+      break;
+    }
+    case SimpleSequencer::TM_HIHAT: {
+      // Bold X — closed hat sticks
+      for (int o = -1; o <= 1; o++){
+        d.drawLine(cx - 13 + o, cy - 13, cx + 13 + o, cy + 13, SH110X_WHITE);
+        d.drawLine(cx + 13 + o, cy - 13, cx - 13 + o, cy + 13, SH110X_WHITE);
+      }
+      break;
+    }
+    case SimpleSequencer::TM_SNARE: {
+      // Filled triangle pointing up — snare crack
+      d.fillTriangle(cx, cy - 14, cx - 14, cy + 12, cx + 14, cy + 12, SH110X_WHITE);
+      break;
+    }
+    case SimpleSequencer::TM_ANTIKICK: {
+      // Hollow ring with a dot — kick's shadow
+      d.drawCircle(cx, cy, 14, SH110X_WHITE);
+      d.drawCircle(cx, cy, 13, SH110X_WHITE);
+      d.fillCircle(cx, cy, 3, SH110X_WHITE);
+      break;
+    }
+    case SimpleSequencer::TM_PERC: {
+      // Four small filled circles — scattered percussion
+      d.fillCircle(cx - 7, cy - 7, 3, SH110X_WHITE);
+      d.fillCircle(cx + 7, cy - 7, 3, SH110X_WHITE);
+      d.fillCircle(cx - 7, cy + 7, 3, SH110X_WHITE);
+      d.fillCircle(cx + 7, cy + 7, 3, SH110X_WHITE);
+      d.fillCircle(cx, cy, 2, SH110X_WHITE);
+      break;
+    }
+    case SimpleSequencer::TM_EUCLID: {
+      // Concentric rings — Euclidean rotation
+      d.drawCircle(cx, cy, 14, SH110X_WHITE);
+      d.drawCircle(cx, cy, 9, SH110X_WHITE);
+      d.drawCircle(cx, cy, 4, SH110X_WHITE);
+      break;
+    }
+    default: { // TM_OFF — two thick horizontal lines (mute mark)
+      d.fillRect(cx - 14, cy - 2, 28, 4, SH110X_WHITE);
+      break;
+    }
   }
-  d.setTextSize(1);
-  d.setCursor(x + 4, y + 1);
-  d.print(glyph);
 }
 
 void SimpleSequencer::drawOverview(){
-  // Parameter dashboard: focuses on the most relevant params for what the user
-  // is currently editing on screen 1. Digitakt 2 / Digitone 2 inspired filling
-  // bars with active-state icon row at the bottom.
   display2.clearDisplay();
   display2.setTextColor(SH110X_WHITE);
-  display2.setTextSize(1);
   uint32_t now = millis();
-
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
 
-  // ── TOP BAR ─────────────────────────────────────────────────────
-  // Play/stop icon, BPM, step counter, channel name
-  if (isRunning){
-    display2.fillTriangle(0, 0, 0, 8, 6, 4, SH110X_WHITE);
-  } else {
-    display2.fillRect(0, 1, 7, 7, SH110X_WHITE);
-  }
-  display2.setCursor(10, 1);
-  display2.print(bpm);
-  display2.print("BPM");
-  // Step counter centred
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%02u/%u", (unsigned)(currentStep + 1), (unsigned)NUM_STEPS);
-  display2.setCursor(54, 1);
-  display2.print(buf);
-  // Channel + MIDI on the right
-  display2.setCursor(86, 1);
-  display2.print("CH"); display2.print(ch + 1);
-  display2.print(">M"); display2.print(midiChannel[ch] + 1);
-  display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
+  // ── Menu 4: Trigger Machines — stripped-down focus view ─────────
+  if (activeMenu == 4){
+    uint8_t m = trigMachine[ch];
+    if (m >= TM_COUNT) m = 0;
+    static const char* names[TM_COUNT] = {
+      "OFF", "KICK", "HIHAT", "SNARE", "ANTIKICK", "PERC", "EUCLID"
+    };
+    // Big machine icon centred horizontally at the top
+    drawMachineIcon(display2, 64, 18, m);
 
-  // ── BIG NOTE / FOCUS AREA (left half, x0-50, y12-31) ───────────
-  static const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-  uint8_t rootNote = channelPitch[ch];
-  display2.setTextSize(3);
-  display2.setCursor(2, 13);
-  display2.print(noteNames[rootNote % 12]);
-  if (rootNote % 12 < 12 && noteNames[rootNote % 12][1] == 0){
-    // single-char note (C, D, E, F, G, A, B) — add octave next to it
-    display2.print((int)((rootNote / 12) - 1));
-  } else {
-    // sharp note — octave goes below at smaller size to fit
+    // Machine name (size 2, centred)
+    const char* nm = names[m];
+    int textW = (int)strlen(nm) * 12; // size 2 chars are ~12px wide
+    int tx = (128 - textW) / 2; if (tx < 0) tx = 0;
     display2.setTextSize(2);
-    display2.setCursor(40, 18);
-    display2.print((int)((rootNote / 12) - 1));
-  }
+    display2.setCursor(tx, 38);
+    display2.print(nm);
 
-  // Scale name below the big note
-  static const char* scaleNames[] = {"OFF","MAJ","MIN","PEN","LOC","DIM","ATO"};
-  display2.setTextSize(1);
-  display2.setCursor(2, 34);
-  display2.print(scaleNames[euclidScaleMode[ch] % 7]);
-
-  // ── PARAM BARS (right side, x0-127 actually because they're full width) ──
-  // We stack bars in the right half (x=52+) — but our drawParamBar is full
-  // width, so we shift down. Reuse the helper for cleanest look:
-  //   y=12-19, 22-29, 32-39, 42-49
-  // Page-specific param choices:
-  // Menu 1 (Notes): VEL, GATE, SLD%, SPRD
-  // Menu 2 (Euclid): VEL, GATE, PLS, OFFS
-  // Menu 3 (Step Viz): VEL, GATE, SLD%, SPRD (default channel params)
-  // Menu 4 (TrigMach): VEL, DENS, SHFT, MACH-info
-  // Otherwise (main view): VEL, GATE, SLD%, SPRD
-
-  // Use a compact mini-bar at x=52 onwards (76px available) so the big note
-  // on the left stays visible.
-  auto miniBar = [&](const char* label, int val, int max, int y){
-    display2.setTextSize(1);
-    display2.setTextColor(SH110X_WHITE);
-    display2.setCursor(52, y);
-    display2.print(label);
-    int barX = 76, barY = y, barW = 36, barH = 7;
+    // Density fill bar at the bottom — Digitakt-style 8-segment block.
+    // Live density on the channel; a thin "leading edge" pulse animates the
+    // filled portion so you can see density changes as you sweep Pot 2.
+    const int barX = 8, barY = 56, barW = 112, barH = 7;
     display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
-    if (val > 0 && max > 0){
-      int fillW = ((val * (barW - 2)) + max/2) / max;
-      if (fillW > barW - 2) fillW = barW - 2;
-      if (fillW > 0) display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
+    int dens = trigDensity[ch];
+    int fillW = ((dens * (barW - 2)) + 50) / 100;
+    if (fillW > barW - 2) fillW = barW - 2;
+    if (fillW > 0){
+      display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
+      // 8 segment dividers cut the fill into Digitone-style blocks
+      for (int i = 1; i < 8; i++){
+        int sx = barX + 1 + (i * (barW - 2)) / 8;
+        if (sx < barX + 1 + fillW){
+          display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
+        }
+      }
+      // Pulsing highlight at the leading edge (gives a "filling" feel)
+      int pulsePos = barX + 1 + fillW - 1;
+      if ((now / 100) % 2 == 0){
+        display2.drawFastVLine(pulsePos, barY, barH, SH110X_WHITE);
+      }
     }
-    display2.setCursor(115, y);
-    if (val < 10) display2.print(' ');
-    if (val < 100) display2.print(' ');
-    display2.print(val);
-  };
 
-  static const uint8_t noteLenTicksLocal[] = { 96, 72, 48, 36, 24, 18, 12, 9, 6, 4, 3 };
-  static const uint8_t NLT_COUNT = sizeof(noteLenTicksLocal)/sizeof(noteLenTicksLocal[0]);
-
-  if (activeMenu == 2){
-    // Euclid context
-    miniBar("PLS",  pulses[ch],         NUM_STEPS, 13);
-    miniBar("OFS",  euclidOffset[ch],   NUM_STEPS, 22);
-    miniBar("VEL",  channelVelocity[ch], 127,       31);
-    miniBar("GAT",  NLT_COUNT - 1 - noteLenIdx, NLT_COUNT - 1, 40);
-  } else if (activeMenu == 4){
-    // Trig Machines context
-    static const char* mNames[] = {"OFF","KCK","HAT","SNR","ANT","PRC","EUC"};
-    display2.setTextSize(1);
-    display2.setCursor(52, 13);
-    display2.print("MACHN ");
-    display2.print(mNames[trigMachine[ch] % 7]);
-    miniBar("DEN",  trigDensity[ch], 100,       22);
-    miniBar("SHF",  trigShift[ch],   NUM_STEPS-1, 31);
-    miniBar("VEL",  channelVelocity[ch], 127,    40);
-  } else {
-    // Notes / Step Viz / default: show generative + velocity params
-    miniBar("VEL",  channelVelocity[ch],  127, 13);
-    miniBar("GAT",  NLT_COUNT - 1 - noteLenIdx, NLT_COUNT - 1, 22);
-    miniBar("SLD",  randomSlideProb[ch],  100, 31);
-    miniBar("SPR",  octaveSpread[ch],     60,  40);
+    display2.display();
+    return;
   }
 
-  // ── BOTTOM ICON STRIP (y52-63) ──────────────────────────────────
-  // SLIDE | FILL | EUCL | GEN | MACH | MUTE | (room for one more)
-  // Icons are 12x9 wide with 2px gaps -> 7 icons * 14 - 2 = 96 px, start x=16
-  // Active state lights them up.
-  int ix = 4;
-  drawIconChip(display2, ix, 53, 'S', randomSlideProb[ch] > 0);            ix += 14;
-  drawIconChip(display2, ix, 53, 'F', fillModeActive);                     ix += 14;
-  drawIconChip(display2, ix, 53, 'E', euclidEnabled[ch]);                  ix += 14;
-  drawIconChip(display2, ix, 53, 'G', euclidScaleMode[ch] != 0);           ix += 14;
-  drawIconChip(display2, ix, 53, 'M', trigMachine[ch] != TM_OFF);          ix += 14;
-  drawIconChip(display2, ix, 53, 'X', muted[ch]);                          ix += 14;
-  // Page indicator (1/2/3/4)
-  display2.setTextColor(SH110X_WHITE);
+  // ── Other menus: placeholder until we redesign each ─────────────
   display2.setTextSize(1);
-  display2.setCursor(ix + 1, 54);
-  display2.print('P');
+  display2.setCursor(0, 2);
+  display2.print("MENU ");
   display2.print((int)activeMenu);
-
-  // Subtle hold-channel hint above the icon strip if a channel button is held
-  if (heldChannel >= 0 && ((now / 250) % 2 == 0)){
-    display2.fillRect(0, 51, 128, 1, SH110X_WHITE); // thin bright line
-  }
-
   display2.display();
 }
