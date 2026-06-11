@@ -2824,9 +2824,10 @@ void SimpleSequencer::drawOverview(){
     static const char* scaleNames[] = {"OFF","MAJOR","MINOR","PENTA","LOCRIAN","DIM","ATONAL"};
     static const char* gateNames[]  = {"1","3/4","1/2","3/8","1/4","3/16","1/8","3/32","1/16","1/24","1/32"};
 
-    // Pick which pot to focus on. Falls back to a quick summary if no recent touch.
-    bool focused = (lastTouchedPot >= 0)
-                   && ((now - lastPotTouchMs) < potFocusTimeout);
+    // Persistent focus: once any pot has been turned the screen stays on that
+    // panel until another pot is touched. No timeout. The summary only shows
+    // before the very first rotation.
+    bool focused = (lastTouchedPot >= 0);
 
     // Common header: small label naming the focused parameter
     static const char* labels[6] = {
@@ -2850,19 +2851,22 @@ void SimpleSequencer::drawOverview(){
       display2.print(scaleNames[sm]);
       display2.drawFastHLine(2, 11, 124, SH110X_WHITE);
 
-      // 4 mini bars
+      // 4 mini bars. Layout sized so a 3-digit value (max "127") fits.
       auto miniBar = [&](const char* lbl, int v, int max, int y){
         display2.setTextSize(1);
         display2.setCursor(2, y); display2.print(lbl);
-        int bx = 38, bw = 70, bh = 7;
+        int bx = 28, bw = 72, bh = 7;
         display2.drawRect(bx, y, bw, bh, SH110X_WHITE);
         if (v > 0 && max > 0){
           int fw = ((v * (bw - 2)) + max/2) / max;
           if (fw > bw - 2) fw = bw - 2;
           if (fw > 0) display2.fillRect(bx + 1, y + 1, fw, bh - 2, SH110X_WHITE);
         }
-        display2.setCursor(bx + bw + 4, y);
-        display2.print(v);
+        // Right-align value in a 3-digit slot that ends at x=124 (safe edge).
+        char vbuf[6]; snprintf(vbuf, sizeof(vbuf), "%d", v);
+        int vw = (int)strlen(vbuf) * 6;
+        display2.setCursor(124 - vw, y);
+        display2.print(vbuf);
       };
       miniBar("VEL",  channelVelocity[ch], 127, 16);
       miniBar("GAT",  noteLenIdx,           10, 26);
