@@ -2236,15 +2236,119 @@ void SimpleSequencer::runMidiPinMonitor(uint32_t ms){
 // MIDI input handlers removed — processing consolidated in runEngine() to avoid concurrent Serial reads.
 
 void SimpleSequencer::bootAnimation() {
-  // Quick LED sweep across the strip on boot for a visible "alive" signal.
-  for (uint8_t i = 0; i < LED_COUNT; i++){
-    ledStrip.clear();
-    ledStrip.setPixelColor(i, ledStrip.Color(0, 0, 200));
-    ledStrip.show();
-    delay(25);
+  // Spiral boot animation — restored from the original design.
+  // Screen 1 draws a fractal spiral in white-on-black; screen 2 mirrors it
+  // horizontally and inverts the colours (black-on-white).
+  // LEDs pulse out from the centre in red or blue at max brightness.
+  display.clearDisplay();
+  if (display2Present){
+    display2.clearDisplay();
+    display2.fillRect(0, 0, 128, 64, SH110X_WHITE); // white background
   }
   ledStrip.clear();
+  ledStrip.setBrightness(255); // max brightness for boot
+  randomSeed(analogRead(0));
+
+  // --- LED zones (mirror around the centre of the 16-LED strip) ---
+  bool useRed = (random(0, 2) == 0);
+  const uint8_t spread[4][4] = {
+    {3, 4, 11, 12}, // Zone 0: centre
+    {2, 5, 10, 13}, // Zone 1: mid-inner
+    {1, 6, 9, 14},  // Zone 2: mid-outer
+    {0, 7, 8, 15}   // Zone 3: outer edges
+  };
+
+  // --- Spiral DNA: random each boot for a unique look ---
+  const int cx = 64, cy = 32;
+  int branches = random(2, 6);
+  float angleStep    = random(5, 20) / 100.0f;
+  float radiusStep   = random(10, 50) / 100.0f;
+  float fractalTwist = random(10, 50) / 10.0f;
+  float angle = 0, radius = 0;
+
+  // ── MAIN LOOP: 150 frames at ~12ms each (~1.8s) ─────────────────
+  for (int frame = 0; frame < 150; frame++){
+    // 1) LED pulse: a peak sweeps from centre (d=0) to edge (d=3) and back.
+    float peak = 1.5f - 1.5f * cosf(frame * (TWO_PI / 150.0f));
+    float globalFade = 1.0f;
+    if (frame > 120) globalFade = 1.0f - ((frame - 120) / 30.0f);
+    for (int d = 0; d < 4; d++){
+      float dist = fabsf(peak - (float)d);
+      float intensity = constrain(1.0f - (dist * 0.7f), 0.0f, 1.0f);
+      int val = (int)(255.0f * intensity * intensity * intensity * globalFade);
+      uint8_t r = useRed ? (uint8_t)val : (uint8_t)((val * 180) / 255);
+      uint8_t b = useRed ? 0 : (uint8_t)val;
+      for (int i = 0; i < 4; i++){
+        ledStrip.setPixelColor(spread[d][i], ledStrip.Color(r, 0, b));
+      }
+    }
+    ledStrip.show();
+
+    // 2) Spiral geometry — two iterations per frame for density.
+    for (int iter = 0; iter < 2; iter++){
+      angle  += angleStep;
+      radius += radiusStep;
+      for (int b_idx = 0; b_idx < branches; b_idx++){
+        float armAngle = angle + (b_idx * (TWO_PI / branches));
+        int x  = cx + (int)(radius * cosf(armAngle));
+        int y  = cy + (int)(radius * sinf(armAngle));
+        int fx = x + (int)((radius * 0.3f) * cosf(armAngle * fractalTwist));
+        int fy = y + (int)((radius * 0.3f) * sinf(armAngle * fractalTwist));
+        // Screen 1: white on black
+        display.drawPixel(x,  y,  SH110X_WHITE);
+        display.drawPixel(fx, fy, SH110X_WHITE);
+        // Screen 2: mirrored horizontally, black on white
+        if (display2Present){
+          display2.drawPixel(127 - x,  y,  SH110X_BLACK);
+          display2.drawPixel(127 - fx, fy, SH110X_BLACK);
+        }
+      }
+    }
+
+    // Push frames every other tick to avoid choking the I2C buses.
+    if (frame % 2 == 0){
+      display.display();
+      if (display2Present) display2.display();
+    }
+    delay(12);
+  }
+
+  delay(400);
+
+  // ── FINALE: clear and show a small boot card on both screens ──────
+  display.clearDisplay();
+  if (display2Present) display2.clearDisplay();
+  ledStrip.clear();
   ledStrip.show();
+
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(44, 20); display.print("seq-23");
+  display.setCursor(16, 32); display.print("made by Bob and Zak");
+  display.setCursor(28, 44); display.print("v. prototype");
+  display.display();
+
+  if (display2Present){
+    display2.fillRect(0, 0, 128, 64, SH110X_WHITE);
+    display2.setTextColor(SH110X_BLACK);
+    display2.setTextSize(1);
+    display2.setCursor(44, 20); display2.print("seq-23");
+    display2.setCursor(16, 32); display2.print("made by Bob and Zak");
+    display2.setCursor(28, 44); display2.print("v. prototype");
+    display2.display();
+  }
+  delay(900);
+
+  // Restore normal LED brightness for runtime
+  ledStrip.setBrightness(LED_BRIGHTNESS);
+  ledStrip.clear();
+  ledStrip.show();
+  display.clearDisplay();
+  display.display();
+  if (display2Present){
+    display2.clearDisplay();
+    display2.display();
+  }
 }
 
 
