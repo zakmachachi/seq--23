@@ -399,18 +399,14 @@ void SimpleSequencer::loop(){
   // MIDI clock generation and external MIDI handling moved to `runEngine()` only to avoid race conditions.
 
   // Time-critical MIDI processing (advancing steps/note-offs/MIDI RX) now runs in the engine timer.
-  // LEDs refresh fast and independently so button presses feel instant — the
-  // WS2812 push is ~500us. The OLED transfer is ~20ms so we keep that gated.
-  static uint32_t lastLedMillis = 0;
-  uint32_t nowMs = millis();
-  if (nowMs - lastLedMillis >= 8){
+  // Update display + LEDs together at the configured refresh interval.
+  // Pushing WS2812 too often disables interrupts during the bit-bang and starves
+  // the matrix scan; the original 60Hz-ish cadence was correct.
+  if (millis() - lastDisplayMillis > displayRefreshMs){
     updateLEDs();
-    lastLedMillis = nowMs;
-  }
-  if (nowMs - lastDisplayMillis > displayRefreshMs){
     drawDisplay();
     if (display2Present) drawOverview();
-    lastDisplayMillis = nowMs;
+    lastDisplayMillis = millis();
   }
 }
 
