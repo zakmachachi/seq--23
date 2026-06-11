@@ -797,6 +797,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (forward == 0) return;
   ticks = forward;
 
+  // Track which pot was last actually rotated so screen 2 can focus on it.
+  lastTouchedPot  = (int8_t)pot;
+  lastPotTouchMs  = millis();
+
   // --- GLOBAL MODIFIER: Function + Pot 1 = BPM (anywhere, in 1-BPM steps) ---
   if (pot == 0 && isFunctionHeld()){
     int newBpm = (int)bpm + ticks;
@@ -2810,6 +2814,237 @@ void SimpleSequencer::drawOverview(){
       }
     }
 
+    display2.display();
+    return;
+  }
+
+  // ── Menu 1: Notes — focused-parameter view following last-rotated pot ──
+  if (activeMenu == 1){
+    static const char* noteNames[]  = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+    static const char* scaleNames[] = {"OFF","MAJOR","MINOR","PENTA","LOCRIAN","DIM","ATONAL"};
+    static const char* gateNames[]  = {"1","3/4","1/2","3/8","1/4","3/16","1/8","3/32","1/16","1/24","1/32"};
+
+    // Pick which pot to focus on. Falls back to a quick summary if no recent touch.
+    bool focused = (lastTouchedPot >= 0)
+                   && ((now - lastPotTouchMs) < potFocusTimeout);
+
+    // Common header: small label naming the focused parameter
+    static const char* labels[6] = {
+      "ROOT", "SCALE", "GATE", "SLIDE %", "VELOCITY", "SPREAD"
+    };
+
+    display2.setTextColor(SH110X_WHITE);
+
+    if (!focused){
+      // Default Notes overview — show channel, root, scale, and the 4 main
+      // generative params as compact bars so the user has a recap to glance at.
+      display2.setTextSize(1);
+      display2.setCursor(2, 1);
+      display2.print("CH"); display2.print(ch + 1);
+      display2.print(" >M"); display2.print(midiChannel[ch] + 1);
+      uint8_t rootN = channelPitch[ch];
+      display2.setCursor(58, 1);
+      display2.print(noteNames[rootN % 12]); display2.print((int)((rootN/12) - 1));
+      display2.setCursor(86, 1);
+      uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 0;
+      display2.print(scaleNames[sm]);
+      display2.drawFastHLine(2, 11, 124, SH110X_WHITE);
+
+      // 4 mini bars
+      auto miniBar = [&](const char* lbl, int v, int max, int y){
+        display2.setTextSize(1);
+        display2.setCursor(2, y); display2.print(lbl);
+        int bx = 38, bw = 70, bh = 7;
+        display2.drawRect(bx, y, bw, bh, SH110X_WHITE);
+        if (v > 0 && max > 0){
+          int fw = ((v * (bw - 2)) + max/2) / max;
+          if (fw > bw - 2) fw = bw - 2;
+          if (fw > 0) display2.fillRect(bx + 1, y + 1, fw, bh - 2, SH110X_WHITE);
+        }
+        display2.setCursor(bx + bw + 4, y);
+        display2.print(v);
+      };
+      miniBar("VEL",  channelVelocity[ch], 127, 16);
+      miniBar("GAT",  noteLenIdx,           10, 26);
+      miniBar("SLD",  randomSlideProb[ch], 100, 36);
+      miniBar("SPR",  octaveSpread[ch],     60, 46);
+      // Hint at the bottom
+      display2.setCursor(2, 57); display2.print("TURN A POT TO FOCUS");
+      display2.display();
+      return;
+    }
+
+    // FOCUS HEADER
+    display2.setTextSize(1);
+    display2.setCursor(2, 1);
+    display2.print(labels[lastTouchedPot]);
+    display2.setCursor(108, 1);
+    display2.print("P"); display2.print((int)(lastTouchedPot + 1));
+    display2.drawFastHLine(2, 10, 124, SH110X_WHITE);
+
+    switch (lastTouchedPot){
+      case 0: { // ROOT NOTE
+        uint8_t n = channelPitch[ch];
+        const char* nm = noteNames[n % 12];
+        int oct = (int)(n / 12) - 1;
+        // Big note glyph centred
+        display2.setTextSize(3);
+        char big[6];
+        snprintf(big, sizeof(big), "%s%d", nm, oct);
+        int bw = (int)strlen(big) * 18;
+        display2.setCursor((128 - bw) / 2, 16);
+        display2.print(big);
+        // Small piano keyboard at the bottom with root highlighted
+        // White keys: 0,2,4,5,7,9,11; black keys: 1,3,6,8,10
+        const int kbX = 4, kbY = 50, kw = 8, kh = 12;
+        int idx = n % 12;
+        static const uint8_t whiteOrder[7] = {0,2,4,5,7,9,11};
+        for (int i = 0; i < 7; i++){
+          int x = kbX + i * kw;
+          if (whiteOrder[i] == idx){
+            display2.fillRect(x, kbY, kw - 1, kh, SH110X_WHITE);
+          } else {
+            display2.drawRect(x, kbY, kw - 1, kh, SH110X_WHITE);
+          }
+        }
+        // Black keys overlay
+        const int8_t blackPos[5] = {0, 1, 3, 4, 5}; // white-key index before the black key
+        const uint8_t blackPC[5] = {1, 3, 6, 8, 10};
+        for (int i = 0; i < 5; i++){
+          int x = kbX + blackPos[i] * kw + kw/2 + 1;
+          bool sel = (blackPC[i] == idx);
+          if (sel){
+            display2.fillRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_WHITE);
+          } else {
+            display2.fillRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_BLACK);
+            display2.drawRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_WHITE);
+          }
+        }
+        break;
+      }
+      case 1: { // SCALE
+        uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 0;
+        const char* nm = scaleNames[sm];
+        display2.setTextSize(2);
+        int tw = (int)strlen(nm) * 12;
+        display2.setCursor((128 - tw) / 2, 18);
+        display2.print(nm);
+        // Chromatic intervals row — 12 squares, highlighted ones belong to the scale
+        static const uint16_t scaleMask[7] = {
+          0,                          // OFF
+          0b101010110101,             // Major:   0,2,4,5,7,9,11
+          0b010101101101,             // Minor:   0,2,3,5,7,8,10
+          0b001010010101,             // Penta:   0,2,4,7,9
+          0b010101101011,             // Locrian: 0,1,3,5,6,8,10
+          0b011011011011,             // Dim:     0,1,3,4,6,7,9,10
+          0b111111111111              // Atonal:  all 12
+        };
+        const int sqW = 8, sqH = 8, sqY = 40, sqX = 16;
+        uint16_t mask = scaleMask[sm];
+        for (int i = 0; i < 12; i++){
+          int x = sqX + i * (sqW);
+          bool on = (mask >> i) & 1;
+          if (on){
+            display2.fillRect(x, sqY, sqW - 1, sqH, SH110X_WHITE);
+          } else {
+            display2.drawRect(x, sqY, sqW - 1, sqH, SH110X_WHITE);
+          }
+        }
+        display2.setTextSize(1);
+        display2.setCursor(2, 54);
+        display2.print("C D E F G A B");
+        break;
+      }
+      case 2: { // GATE
+        display2.setTextSize(3);
+        const char* nm = gateNames[noteLenIdx % 11];
+        int tw = (int)strlen(nm) * 18;
+        display2.setCursor((128 - tw) / 2, 18);
+        display2.print(nm);
+        // Mini horizontal bar showing length relative to whole note
+        int ticks = (int)noteLenTicks[noteLenIdx % 11];
+        const int bx = 4, by = 50, bw = 120, bh = 9;
+        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
+        int fw = (ticks * (bw - 2)) / 96;
+        if (fw > bw - 2) fw = bw - 2;
+        if (fw > 0) display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
+        break;
+      }
+      case 3: { // SLIDE %
+        int v = randomSlideProb[ch];
+        display2.setTextSize(3);
+        char buf[6]; snprintf(buf, sizeof(buf), "%d%%", v);
+        int tw = (int)strlen(buf) * 18;
+        display2.setCursor((128 - tw) / 2, 16);
+        display2.print(buf);
+        // Slide-chain visualization: 16 dots in a row, every Nth connected
+        // by a line based on probability (every step has v% chance of slide
+        // — render a representative pattern using a simple stride).
+        const int dy = 50, dx = 8;
+        int spacing = 7;
+        for (int i = 0; i < 16; i++){
+          int x = dx + i * spacing;
+          display2.fillCircle(x, dy, 2, SH110X_WHITE);
+        }
+        // Draw connecting lines proportional to slide probability.
+        int linked = (v * 16 + 50) / 100;
+        for (int i = 0; i < linked && i < 15; i++){
+          int x1 = dx + i * spacing;
+          int x2 = dx + (i + 1) * spacing;
+          display2.drawFastHLine(x1, dy, x2 - x1, SH110X_WHITE);
+        }
+        break;
+      }
+      case 4: { // VELOCITY
+        int v = channelVelocity[ch];
+        display2.setTextSize(3);
+        char buf[6]; snprintf(buf, sizeof(buf), "%d", v);
+        int tw = (int)strlen(buf) * 18;
+        display2.setCursor((128 - tw) / 2, 16);
+        display2.print(buf);
+        // Big segmented bar (Digitakt style, 16 segments)
+        const int bx = 4, by = 50, bw = 120, bh = 11;
+        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
+        int fw = ((v * (bw - 2)) + 63) / 127;
+        if (fw > bw - 2) fw = bw - 2;
+        if (fw > 0){
+          display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
+          for (int i = 1; i < 16; i++){
+            int sx = bx + 1 + (i * (bw - 2)) / 16;
+            if (sx < bx + 1 + fw){
+              display2.drawFastVLine(sx, by + 1, bh - 2, SH110X_BLACK);
+            }
+          }
+          int pulsePos = bx + 1 + fw - 1;
+          if ((now / 100) % 2 == 0){
+            display2.drawFastVLine(pulsePos, by, bh, SH110X_WHITE);
+          }
+        }
+        break;
+      }
+      case 5: { // SPREAD (octave/semitone spread)
+        int v = octaveSpread[ch];
+        display2.setTextSize(3);
+        char buf[8]; snprintf(buf, sizeof(buf), "%d st", v);
+        int tw = (int)strlen(buf) * 18;
+        display2.setCursor((128 - tw) / 2, 16);
+        display2.print(buf);
+        // Range visualization on a horizontal piano-like strip showing how
+        // far above the root the spread reaches.
+        const int by = 50, bh = 10, bx = 4, bw = 120;
+        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
+        // Map spread 0..60 semitones onto the bar
+        int fw = (v * (bw - 2)) / 60;
+        if (fw > bw - 2) fw = bw - 2;
+        if (fw > 0) display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
+        // Octave markers every 12 semitones
+        for (int oct = 1; oct <= 5; oct++){
+          int sx = bx + (oct * 12 * (bw - 2)) / 60;
+          display2.drawFastVLine(sx, by - 2, bh + 4, SH110X_WHITE);
+        }
+        break;
+      }
+    }
     display2.display();
     return;
   }

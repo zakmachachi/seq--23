@@ -127,6 +127,10 @@ class SimpleSequencer {
     // Channel-button held: when >= 0, OLED shows that channel's params (mute, MIDI out)
     int8_t heldChannel = -1;
     bool fillBtnLastState = false; // for transition logging
+    // Last-rotated pot tracking (for screen 2 focused-parameter view on Menu 1)
+    int8_t lastTouchedPot = -1;
+    uint32_t lastPotTouchMs = 0;
+    const uint32_t potFocusTimeout = 2500; // ms before focus view fades back to default
     // display (use concrete SH1106G implementation)
     Adafruit_SH1106G display{128, 64, &Wire};
     // secondary OLED on Wire1 (Teensy 4.1: SDA1=17, SCL1=16) — global overview screen
