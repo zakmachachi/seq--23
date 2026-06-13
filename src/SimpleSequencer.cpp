@@ -71,7 +71,7 @@ SimpleSequencer::SimpleSequencer()
     euclidScaleMode[c] = 0;
     muted[c]=false;
     noteOffTick[c]=0;
-    for (uint8_t s=0; s<NUM_STEPS; s++){
+    for (uint16_t s=0; s<TOTAL_STEPS; s++){
       fillState[c][s] = 0;
       steps[c][s]=false;
       euclidPattern[c][s]=false;
@@ -80,8 +80,13 @@ SimpleSequencer::SimpleSequencer()
       stepRatchet[c][s] = 0;
       stepVelocity[c][s] = 255;
       stepSlide[c][s] = false;
+      machineOverlay[c][s] = 0;
+    }
+    for (uint8_t s=0; s<NUM_STEPS; s++){
       pendingToggle[s] = false;
     }
+    numPages[c] = 1;
+    editPage[c] = 0;
     channelPitch[c] = 33; // default A1 — matches Rytm MK2 default TRIG NOTE
     channelVelocity[c] = 100;
     midiChannel[c] = c; // default: CH1->MIDI ch1, CH2->ch2, ... (0-indexed = MIDI ch 1-6)
@@ -96,7 +101,6 @@ SimpleSequencer::SimpleSequencer()
     trigDensity[c] = 50;
     trigShift[c]   = 0;
     for (uint8_t s = 0; s < NUM_STEPS; s++){
-      machineOverlay[c][s] = 0;
       machinePattern[c][s] = false;
       machineRatchet[c][s] = 0;
     }
@@ -114,6 +118,7 @@ SimpleSequencer::SimpleSequencer()
   }
   lastMidiClockMicros = 0;
   absoluteTickCounter = 0;
+  globalPage = 0;
 }
 
 void SimpleSequencer::begin(){
@@ -299,8 +304,9 @@ void SimpleSequencer::loop(){
             midiSendByte(0xFA); // MIDI Start
             midiSendByte(0xF8); // MIDI Clock
             currentStep = 0;
+            globalPage = 0;
             for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-              bool isActive = isStepActive(ch, currentStep);
+              bool isActive = isStepActive(ch, playIdx(ch, currentStep));
               if (isActive) triggerChannel(ch);
             }
             if (!externalMidiClockActive && !midiTimerRunning) {
@@ -383,9 +389,10 @@ void SimpleSequencer::loop(){
       Serial.print(" gateIdx="); Serial.println(noteLenIdx[selectedChannel]);
       for (uint8_t cc = 0; cc < NUM_CHANNELS; cc++){
         uint8_t activeSteps = 0, fillSteps = 0;
+        uint16_t base = (uint16_t)editPage[cc] * NUM_STEPS;
         for (uint8_t s = 0; s < NUM_STEPS; s++){
-          if (steps[cc][s]) activeSteps++;
-          if (fillState[cc][s] == 1) fillSteps++;
+          if (steps[cc][base + s]) activeSteps++;
+          if (fillState[cc][base + s] == 1) fillSteps++;
         }
         Serial.print("CH"); Serial.print(cc + 1);
         Serial.print(" muted="); Serial.print(muted[cc]);
@@ -489,9 +496,10 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   // Also: 5 quick taps in a row (no step held) saves the patch to EEPROM.
   if (i == MATRIX_BTN_FUNCTION_INDEX){
     if (heldStep >= 0 && heldStep < (int8_t)NUM_STEPS){
-      uint8_t &fs = fillState[selectedChannel][heldStep];
+      uint16_t eHs = editIdx(selectedChannel, (uint8_t)heldStep);
+      uint8_t &fs = fillState[selectedChannel][eHs];
       fs = (fs == 1) ? 0 : 1;
-      steps[selectedChannel][heldStep] = true;
+      steps[selectedChannel][eHs] = true;
       pendingToggle[heldStep] = false;
       fillAnimStep = (uint8_t)heldStep;
       fillAnimSet  = (fs == 1);
@@ -538,9 +546,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU2_INDEX){
-    activeMenu = 3;  // Step page
+    activeMenu = 5;  // Pages mode (replaces old Step Visualizer)
     heldStep = -1; focusEncoder = 0;
-    Serial.print("MENU2 -> activeMenu=3 (Step)"); Serial.println();
+    Serial.println("MENU2 -> activeMenu=5 (Pages)");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -558,10 +566,22 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
 
   // --- Step buttons 0-15 only ---
   if (i < NUM_STEPS){
-    // In Menu 4 with a machine active, step buttons cycle the OVERLAY state
-    // (0=auto, 1=force-on, 2=force-off) instead of the regular steps[] toggle.
+    // Pages mode: step buttons 1..4 directly jump to that page (auto-extending
+    // numPages if the target is beyond the current page count).
+    if (activeMenu == 5){
+      if (i < MAX_PAGES){
+        uint8_t target = (uint8_t)i;
+        if (target >= numPages[selectedChannel]){
+          numPages[selectedChannel] = target + 1;
+        }
+        editPage[selectedChannel] = target;
+        Serial.print("CH"); Serial.print(selectedChannel+1);
+        Serial.print(" goto page "); Serial.println(target+1);
+      }
+      return;
+    }
     if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
-      uint8_t &ov = machineOverlay[selectedChannel][i];
+      uint8_t &ov = machineOverlay[selectedChannel][editIdx(selectedChannel, i)];
       ov = (ov + 1) % 3;
       heldStep = (int8_t)i;
       lastEncoderMoveTime = millis();
@@ -605,29 +625,31 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
     if (startHeld) {
       pendingToggle[i] = false;
     } else {
+      uint16_t eI = editIdx(selectedChannel, i);
       if (euclidEnabled[selectedChannel]){
-        bool newState = !euclidPattern[selectedChannel][i];
-        euclidPattern[selectedChannel][i] = newState;
-        steps[selectedChannel][i] = newState;
+        bool newState = !euclidPattern[selectedChannel][eI];
+        euclidPattern[selectedChannel][eI] = newState;
+        steps[selectedChannel][eI] = newState;
         if (newState){
-          if (pitch[selectedChannel][i] == 255) pitch[selectedChannel][i] = channelPitch[selectedChannel];
-          if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx[selectedChannel];
-          if (stepVelocity[selectedChannel][i] == 255) stepVelocity[selectedChannel][i] = channelVelocity[selectedChannel];
+          if (pitch[selectedChannel][eI] == 255) pitch[selectedChannel][eI] = channelPitch[selectedChannel];
+          if (noteLen[selectedChannel][eI] == 255) noteLen[selectedChannel][eI] = noteLenIdx[selectedChannel];
+          if (stepVelocity[selectedChannel][eI] == 255) stepVelocity[selectedChannel][eI] = channelVelocity[selectedChannel];
         }
       } else {
-        steps[selectedChannel][i] = !steps[selectedChannel][i];
-        if (!steps[selectedChannel][i]){
-          noteLen[selectedChannel][i] = 255;
-          pitch[selectedChannel][i] = 255;
-          fillState[selectedChannel][i] = 0;
-          stepRatchet[selectedChannel][i] = 0;
-          stepVelocity[selectedChannel][i] = 255;
-          stepSlide[selectedChannel][i] = false;
+        steps[selectedChannel][eI] = !steps[selectedChannel][eI];
+        if (!steps[selectedChannel][eI]){
+          noteLen[selectedChannel][eI] = 255;
+          pitch[selectedChannel][eI] = 255;
+          fillState[selectedChannel][eI] = 0;
+          stepRatchet[selectedChannel][eI] = 0;
+          stepVelocity[selectedChannel][eI] = 255;
+          stepSlide[selectedChannel][eI] = false;
         }
       }
       Serial.print("Ch"); Serial.print(selectedChannel+1);
+      Serial.print(" Pg"); Serial.print(editPage[selectedChannel]+1);
       Serial.print(" Step "); Serial.print(i);
-      Serial.print(" = "); Serial.println(steps[selectedChannel][i]);
+      Serial.print(" = "); Serial.println(steps[selectedChannel][eI]);
       pendingToggle[i] = false;
     }
   }
@@ -730,6 +752,17 @@ void SimpleSequencer::readEncoders(){
 
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
+  if (activeMenu == 5){
+    // Pages mode: Pot 1 button cycles numPages 1..MAX_PAGES
+    if (pot == 0){
+      uint8_t ch = selectedChannel;
+      numPages[ch] = (numPages[ch] % MAX_PAGES) + 1;
+      if (editPage[ch] >= numPages[ch]) editPage[ch] = numPages[ch] - 1;
+      Serial.print("CH"); Serial.print(ch+1);
+      Serial.print(" numPages="); Serial.println(numPages[ch]);
+    }
+    return;
+  }
   if (activeMenu == 2){
     // Euclid page: Pot 1 button toggles euclid on/off
     if (pot == 0){
@@ -751,12 +784,13 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
         // something immediately. Otherwise respect their existing pattern.
         if (!euclidEnabled[ch]){
           bool anyActive = false;
+          uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
           for (uint8_t s = 0; s < NUM_STEPS; s++){
-            if (steps[ch][s]){ anyActive = true; break; }
+            if (steps[ch][base + s]){ anyActive = true; break; }
           }
           if (!anyActive){
             for (uint8_t s = 0; s < NUM_STEPS; s++){
-              steps[ch][s] = true;
+              steps[ch][base + s] = true;
             }
           }
         }
@@ -860,7 +894,8 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         int prev = noteLenIdx[ch];
         noteLenIdx[ch] = (uint8_t)constrain(prev + ticks, 0, (int)NOTE_LEN_COUNT - 1);
         if (noteLenIdx[ch] != prev && euclidScaleMode[ch] != 0){
-          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][s] = noteLenIdx[ch];
+          uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][base + s] = noteLenIdx[ch];
         }
         Serial.print("GATE CH"); Serial.print(ch+1);
         Serial.print("="); Serial.println(noteLenIdx[ch]);
@@ -885,6 +920,28 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
         break;
       }
+    }
+    return;
+  }
+
+  // --- Menu 5: Pages mode ---
+  if (activeMenu == 5){
+    uint8_t ch = selectedChannel;
+    if (pot == 0){
+      int v = (int)editPage[ch] + ticks;
+      uint8_t np = numPages[ch] > 0 ? numPages[ch] : 1;
+      v = ((v % np) + np) % np;
+      editPage[ch] = (uint8_t)v;
+      Serial.print("CH"); Serial.print(ch+1);
+      Serial.print(" editPage="); Serial.println(editPage[ch]+1);
+    } else if (pot == 1){
+      int v = (int)numPages[ch] + ticks;
+      if (v < 1) v = 1;
+      if (v > MAX_PAGES) v = MAX_PAGES;
+      numPages[ch] = (uint8_t)v;
+      if (editPage[ch] >= numPages[ch]) editPage[ch] = numPages[ch] - 1;
+      Serial.print("CH"); Serial.print(ch+1);
+      Serial.print(" numPages="); Serial.println(numPages[ch]);
     }
     return;
   }
@@ -1006,7 +1063,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572475; // Unique signature (v9 — per-channel gate)
+  data.magicNumber = 13572476; // Unique signature (v10 — pages mode)
   data.savedBpm = bpm;
 
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -1018,7 +1075,7 @@ void SimpleSequencer::saveState() {
     data.savedEuclidOffset[c] = euclidOffset[c];
     data.savedEuclidScaleMode[c] = euclidScaleMode[c];
 
-    for (uint8_t s = 0; s < NUM_STEPS; s++) {
+    for (uint16_t s = 0; s < TOTAL_STEPS; s++) {
       data.savedSteps[c][s] = steps[c][s];
       data.savedPitch[c][s] = pitch[c][s];
       data.savedNoteLen[c][s] = noteLen[c][s];
@@ -1026,6 +1083,7 @@ void SimpleSequencer::saveState() {
       data.savedStepRatchet[c][s] = stepRatchet[c][s];
       data.savedStepVelocity[c][s] = stepVelocity[c][s];
       data.savedStepSlide[c][s] = stepSlide[c][s] ? 1 : 0;
+      data.savedMachineOverlay[c][s] = machineOverlay[c][s];
     }
     data.savedChannelVelocity[c] = channelVelocity[c];
     data.savedRandomSlideProb[c] = randomSlideProb[c];
@@ -1034,12 +1092,10 @@ void SimpleSequencer::saveState() {
     data.savedTrigMachine[c]     = trigMachine[c];
     data.savedTrigDensity[c]     = trigDensity[c];
     data.savedTrigShift[c]       = trigShift[c];
-    for (uint8_t s = 0; s < NUM_STEPS; s++){
-      data.savedMachineOverlay[c][s] = machineOverlay[c][s];
-    }
     data.savedKickNoteSpread[c]     = kickNoteSpread[c];
     data.savedKickRatchetProb[c]    = kickRatchetProb[c];
     data.savedKickExtrasAreFills[c] = kickExtrasAreFills[c];
+    data.savedNumPages[c]           = numPages[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -1058,7 +1114,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572475) {
+  if (data.magicNumber == 13572476) {
     bpm = data.savedBpm;
 
     for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -1071,7 +1127,7 @@ void SimpleSequencer::loadState() {
       euclidOffset[c] = data.savedEuclidOffset[c];
       euclidScaleMode[c] = data.savedEuclidScaleMode[c];
 
-      for (uint8_t s = 0; s < NUM_STEPS; s++) {
+      for (uint16_t s = 0; s < TOTAL_STEPS; s++) {
         steps[c][s] = data.savedSteps[c][s];
         pitch[c][s] = data.savedPitch[c][s];
         noteLen[c][s] = data.savedNoteLen[c][s];
@@ -1081,6 +1137,8 @@ void SimpleSequencer::loadState() {
         stepVelocity[c][s] = data.savedStepVelocity[c][s];
         if (stepVelocity[c][s] != 255 && stepVelocity[c][s] > 127) stepVelocity[c][s] = 100;
         stepSlide[c][s] = (data.savedStepSlide[c][s] != 0);
+        uint8_t ov = data.savedMachineOverlay[c][s];
+        machineOverlay[c][s] = (ov <= 2) ? ov : 0;
       }
       channelVelocity[c] = data.savedChannelVelocity[c];
       if (channelVelocity[c] > 127) channelVelocity[c] = 100;
@@ -1090,20 +1148,19 @@ void SimpleSequencer::loadState() {
       trigMachine[c]     = (data.savedTrigMachine[c] < TM_COUNT) ? data.savedTrigMachine[c]     : TM_OFF;
       trigDensity[c]     = (data.savedTrigDensity[c] <= 100)     ? data.savedTrigDensity[c]     : 50;
       trigShift[c]       = (data.savedTrigShift[c] < NUM_STEPS)  ? data.savedTrigShift[c]       : 0;
-      for (uint8_t s = 0; s < NUM_STEPS; s++){
-        uint8_t ov = data.savedMachineOverlay[c][s];
-        machineOverlay[c][s] = (ov <= 2) ? ov : 0;
-      }
       kickNoteSpread[c]     = (data.savedKickNoteSpread[c] <= 5)     ? data.savedKickNoteSpread[c]     : 0;
       kickRatchetProb[c]    = (data.savedKickRatchetProb[c] <= 100)  ? data.savedKickRatchetProb[c]    : 0;
       kickExtrasAreFills[c] = (data.savedKickExtrasAreFills[c] <= 1) ? data.savedKickExtrasAreFills[c] : 0;
+      uint8_t np = data.savedNumPages[c];
+      numPages[c] = (np >= 1 && np <= MAX_PAGES) ? np : 1;
+      editPage[c] = 0;
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
-    Serial.println("State loaded from EEPROM (v9).");
+    Serial.println("State loaded from EEPROM (v10).");
   } else {
-    Serial.println("No saved state (v9) found. Booting blank.");
+    Serial.println("No saved state (v10) found. Booting blank.");
   }
 }
 
@@ -1168,11 +1225,11 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     return;
   }
   if (m == TM_EUCLID){
-    // Euclid uses pulses[]/euclidOffset[] machinery. Fill machinePattern
-    // from the existing euclidPattern so the same trigger path applies.
+    // Euclid uses the live euclidPattern[] for whichever page is currently
+    // playing. shift rotates the visible pattern.
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-      machinePattern[ch][s] = euclidPattern[ch][src];
+      machinePattern[ch][s] = euclidPattern[ch][playIdx(ch, src)];
     }
     return;
   }
@@ -1194,30 +1251,30 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
   if (m == TM_KICK){
     uint8_t spread = kickNoteSpread[ch] > 5 ? 5 : kickNoteSpread[ch];
     uint8_t ratProb = kickRatchetProb[ch] > 100 ? 100 : kickRatchetProb[ch];
+    // Pitch overrides go on the current play page (whichever page will play
+    // next at this index). machineRatchet stays a 16-cell live array.
     for (uint8_t s = 0; s < NUM_STEPS; s++){
+      uint16_t pI = playIdx(ch, s);
       if (!machinePattern[ch][s]){
-        // Clear any stale pitch override on inactive steps
-        pitch[ch][s] = 255;
+        pitch[ch][pI] = 255;
         continue;
       }
       uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
       bool isBase = (W_KICK[src] == 100);
       if (isBase){
-        pitch[ch][s] = 255;          // base = channel default note
-        machineRatchet[ch][s] = 0;   // base never ratchets
+        pitch[ch][pI] = 255;
+        machineRatchet[ch][s] = 0;
         continue;
       }
-      // Extra step: random note spread above the root
       if (spread > 0){
         uint8_t off = (uint8_t)random(1, (int)spread + 1);
         int pn = (int)channelPitch[ch] + (int)off;
-        pitch[ch][s] = (uint8_t)constrain(pn, 0, 127);
+        pitch[ch][pI] = (uint8_t)constrain(pn, 0, 127);
       } else {
-        pitch[ch][s] = 255;
+        pitch[ch][pI] = 255;
       }
-      // Random chance of ratchet
       if (ratProb > 0 && (uint8_t)random(0, 100) < ratProb){
-        machineRatchet[ch][s] = (uint8_t)random(1, 4); // 1..3 hits
+        machineRatchet[ch][s] = (uint8_t)random(1, 4);
       } else {
         machineRatchet[ch][s] = 0;
       }
@@ -1226,17 +1283,20 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
 }
 
 // Combined activity check: machine + overlay, falling back to legacy
-// euclid/steps[] when no machine is active.
-bool SimpleSequencer::isStepActive(uint8_t ch, uint8_t step){
-  if (step >= NUM_STEPS) return false;
+// euclid/steps[] when no machine is active. `step` is now an ABSOLUTE step
+// index in 0..TOTAL_STEPS-1 — caller maps via editIdx()/playIdx() depending
+// on whether the check is for the visible edit page or the live playback.
+bool SimpleSequencer::isStepActive(uint8_t ch, uint16_t step){
+  if (step >= TOTAL_STEPS) return false;
+  uint8_t s = (uint8_t)(step % NUM_STEPS); // step-within-page (0..15)
   if (trigMachine[ch] != TM_OFF){
     uint8_t ov = machineOverlay[ch][step];
     if (ov == 1) return true;
     if (ov == 2) return false;
-    bool on = machinePattern[ch][step];
+    bool on = machinePattern[ch][s];
     // Kick "extras as fill" toggle: non-base kicks only fire while Fill is held
     if (on && trigMachine[ch] == TM_KICK && kickExtrasAreFills[ch]){
-      uint8_t src = (step + NUM_STEPS - trigShift[ch]) % NUM_STEPS;
+      uint8_t src = (s + NUM_STEPS - trigShift[ch]) % NUM_STEPS;
       bool isBase = (W_KICK[src] == 100);
       if (!isBase && !fillModeActive) return false;
     }
@@ -1265,17 +1325,20 @@ static uint8_t getScale(uint8_t mode, const uint8_t** outScale){
 }
 
 // Re-roll only the slide flags based on randomSlideProb. Leaves notes untouched.
+// Operates on the current edit page only.
 void SimpleSequencer::rerollSlides(uint8_t ch){
   uint8_t prob = randomSlideProb[ch];
+  uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
-    stepSlide[ch][s] = (random(0, 100) < prob);
+    stepSlide[ch][base + s] = (random(0, 100) < prob);
   }
 }
 
-// Transpose every per-step pitch on this channel by `semitones`. Does not regenerate.
+// Transpose every per-step pitch ACROSS ALL PAGES by `semitones`. Root changes
+// affect every page on the channel — the melody shifts globally.
 void SimpleSequencer::transposeChannelNotes(uint8_t ch, int semitones){
   if (semitones == 0) return;
-  for (uint8_t s = 0; s < NUM_STEPS; s++){
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++){
     if (pitch[ch][s] == 255) continue;
     int n = (int)pitch[ch][s] + semitones;
     pitch[ch][s] = (uint8_t)constrain(n, 0, 127);
@@ -1284,13 +1347,13 @@ void SimpleSequencer::transposeChannelNotes(uint8_t ch, int semitones){
 
 void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   uint8_t mode = euclidScaleMode[ch];
+  uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
   if (mode == 0) {
-    // OFF: clear per-step generative overrides; steps fall back to channel pitch
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
-      pitch[ch][s]       = 255;
-      stepSlide[ch][s]   = false;
-      stepVelocity[ch][s] = 255; // use channel default
-      noteLen[ch][s]     = 255; // use global gate
+      pitch[ch][base + s]       = 255;
+      stepSlide[ch][base + s]   = false;
+      stepVelocity[ch][base + s] = 255;
+      noteLen[ch][base + s]     = 255;
     }
     return;
   }
@@ -1339,12 +1402,12 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
       }
     }
     int note = (int)root + (int)valid[pick];
-    pitch[ch][s] = (uint8_t)constrain(note, 0, 127);
+    pitch[ch][base + s] = (uint8_t)constrain(note, 0, 127);
 
-    stepSlide[ch][s]    = (random(0, 100) < randomSlideProb[ch]);
+    stepSlide[ch][base + s]    = (random(0, 100) < randomSlideProb[ch]);
     int v = (int)channelVelocity[ch] + random(-10, 10);
-    stepVelocity[ch][s] = (uint8_t)constrain(v, 0, 127);
-    noteLen[ch][s]      = noteLenIdx[ch];
+    stepVelocity[ch][base + s] = (uint8_t)constrain(v, 0, 127);
+    noteLen[ch][base + s]      = noteLenIdx[ch];
     // Note: steps[] is intentionally NOT touched here. Whether a step fires
     // is the user's rhythm decision (manual toggle or Euclid). Generative
     // mode only paints the pitches.
@@ -1391,8 +1454,8 @@ void SimpleSequencer::shiftEuclidNotes(uint8_t ch, int steps){
     return cand;
   };
 
-  // Shift per-step pitches if present
-  for (uint8_t s=0; s<NUM_STEPS; s++){
+  // Shift per-step pitches if present (across all pages)
+  for (uint16_t s=0; s<TOTAL_STEPS; s++){
     if (pitch[ch][s] == 255) continue;
     int g = noteToGlobalIndex((int)pitch[ch][s]);
     int ng = g + steps;
@@ -1410,15 +1473,14 @@ void SimpleSequencer::shiftEuclidNotes(uint8_t ch, int steps){
 
 
 void SimpleSequencer::updateEuclid(uint8_t ch){
+  // Apply the euclid rhythm to all pages so the loop is consistent across them.
   uint8_t k = pulses[ch];
   uint8_t n = NUM_STEPS;
   uint8_t offset = euclidOffset[ch];
-  if (k == 0){
-    for (uint8_t i=0;i<n;i++) euclidPattern[ch][i]=false;
-    return;
-  }
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++) euclidPattern[ch][s] = false;
+  if (k == 0) return;
   if (k >= n){
-    for (uint8_t i=0;i<n;i++) euclidPattern[ch][i]=true;
+    for (uint16_t s = 0; s < TOTAL_STEPS; s++) euclidPattern[ch][s] = true;
     return;
   }
 
@@ -1429,11 +1491,12 @@ void SimpleSequencer::updateEuclid(uint8_t ch){
     tempPattern[j] = (y > x);
   }
 
-  // Apply the rotation offset wrapping around NUM_STEPS
-  for (uint8_t j=0;j<n;j++){
-    euclidPattern[ch][(j + offset) % n] = tempPattern[j];
+  for (uint8_t pg = 0; pg < MAX_PAGES; pg++){
+    uint16_t base = (uint16_t)pg * NUM_STEPS;
+    for (uint8_t j=0;j<n;j++){
+      euclidPattern[ch][base + ((j + offset) % n)] = tempPattern[j];
+    }
   }
-  // Melody generation is decoupled from rhythm changes: do not regenerate here.
 }
 
 // Advance the internal MIDI tick counter (called from MIDI clock ISR)
@@ -1525,9 +1588,10 @@ void SimpleSequencer::runEngine(){
       // start playback
       isRunning = true;
       currentStep = 0;
+      globalPage = 0;
       // immediately trigger steps at position 0
       for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-        bool isActive = isStepActive(ch, currentStep);
+        bool isActive = isStepActive(ch, playIdx(ch, currentStep));
         if (isActive) triggerChannel(ch);
       }
     }
@@ -1579,9 +1643,19 @@ void SimpleSequencer::runEngine(){
     stepAdvanceRequested = false;
     if (isRunning){
       currentStep = (currentStep + 1) % NUM_STEPS;
+      if (currentStep == 0){
+        // Just wrapped a full 16-step bar — advance page (mod MAX_PAGES).
+        globalPage = (globalPage + 1) % MAX_PAGES;
+      }
+      // Regenerate machine pattern for any channel whose page changed
+      if (currentStep == 0){
+        for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
+          if (trigMachine[ch] != TM_OFF) regenerateMachinePattern(ch);
+        }
+      }
       // trigger channels that have the step enabled
         for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-          bool isActive = isStepActive(ch, currentStep);
+          bool isActive = isStepActive(ch, playIdx(ch, currentStep));
           if (isActive) triggerChannel(ch);
         }
     }
@@ -1593,16 +1667,17 @@ void SimpleSequencer::runEngine(){
 }
 
 void SimpleSequencer::triggerChannel(uint8_t ch){
-  // 1. THE NORMAL MUTE & FILL BLOCK
+  // 1. THE NORMAL MUTE & FILL BLOCK — per-step values resolve via playIdx()
   if (muted[ch]) return;
-  uint8_t fstate = fillState[ch][currentStep];
+  uint16_t pIdx = playIdx(ch, currentStep);
+  uint8_t fstate = fillState[ch][pIdx];
   if (fstate == 1 && !fillModeActive) return;
   if (fstate == 2 && fillModeActive) return;
-  uint8_t p = pitch[ch][currentStep];
+  uint8_t p = pitch[ch][pIdx];
   if (p == 255) p = channelPitch[ch];
   uint8_t note = constrain(p, 0, 127);
 
-  uint8_t vel = stepVelocity[ch][currentStep];
+  uint8_t vel = stepVelocity[ch][pIdx];
   if (vel == 255) vel = channelVelocity[ch];
 
   // 2. THE MONOSYNTH LEGATO MAGIC — route to per-channel MIDI Out
@@ -1612,29 +1687,24 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 
   if (lastNotePlaying[ch] < 128) {
     if (isSlidingIntoThis) {
-      // LEGATO: Fire the new note BEFORE killing the old one to trigger portamento
       midiSendNoteOn(mch, note, vel);
       midiSendNoteOff(mch, lastNotePlaying[ch], 0);
     } else {
-      // NORMAL: Kill the old note BEFORE firing the new one (Crisp re-trigger)
       midiSendNoteOff(mch, lastNotePlaying[ch], 0);
       midiSendNoteOn(mch, note, vel);
     }
   } else {
-    // No overlapping note, just fire
     midiSendNoteOn(mch, note, vel);
   }
 
-  // Save the new state for the NEXT step
   lastNotePlaying[ch] = note;
-  // Consider encoder held slide as an active slide for the next step
-  prevSlide[ch] = stepSlide[ch][currentStep] || encoderSlideHold;
+  prevSlide[ch] = stepSlide[ch][pIdx] || encoderSlideHold;
 
   // 3. RATCHET & GATE LENGTH
-  uint8_t lenIdx = noteLen[ch][currentStep];
+  uint8_t lenIdx = noteLen[ch][pIdx];
   if (lenIdx == 255) lenIdx = noteLenIdx[ch];
 
-  uint8_t rIdx = stepRatchet[ch][currentStep];
+  uint8_t rIdx = stepRatchet[ch][pIdx];
   // Merge machine-driven ratchets (e.g., kick fill notes) with user P-Locks
   if (trigMachine[ch] != TM_OFF){
     uint8_t mr = machineRatchet[ch][currentStep];
@@ -1659,11 +1729,9 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
     uint32_t ticks = noteLenTicks[lenIdx];
     uint32_t gateLength;
 
-    if (stepSlide[ch][currentStep]) {
-      // FORCE OVERLAP: If this step is sliding, ensure it bleeds past the 6-tick boundary
+    if (stepSlide[ch][pIdx]) {
       gateLength = (ticks < 7) ? 7 : (ticks + 1);
     } else {
-      // NORMAL: Cut it short to leave a gap for envelopes to reset
       gateLength = (ticks > 1) ? (ticks - 1) : 1;
     }
     noteOffTick[ch] = absoluteTickCounter + gateLength;
@@ -1809,6 +1877,7 @@ void SimpleSequencer::drawDisplay(){
   if (activeMenu == 2){ drawEuclidView(); return; }
   if (activeMenu == 3){ drawStepVisualiser(); return; }
   if (activeMenu == 4){ drawTrigMachineView(); return; }
+  if (activeMenu == 5){ drawPagesView();      return; }
 
   display.clearDisplay();
 
@@ -2102,7 +2171,7 @@ void SimpleSequencer::updateLEDs(){
   uint8_t pulseBri = (pulse < 128) ? (pulse * 2) : (255 - (pulse - 128) * 2);
 
   for (uint8_t s = 0; s < LED_COUNT && s < NUM_STEPS; s++){
-    bool active = isStepActive(selectedChannel, s);
+    bool active = isStepActive(selectedChannel, editIdx(selectedChannel, s));
     bool isPlayhead = isRunning && (s == currentStep);
 
     if (isPlayhead){
@@ -2120,8 +2189,9 @@ void SimpleSequencer::updateLEDs(){
     }
 
     // Decorations for Menu 4 overlay state and fill marks
+    uint16_t eI = editIdx(selectedChannel, s);
     if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
-      uint8_t ov = machineOverlay[selectedChannel][s];
+      uint8_t ov = machineOverlay[selectedChannel][eI];
       if (!isPlayhead){
         if (ov == 1){
           ledStrip.setPixelColor(s, ledStrip.Color(180, 180, 180));
@@ -2129,7 +2199,7 @@ void SimpleSequencer::updateLEDs(){
           ledStrip.setPixelColor(s, ledStrip.Color(40, 0, 0));
         }
       }
-    } else if (fillState[selectedChannel][s] == 1 && !isPlayhead){
+    } else if (fillState[selectedChannel][eI] == 1 && !isPlayhead){
       // Fill-only step: solid green when Fill is held (the step will trigger),
       // gentle pulse green when Fill not held (so you can see fills exist).
       if (fillModeActive){
@@ -2425,7 +2495,8 @@ void SimpleSequencer::bootAnimation() {
 
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
-  for (uint8_t s = 0; s < NUM_STEPS; s++) {
+  // Clear every page slot for this channel
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++) {
     steps[ch][s] = false;
     pitch[ch][s] = 255;
     noteLen[ch][s] = 255;
@@ -2435,9 +2506,13 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
     stepSlide[ch][s] = false;
     euclidPattern[ch][s] = false;
     machineOverlay[ch][s] = 0;
+  }
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
     machinePattern[ch][s] = false;
     machineRatchet[ch][s] = 0;
   }
+  numPages[ch] = 1;
+  editPage[ch] = 0;
   euclidEnabled[ch] = false;
   euclidScaleMode[ch] = 0;
   pulses[ch] = 4;
@@ -2653,7 +2728,7 @@ void SimpleSequencer::drawStepVisualiser(){
     int x = gridX + col * (cellW + gapX);
     int y = gridY + row * (cellH + gapY);
 
-    bool active = isStepActive(selectedChannel, s);
+    bool active = isStepActive(selectedChannel, editIdx(selectedChannel, s));
     bool isPlayhead = isRunning && (s == currentStep);
 
     if (isPlayhead){
@@ -2663,7 +2738,8 @@ void SimpleSequencer::drawStepVisualiser(){
       }
     } else if (active){
       display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
-      uint8_t fs = fillState[selectedChannel][s];
+      uint16_t eI = editIdx(selectedChannel, s);
+      uint8_t fs = fillState[selectedChannel][eI];
       if (fs == 1){
         display.setTextColor(SH110X_BLACK);
         display.setTextSize(1);
@@ -2673,7 +2749,7 @@ void SimpleSequencer::drawStepVisualiser(){
         display.drawLine(x+2, y+3, x+cellW-3, y+cellH-4, SH110X_BLACK);
         display.drawLine(x+cellW-3, y+3, x+2, y+cellH-4, SH110X_BLACK);
       }
-      if (stepSlide[selectedChannel][s]){
+      if (stepSlide[selectedChannel][eI]){
         display.fillTriangle(x+cellW-4, y+cellH-1,
                              x+cellW-1, y+cellH-4,
                              x+cellW-1, y+cellH-1, SH110X_BLACK);
@@ -2682,7 +2758,8 @@ void SimpleSequencer::drawStepVisualiser(){
       display.drawRect(x, y, cellW, cellH, SH110X_WHITE);
     }
 
-    uint8_t rIdx = stepRatchet[selectedChannel][s];
+    uint16_t eIr = editIdx(selectedChannel, s);
+    uint8_t rIdx = stepRatchet[selectedChannel][eIr];
     if (rIdx == 0 && trigMachine[selectedChannel] != TM_OFF) rIdx = machineRatchet[selectedChannel][s];
     if (rIdx > 0){
       display.fillRect(x+1, y+1, 2, 2, active ? SH110X_BLACK : SH110X_WHITE);
@@ -2771,9 +2848,10 @@ void SimpleSequencer::drawTrigMachineView(){
     uint8_t row = s / 8;
     int x = startX + col * (cellW + gapX);
     int y = startY + row * (cellH + gapY);
-    bool autoOn = (m != TM_OFF) ? machinePattern[ch][s] : steps[ch][s];
-    uint8_t ov = machineOverlay[ch][s];
-    bool finalOn = isStepActive(ch, s);
+    uint16_t eIdx = editIdx(ch, s);
+    bool autoOn = (m != TM_OFF) ? machinePattern[ch][s] : steps[ch][eIdx];
+    uint8_t ov = machineOverlay[ch][eIdx];
+    bool finalOn = isStepActive(ch, eIdx);
 
     if (finalOn){
       display.fillRect(x, y, cellW, cellH, SH110X_WHITE);
@@ -2798,6 +2876,84 @@ void SimpleSequencer::drawTrigMachineView(){
     }
   }
 
+  display.display();
+}
+
+// ── Menu 5: Pages mode — screen 1 view ─────────────────────────────────
+void SimpleSequencer::drawPagesView(){
+  display.clearDisplay();
+  display.setTextColor(SH110X_WHITE);
+
+  // Channel tab strip at top
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    int bx = 2 + c * 17;
+    if (c == selectedChannel){
+      display.fillRect(bx, 0, 16, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 0, 16, 9, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+      if (muted[c]) display.drawLine(bx+1, 4, bx+14, 4, SH110X_WHITE);
+    }
+    display.setTextSize(1);
+    display.setCursor(bx + 5, 1);
+    display.print(c + 1);
+  }
+  display.setTextColor(SH110X_WHITE);
+
+  // Big "PAGE X/Y" indicator for the selected channel
+  uint8_t ch = selectedChannel;
+  uint8_t cur = editPage[ch] + 1;
+  uint8_t tot = numPages[ch];
+  display.setTextSize(3);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%u/%u", cur, tot);
+  int tw = (int)strlen(buf) * 18;
+  display.setCursor((128 - tw) / 2, 16);
+  display.print(buf);
+
+  // 4 page chips at the bottom — filled = selected edit page,
+  //                            ring = exists (within numPages),
+  //                            empty = not allocated.
+  // Also highlight the playing page when running.
+  uint8_t playPg = (numPages[ch] > 0) ? (globalPage % numPages[ch]) : 0;
+  const int chipW = 24, chipH = 14, gapX = 4;
+  int totalW = MAX_PAGES * chipW + (MAX_PAGES - 1) * gapX;
+  int startX = (128 - totalW) / 2;
+  int y = 46;
+  display.setTextSize(1);
+  for (uint8_t p = 0; p < MAX_PAGES; p++){
+    int x = startX + p * (chipW + gapX);
+    bool exists = (p < numPages[ch]);
+    bool isEdit = (p == editPage[ch]);
+    bool isPlay = (isRunning && p == playPg);
+
+    if (isEdit){
+      display.fillRect(x, y, chipW, chipH, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else if (exists){
+      display.drawRect(x, y, chipW, chipH, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+    } else {
+      display.drawRect(x, y, chipW, chipH, SH110X_WHITE);
+      // Dim "not allocated": just a single dot in the middle
+      display.drawPixel(x + chipW/2, y + chipH/2, SH110X_WHITE);
+      display.setTextColor(SH110X_WHITE);
+    }
+    if (exists){
+      display.setCursor(x + 9, y + 4);
+      display.print(p + 1);
+    }
+    // Playhead marker = small chevron above the chip
+    if (isPlay){
+      display.fillTriangle(x + chipW/2 - 3, y - 4,
+                           x + chipW/2 + 3, y - 4,
+                           x + chipW/2,     y - 1, SH110X_WHITE);
+    }
+  }
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(2, 57);
+  display.print("Pot1: page  Pot1 btn: count");
   display.display();
 }
 
@@ -2962,12 +3118,13 @@ void SimpleSequencer::drawOverview(){
     // can see exactly which notes glide into which.
     if (enabled){
       for (uint8_t s = 0; s < NUM_STEPS; s++){
-        if (!euclidPattern[ch][s]) continue;
-        if (!stepSlide[ch][s]) continue;
+        uint16_t eI = editIdx(ch, s);
+        if (!euclidPattern[ch][eI]) continue;
+        if (!stepSlide[ch][eI]) continue;
         uint8_t next = s;
         for (uint8_t i = 1; i <= NUM_STEPS; i++){
           uint8_t cand = (s + i) % NUM_STEPS;
-          if (euclidPattern[ch][cand]){ next = cand; break; }
+          if (euclidPattern[ch][editIdx(ch, cand)]){ next = cand; break; }
         }
         if (next == s) continue;
         int x1 = cx + offsX[s];
@@ -2982,7 +3139,7 @@ void SimpleSequencer::drawOverview(){
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       int dx = cx + offsX[s];
       int dy = cy + offsY[s];
-      bool active = enabled ? euclidPattern[ch][s] : false;
+      bool active = enabled ? euclidPattern[ch][editIdx(ch, s)] : false;
 
       if (active){
         display2.fillCircle(dx, dy, 2, SH110X_WHITE);
@@ -3347,7 +3504,7 @@ void SimpleSequencer::drawOverview(){
       // Step cells for this channel
       for (uint8_t s = 0; s < NUM_STEPS; s++){
         int x = gridX + s * (cellW + gapX);
-        bool active = isStepActive(c, s);
+        bool active = isStepActive(c, editIdx(c, s));
         bool isPhCol = isRunning && (s == currentStep);
 
         if (isPhCol && active){
@@ -3360,7 +3517,7 @@ void SimpleSequencer::drawOverview(){
         } else if (active){
           display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
           // Fill-only marker = small dark dot
-          if (fillState[c][s] == 1){
+          if (fillState[c][editIdx(c, s)] == 1){
             display2.drawPixel(x + cellW/2, y + cellH/2, SH110X_BLACK);
           }
         } else {
@@ -3372,11 +3529,97 @@ void SimpleSequencer::drawOverview(){
         }
 
         // Ratchet pip in the top-left corner of any cell that has ratchets
-        uint8_t rIdx = stepRatchet[c][s];
+        uint8_t rIdx = stepRatchet[c][editIdx(c, s)];
         if (rIdx == 0 && trigMachine[c] != TM_OFF) rIdx = machineRatchet[c][s];
         if (rIdx > 0){
           display2.drawPixel(x + 1, y + 1,
                              (active || isPhCol) ? SH110X_BLACK : SH110X_WHITE);
+        }
+      }
+    }
+    display2.display();
+    return;
+  }
+
+  // ── Menu 5: Pages mode — full pattern overview across pages ─────
+  if (activeMenu == 5){
+    display2.setTextColor(SH110X_WHITE);
+    display2.setTextSize(1);
+    // Top: channel + page summary
+    display2.setCursor(2, 1);
+    display2.print("CH"); display2.print(ch + 1);
+    display2.print("  "); display2.print(numPages[ch]); display2.print(" PAGE");
+    if (numPages[ch] > 1) display2.print("S");
+    // Right side: edit page indicator
+    display2.setCursor(98, 1);
+    display2.print("EDIT P"); display2.print(editPage[ch] + 1);
+    display2.drawFastHLine(2, 10, 124, SH110X_WHITE);
+
+    // Show all pages stacked vertically — each page is one row of 16 cells.
+    // 4 rows of 8 px height max (32px total), with channel page label on the left.
+    const int gridY = 13;
+    const int rowH = 12; // 10 cell + 2 gap
+    const int cellW = 6, cellH = 9, gapX = 1;
+    const int labelW = 12;
+    for (uint8_t pg = 0; pg < MAX_PAGES; pg++){
+      int y = gridY + pg * rowH;
+      bool exists = (pg < numPages[ch]);
+      bool isEdit = (pg == editPage[ch]);
+      bool isPlay = isRunning && (pg == (uint8_t)(numPages[ch] > 0 ? (globalPage % numPages[ch]) : 0));
+
+      // Label box
+      if (isEdit){
+        display2.fillRect(0, y, labelW, cellH, SH110X_WHITE);
+        display2.setTextColor(SH110X_BLACK);
+      } else if (exists){
+        display2.drawRect(0, y, labelW, cellH, SH110X_WHITE);
+        display2.setTextColor(SH110X_WHITE);
+      } else {
+        display2.drawPixel(labelW/2, y + cellH/2, SH110X_WHITE);
+        display2.setTextColor(SH110X_WHITE);
+      }
+      if (exists){
+        display2.setCursor(3, y + 1);
+        display2.print("P"); display2.print(pg + 1);
+      }
+      // Playhead chevron above the row
+      if (isPlay){
+        display2.drawPixel(labelW/2 - 1, y - 2, SH110X_WHITE);
+        display2.drawPixel(labelW/2,     y - 2, SH110X_WHITE);
+        display2.drawPixel(labelW/2 + 1, y - 2, SH110X_WHITE);
+      }
+      display2.setTextColor(SH110X_WHITE);
+
+      // Step cells for this page
+      uint16_t base = (uint16_t)pg * NUM_STEPS;
+      for (uint8_t s = 0; s < NUM_STEPS; s++){
+        int x = labelW + 2 + s * (cellW + gapX);
+        bool on;
+        if (!exists){
+          on = false;
+        } else if (trigMachine[ch] != TM_OFF){
+          // For machines: the live machinePattern only reflects current play page.
+          // Show overlays distinctly; pattern only meaningful on play page.
+          uint8_t ov = machineOverlay[ch][base + s];
+          if (ov == 1) on = true;
+          else if (ov == 2) on = false;
+          else on = (pg == (uint8_t)(globalPage % numPages[ch])) && machinePattern[ch][s];
+        } else if (euclidEnabled[ch]){
+          on = euclidPattern[ch][base + s];
+        } else {
+          on = steps[ch][base + s];
+        }
+        // Playhead column highlight only on the currently-playing page
+        bool ph = isPlay && (s == currentStep);
+        if (ph && on){
+          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        } else if (ph){
+          display2.drawRect(x, y, cellW, cellH, SH110X_WHITE);
+        } else if (on){
+          display2.fillRect(x, y, cellW, cellH, SH110X_WHITE);
+        } else if (exists){
+          // Faint grid dot
+          display2.drawPixel(x + cellW/2, y + cellH/2, SH110X_WHITE);
         }
       }
     }

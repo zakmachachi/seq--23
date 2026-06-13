@@ -63,6 +63,10 @@ static const uint8_t OLED2_SCL_PIN = 16;
 // Sequencer parameters
 static const uint8_t NUM_CHANNELS = 7;
 static const uint8_t NUM_STEPS = 16;
+// Up to 4 pages per channel (Digitakt-style). Per-step arrays grow to
+// NUM_STEPS * MAX_PAGES = 64 cells.
+static const uint8_t MAX_PAGES = 4;
+static const uint16_t TOTAL_STEPS = (uint16_t)NUM_STEPS * (uint16_t)MAX_PAGES;
 
 // MIDI TX/RX: keep defaults unless your PCB remapped MIDI
 // MIDI TX/RX: updated for new PCB

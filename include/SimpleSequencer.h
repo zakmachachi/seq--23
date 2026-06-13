@@ -37,19 +37,29 @@ class SimpleSequencer {
     void internalClockTick();
 
   private:
-    bool steps[NUM_CHANNELS][NUM_STEPS];
+    bool steps[NUM_CHANNELS][TOTAL_STEPS];
     bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)
-    bool euclidPattern[NUM_CHANNELS][NUM_STEPS];
+    bool euclidPattern[NUM_CHANNELS][TOTAL_STEPS];
     uint8_t pulses[NUM_CHANNELS];
     uint8_t euclidOffset[NUM_CHANNELS];
     uint8_t retrig[NUM_CHANNELS];
-    // --- UPDATED: Per-Step Parameter Arrays ---
-    uint8_t pitch[NUM_CHANNELS][NUM_STEPS];  // per-step pitch (MIDI note)
-    uint8_t noteLen[NUM_CHANNELS][NUM_STEPS]; // per-step length index into noteLenTicks
-    uint8_t stepRatchet[NUM_CHANNELS][NUM_STEPS]; // per-step ratchet count (0 = off)
-    // --- ACCENT / SLIDE (TB-303 style) ---
-    uint8_t stepVelocity[NUM_CHANNELS][NUM_STEPS]; // 255 = use channel default
-    bool stepSlide[NUM_CHANNELS][NUM_STEPS];
+    // --- Per-step parameter arrays (now per-page across all NUM_STEPS*MAX_PAGES slots) ---
+    uint8_t pitch[NUM_CHANNELS][TOTAL_STEPS];
+    uint8_t noteLen[NUM_CHANNELS][TOTAL_STEPS];
+    uint8_t stepRatchet[NUM_CHANNELS][TOTAL_STEPS];
+    uint8_t stepVelocity[NUM_CHANNELS][TOTAL_STEPS];
+    bool stepSlide[NUM_CHANNELS][TOTAL_STEPS];
+    // --- Pages mode (Digitakt-style 1..4 pages per track) ---
+    uint8_t numPages[NUM_CHANNELS]; // 1..MAX_PAGES per channel
+    uint8_t editPage[NUM_CHANNELS]; // 0..(numPages-1) which page the user is editing
+    uint8_t globalPage;             // 0..(MAX_PAGES-1) — wraps every full 16-step bar
+    inline uint16_t editIdx(uint8_t ch, uint8_t s) const {
+      return (uint16_t)editPage[ch] * (uint16_t)NUM_STEPS + s;
+    }
+    inline uint16_t playIdx(uint8_t ch, uint8_t s) const {
+      uint8_t pg = numPages[ch] > 0 ? (globalPage % numPages[ch]) : 0;
+      return (uint16_t)pg * (uint16_t)NUM_STEPS + s;
+    }
     int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
     
@@ -73,16 +83,17 @@ class SimpleSequencer {
     uint8_t trigMachine[NUM_CHANNELS];           // active machine type per channel
     uint8_t trigDensity[NUM_CHANNELS];           // 0..100 density / threshold
     uint8_t trigShift[NUM_CHANNELS];             // 0..15 step shift
-    uint8_t machineOverlay[NUM_CHANNELS][NUM_STEPS]; // 0=auto, 1=force-on, 2=force-off
-    bool machinePattern[NUM_CHANNELS][NUM_STEPS];    // cached pattern from generator
-    uint8_t machineRatchet[NUM_CHANNELS][NUM_STEPS]; // 0..5 ratchet count from machine (kick fills)
+    uint8_t machineOverlay[NUM_CHANNELS][TOTAL_STEPS]; // 0=auto, 1=force-on, 2=force-off (per-page)
+    bool machinePattern[NUM_CHANNELS][NUM_STEPS];      // cached pattern for the current play page
+    uint8_t machineRatchet[NUM_CHANNELS][NUM_STEPS];   // cached ratchet for the current play page
     // Kick-specific live-performance params (per channel)
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
     void regenerateMachinePattern(uint8_t ch);
-    bool isStepActive(uint8_t ch, uint8_t step);
+    bool isStepActive(uint8_t ch, uint16_t absStep);
     void drawTrigMachineView();
+    void drawPagesView();
 
     // runtime
     uint32_t bpm;
@@ -97,7 +108,7 @@ class SimpleSequencer {
     // --- FILL / PERFORMANCE MODES ---
     bool fillModeActive = false; // live hold modifier (CHANNEL_BTN_PIN)
     // per-step Fill memory: 0 = normal, 1 = fill (plays only when Fill held), 2 = anti-fill (never plays)
-    uint8_t fillState[NUM_CHANNELS][NUM_STEPS];
+    uint8_t fillState[NUM_CHANNELS][TOTAL_STEPS];
     uint8_t euclidScaleMode[NUM_CHANNELS];
     // UI focus helpers
     uint8_t focusEncoder = 0;        // 0 = none, 1-4 = encoder focused
@@ -204,14 +215,14 @@ class SimpleSequencer {
       uint8_t savedPulses[NUM_CHANNELS];
       uint8_t savedEuclidOffset[NUM_CHANNELS];
       uint8_t savedEuclidScaleMode[NUM_CHANNELS];
-      bool savedSteps[NUM_CHANNELS][NUM_STEPS];
-      uint8_t savedPitch[NUM_CHANNELS][NUM_STEPS];
-      uint8_t savedNoteLen[NUM_CHANNELS][NUM_STEPS];
-      uint8_t savedFillStep[NUM_CHANNELS][NUM_STEPS];
-      uint8_t savedStepRatchet[NUM_CHANNELS][NUM_STEPS];
+      bool savedSteps[NUM_CHANNELS][TOTAL_STEPS];
+      uint8_t savedPitch[NUM_CHANNELS][TOTAL_STEPS];
+      uint8_t savedNoteLen[NUM_CHANNELS][TOTAL_STEPS];
+      uint8_t savedFillStep[NUM_CHANNELS][TOTAL_STEPS];
+      uint8_t savedStepRatchet[NUM_CHANNELS][TOTAL_STEPS];
       // Persisted Accent/Slide
-      uint8_t savedStepVelocity[NUM_CHANNELS][NUM_STEPS];
-      uint8_t savedStepSlide[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedStepVelocity[NUM_CHANNELS][TOTAL_STEPS];
+      uint8_t savedStepSlide[NUM_CHANNELS][TOTAL_STEPS];
       uint8_t savedChannelVelocity[NUM_CHANNELS];
       // Persisted generative parameters
       uint8_t savedRandomSlideProb[NUM_CHANNELS];
@@ -222,11 +233,13 @@ class SimpleSequencer {
       uint8_t savedTrigMachine[NUM_CHANNELS];
       uint8_t savedTrigDensity[NUM_CHANNELS];
       uint8_t savedTrigShift[NUM_CHANNELS];
-      uint8_t savedMachineOverlay[NUM_CHANNELS][NUM_STEPS];
+      uint8_t savedMachineOverlay[NUM_CHANNELS][TOTAL_STEPS];
       // Kick-specific live params (v8)
       uint8_t savedKickNoteSpread[NUM_CHANNELS];
       uint8_t savedKickRatchetProb[NUM_CHANNELS];
       uint8_t savedKickExtrasAreFills[NUM_CHANNELS];
+      // Pages mode state (v10)
+      uint8_t savedNumPages[NUM_CHANNELS];
     };
     void saveState();
     void loadState();
