@@ -108,6 +108,8 @@ SimpleSequencer::SimpleSequencer()
     kickNoteSpread[c] = 0;
     kickRatchetProb[c] = 0;
     kickExtrasAreFills[c] = 0;
+    kickExtraCount[c] = 0;
+    for (uint8_t i = 0; i < 12; i++) kickExtraSeq[c][i] = 0;
     // Gate length default per channel
     noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
   }
@@ -1245,32 +1247,50 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     return;
   }
 
-  // KICK uses a custom "add one extra at a time" scheme so the player can
-  // dial individual kicks in. Other machines use the threshold rule.
+  // KICK accumulates extras: each density tick adds one new random source
+  // position to the channel's stored sequence, and previous positions stay
+  // put. Decreasing density just plays fewer entries; increasing again
+  // restores them (only adds beyond the current count get new draws).
   if (m == TM_KICK){
-    // Reset, then place 4-on-the-floor base kicks (shift-aware).
+    // Place 4-on-the-floor base kicks (shift-aware) and clear ratchet cache.
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
       machinePattern[ch][s] = (W_KICK[src] == 100);
       machineRatchet[ch][s] = 0;
     }
-    // Collect every non-base visible position, then shuffle and pick the
-    // first `density` so extras land randomly between the 4/4 kicks each
-    // regeneration — fresh placement every time the user touches a knob.
-    uint8_t extras[12];
-    uint8_t nExtras = 0;
-    for (uint8_t s = 0; s < NUM_STEPS && nExtras < 12; s++){
-      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-      if (W_KICK[src] != 100) extras[nExtras++] = s;
-    }
-    for (int i = (int)nExtras - 1; i > 0; i--){
-      int j = (int)random(0, i + 1);
-      uint8_t tmp = extras[i]; extras[i] = extras[j]; extras[j] = tmp;
-    }
     uint8_t n = density;
-    if (n > nExtras) n = nExtras;
-    for (uint8_t i = 0; i < n; i++){
-      machinePattern[ch][extras[i]] = true;
+    if (n > 12) n = 12;
+
+    // If density grew beyond what's stored, draw new random source positions
+    // from the unused (non-base, not-already-picked) pool.
+    if (n > kickExtraCount[ch]){
+      bool used[NUM_STEPS] = {false};
+      // base source positions = 0,4,8,12 (W_KICK==100)
+      for (uint8_t s = 0; s < NUM_STEPS; s++){
+        if (W_KICK[s] == 100) used[s] = true;
+      }
+      for (uint8_t i = 0; i < kickExtraCount[ch]; i++){
+        used[kickExtraSeq[ch][i]] = true;
+      }
+      // Build unused pool, then random-pick `need` from it without
+      // replacement.
+      uint8_t pool[NUM_STEPS];
+      uint8_t nPool = 0;
+      for (uint8_t s = 0; s < NUM_STEPS; s++) if (!used[s]) pool[nPool++] = s;
+      uint8_t need = n - kickExtraCount[ch];
+      while (need > 0 && nPool > 0 && kickExtraCount[ch] < 12){
+        int pick = (int)random(0, (int)nPool);
+        kickExtraSeq[ch][kickExtraCount[ch]++] = pool[pick];
+        pool[pick] = pool[--nPool];
+        need--;
+      }
+    }
+    // Render: first n entries of the stored sequence, shift applied.
+    uint8_t render = (n < kickExtraCount[ch]) ? n : kickExtraCount[ch];
+    for (uint8_t i = 0; i < render; i++){
+      uint8_t srcPos = kickExtraSeq[ch][i];
+      uint8_t visPos = (srcPos + shift) % NUM_STEPS;
+      machinePattern[ch][visPos] = true;
     }
   } else {
     for (uint8_t s = 0; s < NUM_STEPS; s++){
@@ -2556,6 +2576,7 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
   kickNoteSpread[ch] = 0;
   kickRatchetProb[ch] = 0;
   kickExtrasAreFills[ch] = 0;
+  kickExtraCount[ch] = 0;
   // Silence any sustaining note on this channel
   if (lastNotePlaying[ch] < 128){
     midiSendNoteOff(midiChannel[ch] & 0x0F, lastNotePlaying[ch], 0);

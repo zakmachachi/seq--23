@@ -90,6 +90,11 @@ class SimpleSequencer {
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
+    // Accumulating ordered list of extra-kick source positions per channel
+    // so density adds one new random spot at a time and previously-placed
+    // kicks stay put until the user clears or switches machine.
+    uint8_t kickExtraSeq[NUM_CHANNELS][12];
+    uint8_t kickExtraCount[NUM_CHANNELS];
     void regenerateMachinePattern(uint8_t ch);
     bool isStepActive(uint8_t ch, uint16_t absStep);
     void drawTrigMachineView();
