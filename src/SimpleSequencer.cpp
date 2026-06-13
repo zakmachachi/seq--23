@@ -1683,12 +1683,9 @@ void SimpleSequencer::runEngine(){
         // Just wrapped a full 16-step bar — advance page (mod MAX_PAGES).
         globalPage = (globalPage + 1) % MAX_PAGES;
       }
-      // Regenerate machine pattern for any channel whose page changed
-      if (currentStep == 0){
-        for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
-          if (trigMachine[ch] != TM_OFF) regenerateMachinePattern(ch);
-        }
-      }
+      // NOTE: do NOT regenerate machine patterns on page wrap. Random
+      // placements (kick extras, spread, ratchet rolls) are baked in when
+      // the user touches a knob and stay stable until the next edit.
       // trigger channels that have the step enabled
         for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
           bool isActive = isStepActive(ch, playIdx(ch, currentStep));
