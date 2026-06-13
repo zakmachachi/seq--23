@@ -100,6 +100,12 @@ SimpleSequencer::SimpleSequencer()
       machinePattern[c][s] = false;
       machineRatchet[c][s] = 0;
     }
+    // Kick-specific defaults
+    kickNoteSpread[c] = 0;
+    kickRatchetProb[c] = 0;
+    kickExtrasAreFills[c] = 0;
+    // Gate length default per channel
+    noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
   }
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
@@ -107,7 +113,6 @@ SimpleSequencer::SimpleSequencer()
     matrixLastDebounce[k] = 0;
   }
   lastMidiClockMicros = 0;
-  noteLenIdx = NOTE_LEN_DEFAULT_IDX;
   absoluteTickCounter = 0;
 }
 
@@ -375,7 +380,7 @@ void SimpleSequencer::loop(){
       Serial.print("running="); Serial.print(isRunning);
       Serial.print(" bpm="); Serial.print(bpm);
       Serial.print(" sel=CH"); Serial.print(selectedChannel + 1);
-      Serial.print(" gateIdx="); Serial.println(noteLenIdx);
+      Serial.print(" gateIdx="); Serial.println(noteLenIdx[selectedChannel]);
       for (uint8_t cc = 0; cc < NUM_CHANNELS; cc++){
         uint8_t activeSteps = 0, fillSteps = 0;
         for (uint8_t s = 0; s < NUM_STEPS; s++){
@@ -606,7 +611,7 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
         steps[selectedChannel][i] = newState;
         if (newState){
           if (pitch[selectedChannel][i] == 255) pitch[selectedChannel][i] = channelPitch[selectedChannel];
-          if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx;
+          if (noteLen[selectedChannel][i] == 255) noteLen[selectedChannel][i] = noteLenIdx[selectedChannel];
           if (stepVelocity[selectedChannel][i] == 255) stepVelocity[selectedChannel][i] = channelVelocity[selectedChannel];
         }
       } else {
@@ -851,13 +856,14 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("SCALE="); Serial.println(mode);
         break;
       }
-      case 2: { // Gate length (global)
-        int prev = noteLenIdx;
-        noteLenIdx = (uint8_t)constrain((int)noteLenIdx + ticks, 0, (int)NOTE_LEN_COUNT - 1);
-        if (noteLenIdx != prev && euclidScaleMode[ch] != 0){
-          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][s] = noteLenIdx;
+      case 2: { // Gate length (per-channel)
+        int prev = noteLenIdx[ch];
+        noteLenIdx[ch] = (uint8_t)constrain(prev + ticks, 0, (int)NOTE_LEN_COUNT - 1);
+        if (noteLenIdx[ch] != prev && euclidScaleMode[ch] != 0){
+          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][s] = noteLenIdx[ch];
         }
-        Serial.print("GATE="); Serial.println(noteLenIdx);
+        Serial.print("GATE CH"); Serial.print(ch+1);
+        Serial.print("="); Serial.println(noteLenIdx[ch]);
         break;
       }
       case 3: { // Random Slide probability — re-roll slides immediately
@@ -912,7 +918,36 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("SHIFT="); Serial.println(trigShift[ch]);
         break;
       }
-      // Pots 4-6 reserved for future per-machine params (kick fill, ratchet density, etc.)
+      // Pots 4-6: per-machine extras. Currently only KICK uses them.
+      case 3: { // Pot 4: kick note spread (0..5 semitones)
+        if (trigMachine[ch] == TM_KICK){
+          kickNoteSpread[ch] = (uint8_t)constrain((int)kickNoteSpread[ch] + ticks, 0, 5);
+          regenerateMachinePattern(ch);
+          Serial.print("KICK SPR="); Serial.println(kickNoteSpread[ch]);
+        }
+        break;
+      }
+      case 4: { // Pot 5: kick ratchet probability (0..100 %)
+        if (trigMachine[ch] == TM_KICK){
+          kickRatchetProb[ch] = (uint8_t)constrain((int)kickRatchetProb[ch] + ticks, 0, 100);
+          regenerateMachinePattern(ch);
+          Serial.print("KICK RCH%="); Serial.println(kickRatchetProb[ch]);
+        }
+        break;
+      }
+      case 5: { // Pot 6: kick "extras as fill" toggle
+        if (trigMachine[ch] == TM_KICK){
+          int v = (int)kickExtrasAreFills[ch] + ticks;
+          if (v < 0) v = 0;
+          if (v > 1) v = 1;
+          if ((uint8_t)v != kickExtrasAreFills[ch]){
+            kickExtrasAreFills[ch] = (uint8_t)v;
+            Serial.print("KICK FILL=");
+            Serial.println(kickExtrasAreFills[ch] ? "ON" : "OFF");
+          }
+        }
+        break;
+      }
       default: break;
     }
     return;
@@ -952,10 +987,11 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
       Serial.print("VEL="); Serial.println(channelVelocity[selectedChannel]);
       break;
 
-    case 4:  // Pot 5: gate length
-      noteLenIdx = (uint8_t)constrain(
-        (int)noteLenIdx + ticks, 0, (int)NOTE_LEN_COUNT - 1);
-      Serial.print("GATE="); Serial.println(noteLenIdx);
+    case 4:  // Pot 5: gate length (per-channel)
+      noteLenIdx[selectedChannel] = (uint8_t)constrain(
+        (int)noteLenIdx[selectedChannel] + ticks, 0, (int)NOTE_LEN_COUNT - 1);
+      Serial.print("GATE CH"); Serial.print(selectedChannel + 1);
+      Serial.print("="); Serial.println(noteLenIdx[selectedChannel]);
       break;
 
     case 5: { // Pot 6: slide probability — re-rolls slides immediately (mirrors Menu 1)
@@ -970,11 +1006,11 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572473; // Unique signature (v7 — NUM_CHANNELS=7)
+  data.magicNumber = 13572475; // Unique signature (v9 — per-channel gate)
   data.savedBpm = bpm;
-  data.savedNoteLenIdx = noteLenIdx;
 
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+    data.savedNoteLenIdx[c] = noteLenIdx[c];
     data.savedChannelPitch[c] = channelPitch[c];
     data.savedMuted[c] = muted[c];
     data.savedEuclidEnabled[c] = euclidEnabled[c];
@@ -1001,6 +1037,9 @@ void SimpleSequencer::saveState() {
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       data.savedMachineOverlay[c][s] = machineOverlay[c][s];
     }
+    data.savedKickNoteSpread[c]     = kickNoteSpread[c];
+    data.savedKickRatchetProb[c]    = kickRatchetProb[c];
+    data.savedKickExtrasAreFills[c] = kickExtrasAreFills[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -1019,12 +1058,12 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572473) {
+  if (data.magicNumber == 13572475) {
     bpm = data.savedBpm;
-    noteLenIdx = data.savedNoteLenIdx;
-    if (noteLenIdx >= NOTE_LEN_COUNT) noteLenIdx = NOTE_LEN_DEFAULT_IDX;
 
     for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+      noteLenIdx[c] = data.savedNoteLenIdx[c];
+      if (noteLenIdx[c] >= NOTE_LEN_COUNT) noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
       channelPitch[c] = data.savedChannelPitch[c];
       muted[c] = data.savedMuted[c];
       euclidEnabled[c] = data.savedEuclidEnabled[c];
@@ -1055,13 +1094,16 @@ void SimpleSequencer::loadState() {
         uint8_t ov = data.savedMachineOverlay[c][s];
         machineOverlay[c][s] = (ov <= 2) ? ov : 0;
       }
+      kickNoteSpread[c]     = (data.savedKickNoteSpread[c] <= 5)     ? data.savedKickNoteSpread[c]     : 0;
+      kickRatchetProb[c]    = (data.savedKickRatchetProb[c] <= 100)  ? data.savedKickRatchetProb[c]    : 0;
+      kickExtrasAreFills[c] = (data.savedKickExtrasAreFills[c] <= 1) ? data.savedKickExtrasAreFills[c] : 0;
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
-    Serial.println("State loaded from EEPROM (v7).");
+    Serial.println("State loaded from EEPROM (v9).");
   } else {
-    Serial.println("No saved state (v7) found. Booting blank.");
+    Serial.println("No saved state (v9) found. Booting blank.");
   }
 }
 
@@ -1071,10 +1113,11 @@ void SimpleSequencer::loadState() {
 // Weight 100 means "always on at any density >= 0".
 // Step indices below are 0-based: step 1 in the user's terminology = idx 0.
 
-// KICK: 4-on-the-floor base (idx 0,4,8,12). Density adds 1/8 offbeats (2,6,10,14)
-// then 1/16 in-betweens. Onbeats are weight 100 so they survive any density.
+// KICK: 4-on-the-floor skeleton (idx 0,4,8,12 at weight 100, always on).
+// Other steps weighted lower so density needs to climb high before any
+// extras come in — much sparser feel suited to live performance.
 static const uint8_t W_KICK[16] = {
-  100, 25, 60, 25, 100, 25, 60, 25, 100, 25, 60, 25, 100, 25, 60, 35
+  100, 10, 30, 10, 100, 10, 30, 10, 100, 10, 30, 10, 100, 10, 30, 18
 };
 
 // HIHAT: starts dense at high density, erodes at low density. Offbeats (2,6,10,14)
@@ -1144,18 +1187,40 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     machineRatchet[ch][s] = 0;
   }
 
-  // KICK fill notes: at higher density, non-base steps get ratchets.
-  // Higher density and lower-weighted (rarer) steps get faster ratchets.
-  if (m == TM_KICK && density >= 65){
+  // KICK extras: for every step that's not a 4-on-the-floor base, roll
+  // independently for note spread (transposes the pitch up by 1..N
+  // semitones) and a ratchet (random 1..3 hits). The fill toggle and
+  // visibility/play decision is handled later in isStepActive().
+  if (m == TM_KICK){
+    uint8_t spread = kickNoteSpread[ch] > 5 ? 5 : kickNoteSpread[ch];
+    uint8_t ratProb = kickRatchetProb[ch] > 100 ? 100 : kickRatchetProb[ch];
     for (uint8_t s = 0; s < NUM_STEPS; s++){
-      if (!machinePattern[ch][s]) continue;
+      if (!machinePattern[ch][s]){
+        // Clear any stale pitch override on inactive steps
+        pitch[ch][s] = 255;
+        continue;
+      }
       uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-      if (W_KICK[src] == 100) continue; // skip 4-on-the-floor base
-      // Map density to ratchet count: higher density + lower weight => more hits
-      uint8_t r = 1;
-      if (density >= 85 && W_KICK[src] < 50) r = 3;
-      else if (density >= 75) r = 2;
-      machineRatchet[ch][s] = r;
+      bool isBase = (W_KICK[src] == 100);
+      if (isBase){
+        pitch[ch][s] = 255;          // base = channel default note
+        machineRatchet[ch][s] = 0;   // base never ratchets
+        continue;
+      }
+      // Extra step: random note spread above the root
+      if (spread > 0){
+        uint8_t off = (uint8_t)random(1, (int)spread + 1);
+        int pn = (int)channelPitch[ch] + (int)off;
+        pitch[ch][s] = (uint8_t)constrain(pn, 0, 127);
+      } else {
+        pitch[ch][s] = 255;
+      }
+      // Random chance of ratchet
+      if (ratProb > 0 && (uint8_t)random(0, 100) < ratProb){
+        machineRatchet[ch][s] = (uint8_t)random(1, 4); // 1..3 hits
+      } else {
+        machineRatchet[ch][s] = 0;
+      }
     }
   }
 }
@@ -1168,7 +1233,14 @@ bool SimpleSequencer::isStepActive(uint8_t ch, uint8_t step){
     uint8_t ov = machineOverlay[ch][step];
     if (ov == 1) return true;
     if (ov == 2) return false;
-    return machinePattern[ch][step];
+    bool on = machinePattern[ch][step];
+    // Kick "extras as fill" toggle: non-base kicks only fire while Fill is held
+    if (on && trigMachine[ch] == TM_KICK && kickExtrasAreFills[ch]){
+      uint8_t src = (step + NUM_STEPS - trigShift[ch]) % NUM_STEPS;
+      bool isBase = (W_KICK[src] == 100);
+      if (!isBase && !fillModeActive) return false;
+    }
+    return on;
   }
   if (euclidEnabled[ch]) return euclidPattern[ch][step];
   return steps[ch][step];
@@ -1272,7 +1344,7 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
     stepSlide[ch][s]    = (random(0, 100) < randomSlideProb[ch]);
     int v = (int)channelVelocity[ch] + random(-10, 10);
     stepVelocity[ch][s] = (uint8_t)constrain(v, 0, 127);
-    noteLen[ch][s]      = noteLenIdx;
+    noteLen[ch][s]      = noteLenIdx[ch];
     // Note: steps[] is intentionally NOT touched here. Whether a step fires
     // is the user's rhythm decision (manual toggle or Euclid). Generative
     // mode only paints the pitches.
@@ -1560,7 +1632,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 
   // 3. RATCHET & GATE LENGTH
   uint8_t lenIdx = noteLen[ch][currentStep];
-  if (lenIdx == 255) lenIdx = noteLenIdx;
+  if (lenIdx == 255) lenIdx = noteLenIdx[ch];
 
   uint8_t rIdx = stepRatchet[ch][currentStep];
   // Merge machine-driven ratchets (e.g., kick fill notes) with user P-Locks
@@ -1887,7 +1959,7 @@ void SimpleSequencer::drawDisplay(){
         } else {
           // GATE UI
           uint8_t lenIdx = noteLen[selectedChannel][heldStep];
-          if (lenIdx == 255) lenIdx = noteLenIdx;
+          if (lenIdx == 255) lenIdx = noteLenIdx[selectedChannel];
           display.setTextSize(2); display.setTextColor(SH110X_WHITE);
           display.setCursor(4, 2); display.print("GATE");
           display.setTextSize(1); display.setCursor(90, 6);
@@ -1896,14 +1968,14 @@ void SimpleSequencer::drawDisplay(){
           display.print(noteLenNames[lenIdx]);
         }
       } else {
-        // Global gate length — big
+        // Channel default gate length — big
         display.setTextSize(2);
         display.setTextColor(SH110X_WHITE);
         display.setCursor(4, 2);
         display.print("GATE");
         display.setTextSize(4);
         display.setCursor(4, 26);
-        display.print(noteLenNames[noteLenIdx]);
+        display.print(noteLenNames[noteLenIdx[selectedChannel]]);
       }
       display.display();
       updateLEDs();
@@ -1973,7 +2045,7 @@ void SimpleSequencer::drawDisplay(){
   // Note length: reduce font to avoid awkward overflow
   display.setTextSize(2);
   display.setCursor(76, 18);
-  display.print(noteLenNames[noteLenIdx]);
+  display.print(noteLenNames[noteLenIdx[selectedChannel]]);
 
   // Row 3: Euclid status (BPM tucked bottom-right)
   display.setTextSize(1);
@@ -2373,6 +2445,9 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
   trigMachine[ch] = TM_OFF;
   trigDensity[ch] = 50;
   trigShift[ch] = 0;
+  kickNoteSpread[ch] = 0;
+  kickRatchetProb[ch] = 0;
+  kickExtrasAreFills[ch] = 0;
   // Silence any sustaining note on this channel
   if (lastNotePlaying[ch] < 128){
     midiSendNoteOff(midiChannel[ch] & 0x0F, lastNotePlaying[ch], 0);
@@ -2453,7 +2528,7 @@ void SimpleSequencer::drawNotesView(){
   display.setCursor(2, 46);
   display.print("VEL:"); display.print(channelVelocity[ch]);
   display.setCursor(64, 46);
-  display.print("GT:"); display.print(noteLenNames[noteLenIdx]);
+  display.print("GT:"); display.print(noteLenNames[noteLenIdx[ch]]);
 
   display.setCursor(2, 57);
   display.print("BPM:"); display.print(bpm);
@@ -2527,7 +2602,7 @@ void SimpleSequencer::drawEuclidView(){
   display.setCursor(2, 38);
   display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
   display.setCursor(56, 38);
-  display.print("Gate:"); display.print(noteLenNames[noteLenIdx]);
+  display.print("Gate:"); display.print(noteLenNames[noteLenIdx[selectedChannel]]);
   display.setCursor(2, 46);
   display.print("Sld:"); display.print(randomSlideProb[selectedChannel]); display.print("%");
 
@@ -2660,17 +2735,27 @@ void SimpleSequencer::drawTrigMachineView(){
   }
   display.setTextColor(SH110X_WHITE);
 
-  // Param row: machine | density | shift
+  // Param row: machine | density | shift  (+ kick extras when KICK is active)
   uint8_t ch = selectedChannel;
   uint8_t m = trigMachine[ch];
   if (m >= TM_COUNT) m = 0;
   display.setTextSize(1);
-  display.setCursor(2, 12);
-  display.print("M:"); display.print(machineNames[m]);
-  display.setCursor(56, 12);
-  display.print("D:"); display.print(trigDensity[ch]);
-  display.setCursor(94, 12);
-  display.print("S:"); display.print(trigShift[ch]);
+  if (m == TM_KICK){
+    // Compact kick layout — fits all six in 120 px.
+    display.setCursor(2, 12);
+    display.print("KCK D"); display.print(trigDensity[ch]);
+    display.print(" S"); display.print(trigShift[ch]);
+    display.print(" P"); display.print(kickNoteSpread[ch]);
+    display.print(" R"); display.print(kickRatchetProb[ch]);
+    display.print(kickExtrasAreFills[ch] ? " F" : "");
+  } else {
+    display.setCursor(2, 12);
+    display.print("M:"); display.print(machineNames[m]);
+    display.setCursor(56, 12);
+    display.print("D:"); display.print(trigDensity[ch]);
+    display.setCursor(94, 12);
+    display.print("S:"); display.print(trigShift[ch]);
+  }
 
   // Step grid: 2 rows x 8 cols, showing machine + overlay state
   // Empty box = machine off, no override
@@ -2789,13 +2874,52 @@ void SimpleSequencer::drawOverview(){
     // Big machine icon centred horizontally at the top
     drawMachineIcon(display2, 64, 18, m);
 
-    // Machine name (size 2, centred)
+    // Machine name (size 2, centred). Moves up when KICK to leave room for
+    // the live-params row.
     const char* nm = names[m];
-    int textW = (int)strlen(nm) * 12; // size 2 chars are ~12px wide
+    int textW = (int)strlen(nm) * 12;
     int tx = (128 - textW) / 2; if (tx < 0) tx = 0;
     display2.setTextSize(2);
-    display2.setCursor(tx, 38);
+    display2.setCursor(tx, m == TM_KICK ? 30 : 38);
     display2.print(nm);
+
+    // Kick live params row (only when KICK is the active machine).
+    // Compact text + tiny segmented bars under the title.
+    if (m == TM_KICK){
+      display2.setTextColor(SH110X_WHITE);
+      display2.setTextSize(1);
+      // Spread (0..5) as 5 small filled boxes
+      display2.setCursor(2, 46);
+      display2.print("SP");
+      for (int i = 0; i < 5; i++){
+        int bx = 14 + i * 4;
+        if (i < (int)kickNoteSpread[ch]){
+          display2.fillRect(bx, 47, 3, 5, SH110X_WHITE);
+        } else {
+          display2.drawRect(bx, 47, 3, 5, SH110X_WHITE);
+        }
+      }
+      // Ratchet probability (0..100) as a small bar
+      display2.setCursor(40, 46);
+      display2.print("RT");
+      int rbX = 52, rbW = 36, rbH = 5;
+      display2.drawRect(rbX, 47, rbW, rbH, SH110X_WHITE);
+      int rfw = (kickRatchetProb[ch] * (rbW - 2) + 50) / 100;
+      if (rfw > rbW - 2) rfw = rbW - 2;
+      if (rfw > 0) display2.fillRect(rbX + 1, 48, rfw, rbH - 2, SH110X_WHITE);
+      // Fill toggle indicator
+      if (kickExtrasAreFills[ch]){
+        display2.fillRect(94, 46, 18, 7, SH110X_WHITE);
+        display2.setTextColor(SH110X_BLACK);
+        display2.setCursor(96, 47);
+        display2.print("FILL");
+        display2.setTextColor(SH110X_WHITE);
+      } else {
+        display2.drawRect(94, 46, 18, 7, SH110X_WHITE);
+        display2.setCursor(96, 47);
+        display2.print("LIVE");
+      }
+    }
 
     // Density fill bar at the bottom — Digitakt-style 8-segment block.
     // Live density on the channel; a thin "leading edge" pulse animates the
@@ -2807,14 +2931,12 @@ void SimpleSequencer::drawOverview(){
     if (fillW > barW - 2) fillW = barW - 2;
     if (fillW > 0){
       display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
-      // 8 segment dividers cut the fill into Digitone-style blocks
       for (int i = 1; i < 8; i++){
         int sx = barX + 1 + (i * (barW - 2)) / 8;
         if (sx < barX + 1 + fillW){
           display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
         }
       }
-      // Pulsing highlight at the leading edge (gives a "filling" feel)
       int pulsePos = barX + 1 + fillW - 1;
       if ((now / 100) % 2 == 0){
         display2.drawFastVLine(pulsePos, barY, barH, SH110X_WHITE);
@@ -2975,7 +3097,7 @@ void SimpleSequencer::drawOverview(){
         display2.print(vbuf);
       };
       miniBar("VEL",  channelVelocity[ch], 127, 16);
-      miniBar("GAT",  noteLenIdx,           10, 26);
+      miniBar("GAT",  noteLenIdx[ch],       10, 26);
       miniBar("SLD",  randomSlideProb[ch], 100, 36);
       miniBar("SPR",  octaveSpread[ch],     60, 46);
       // Hint at the bottom
@@ -3065,14 +3187,15 @@ void SimpleSequencer::drawOverview(){
         display2.print("C D E F G A B");
         break;
       }
-      case 2: { // GATE
+      case 2: { // GATE (per-channel)
         display2.setTextSize(3);
-        const char* nm = gateNames[noteLenIdx % 11];
+        uint8_t gi = noteLenIdx[ch] % 11;
+        const char* nm = gateNames[gi];
         int tw = (int)strlen(nm) * 18;
         display2.setCursor((128 - tw) / 2, 18);
         display2.print(nm);
         // Mini horizontal bar showing length relative to whole note
-        int ticks = (int)noteLenTicks[noteLenIdx % 11];
+        int ticks = (int)noteLenTicks[gi];
         const int bx = 4, by = 50, bw = 120, bh = 9;
         display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
         int fw = (ticks * (bw - 2)) / 96;

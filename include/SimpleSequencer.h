@@ -56,7 +56,7 @@ class SimpleSequencer {
     // --- MUTE & MODIFIER STATE ---
     bool muted[NUM_CHANNELS]; 
     bool startStopModifierFlag = false; 
-    uint8_t noteLenIdx; // global default length index when no step is held
+    uint8_t noteLenIdx[NUM_CHANNELS]; // per-channel default length index when no step is held
     // --- CHANNEL DEFAULT PITCHES ---
     uint8_t channelPitch[NUM_CHANNELS]; // per-channel base pitch (used when per-step pitch == 255)
     uint8_t lastNotePlaying[NUM_CHANNELS]; // last note sent per channel (for proper NoteOff)
@@ -76,6 +76,10 @@ class SimpleSequencer {
     uint8_t machineOverlay[NUM_CHANNELS][NUM_STEPS]; // 0=auto, 1=force-on, 2=force-off
     bool machinePattern[NUM_CHANNELS][NUM_STEPS];    // cached pattern from generator
     uint8_t machineRatchet[NUM_CHANNELS][NUM_STEPS]; // 0..5 ratchet count from machine (kick fills)
+    // Kick-specific live-performance params (per channel)
+    uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
+    uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
+    uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
     void regenerateMachinePattern(uint8_t ch);
     bool isStepActive(uint8_t ch, uint8_t step);
     void drawTrigMachineView();
@@ -193,7 +197,7 @@ class SimpleSequencer {
     struct SaveData {
       uint32_t magicNumber;
       uint32_t savedBpm;
-      uint8_t savedNoteLenIdx;
+      uint8_t savedNoteLenIdx[NUM_CHANNELS];
       uint8_t savedChannelPitch[NUM_CHANNELS];
       bool savedMuted[NUM_CHANNELS];
       bool savedEuclidEnabled[NUM_CHANNELS];
@@ -219,6 +223,10 @@ class SimpleSequencer {
       uint8_t savedTrigDensity[NUM_CHANNELS];
       uint8_t savedTrigShift[NUM_CHANNELS];
       uint8_t savedMachineOverlay[NUM_CHANNELS][NUM_STEPS];
+      // Kick-specific live params (v8)
+      uint8_t savedKickNoteSpread[NUM_CHANNELS];
+      uint8_t savedKickRatchetProb[NUM_CHANNELS];
+      uint8_t savedKickExtrasAreFills[NUM_CHANNELS];
     };
     void saveState();
     void loadState();
