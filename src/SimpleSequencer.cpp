@@ -817,7 +817,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // Euclid page: pulses=fast(3), offset=fast(3), scale=slow(5), velocity=med(3), gate=med(3).
   static const uint8_t divNotes[6]       = {3, 12, 3, 1, 3, 3};
   static const uint8_t divEuclid[6]      = {3, 3, 5, 3, 3, 1}; // pot 6 = slide%, native sensitivity
-  static const uint8_t divTrigMachine[6] = {5, 1, 2, 3, 3, 3}; // density (pot2) fast
+  static const uint8_t divTrigMachine[6] = {5, 4, 2, 3, 3, 3}; // density (pot2) slower for kick's 0..12 range
   static const uint8_t divDefault[6]     = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
@@ -1254,20 +1254,23 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
       machinePattern[ch][s] = (W_KICK[src] == 100);
       machineRatchet[ch][s] = 0;
     }
-    // Extra positions in deterministic priority order — 1/8 offbeats first
-    // (most musical), then last-step kick, then the rarer 1/16ths.
-    static const uint8_t kickExtraOrder[12] = {
-      2, 6, 10, 14,   // 1/8 offbeats
-      15,             // last 1/16
-      1, 3, 5, 7,     // 1/16 in-betweens
-      9, 11, 13       // remaining 1/16
-    };
+    // Collect every non-base visible position, then shuffle and pick the
+    // first `density` so extras land randomly between the 4/4 kicks each
+    // regeneration — fresh placement every time the user touches a knob.
+    uint8_t extras[12];
+    uint8_t nExtras = 0;
+    for (uint8_t s = 0; s < NUM_STEPS && nExtras < 12; s++){
+      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+      if (W_KICK[src] != 100) extras[nExtras++] = s;
+    }
+    for (int i = (int)nExtras - 1; i > 0; i--){
+      int j = (int)random(0, i + 1);
+      uint8_t tmp = extras[i]; extras[i] = extras[j]; extras[j] = tmp;
+    }
     uint8_t n = density;
-    if (n > 12) n = 12;
+    if (n > nExtras) n = nExtras;
     for (uint8_t i = 0; i < n; i++){
-      uint8_t srcPos = kickExtraOrder[i];
-      uint8_t visPos = (srcPos + shift) % NUM_STEPS;
-      machinePattern[ch][visPos] = true;
+      machinePattern[ch][extras[i]] = true;
     }
   } else {
     for (uint8_t s = 0; s < NUM_STEPS; s++){
@@ -3073,44 +3076,6 @@ void SimpleSequencer::drawOverview(){
     display2.setTextSize(2);
     display2.setCursor(tx, 26);
     display2.print(nm);
-
-    // Kick live-params row (only when KICK)
-    if (m == TM_KICK){
-      display2.setTextColor(SH110X_WHITE);
-      display2.setTextSize(1);
-      // Spread (0..5) as 5 tiny filled boxes
-      display2.setCursor(2, 43);
-      display2.print("SP");
-      for (int i = 0; i < 5; i++){
-        int bx = 14 + i * 4;
-        if (i < (int)kickNoteSpread[ch]){
-          display2.fillRect(bx, 44, 3, 5, SH110X_WHITE);
-        } else {
-          display2.drawRect(bx, 44, 3, 5, SH110X_WHITE);
-        }
-      }
-      // Ratchet probability bar
-      display2.setCursor(40, 43);
-      display2.print("RT");
-      const int rbX = 52, rbW = 32, rbH = 5;
-      display2.drawRect(rbX, 44, rbW, rbH, SH110X_WHITE);
-      int rfw = (kickRatchetProb[ch] * (rbW - 2) + 50) / 100;
-      if (rfw > rbW - 2) rfw = rbW - 2;
-      if (rfw > 0) display2.fillRect(rbX + 1, 45, rfw, rbH - 2, SH110X_WHITE);
-      // Fill toggle chip
-      const int chipX = 90, chipW = 20;
-      if (kickExtrasAreFills[ch]){
-        display2.fillRect(chipX, 43, chipW, 7, SH110X_WHITE);
-        display2.setTextColor(SH110X_BLACK);
-        display2.setCursor(chipX + 2, 44);
-        display2.print("FILL");
-        display2.setTextColor(SH110X_WHITE);
-      } else {
-        display2.drawRect(chipX, 43, chipW, 7, SH110X_WHITE);
-        display2.setCursor(chipX + 2, 44);
-        display2.print("LIVE");
-      }
-    }
 
     // Density fill bar — kick uses 12 segments to mirror its 0..12 scale,
     // other machines keep the original 8-segment Digitone look.
