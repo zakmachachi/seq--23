@@ -955,6 +955,9 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         const int N = (int)TM_COUNT;
         v = ((v % N) + N) % N;
         trigMachine[ch] = (uint8_t)v;
+        // Clamp density to the new machine's range to avoid stale values
+        // popping back when the user swaps machines.
+        if (trigMachine[ch] == TM_KICK && trigDensity[ch] > 12) trigDensity[ch] = 12;
         if (trigMachine[ch] == TM_EUCLID) updateEuclid(ch);
         regenerateMachinePattern(ch);
         Serial.print("MACHINE CH"); Serial.print(ch+1);
@@ -962,7 +965,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         break;
       }
       case 1: { // Pot 2: density
-        trigDensity[ch] = (uint8_t)constrain((int)trigDensity[ch] + ticks, 0, 100);
+        // KICK uses 0..12 (each unit = one additional kick on top of 4/4 base).
+        // Other machines retain the legacy 0..100 threshold range.
+        int maxV = (trigMachine[ch] == TM_KICK) ? 12 : 100;
+        trigDensity[ch] = (uint8_t)constrain((int)trigDensity[ch] + ticks, 0, maxV);
         regenerateMachinePattern(ch);
         Serial.print("DENSITY="); Serial.println(trigDensity[ch]);
         break;
@@ -1238,10 +1244,37 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     for (uint8_t s = 0; s < NUM_STEPS; s++) machinePattern[ch][s] = false;
     return;
   }
-  for (uint8_t s = 0; s < NUM_STEPS; s++){
-    uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-    machinePattern[ch][s] = ((int)w[src] >= threshold);
-    machineRatchet[ch][s] = 0;
+
+  // KICK uses a custom "add one extra at a time" scheme so the player can
+  // dial individual kicks in. Other machines use the threshold rule.
+  if (m == TM_KICK){
+    // Reset, then place 4-on-the-floor base kicks (shift-aware).
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+      machinePattern[ch][s] = (W_KICK[src] == 100);
+      machineRatchet[ch][s] = 0;
+    }
+    // Extra positions in deterministic priority order — 1/8 offbeats first
+    // (most musical), then last-step kick, then the rarer 1/16ths.
+    static const uint8_t kickExtraOrder[12] = {
+      2, 6, 10, 14,   // 1/8 offbeats
+      15,             // last 1/16
+      1, 3, 5, 7,     // 1/16 in-betweens
+      9, 11, 13       // remaining 1/16
+    };
+    uint8_t n = density;
+    if (n > 12) n = 12;
+    for (uint8_t i = 0; i < n; i++){
+      uint8_t srcPos = kickExtraOrder[i];
+      uint8_t visPos = (srcPos + shift) % NUM_STEPS;
+      machinePattern[ch][visPos] = true;
+    }
+  } else {
+    for (uint8_t s = 0; s < NUM_STEPS; s++){
+      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+      machinePattern[ch][s] = ((int)w[src] >= threshold);
+      machineRatchet[ch][s] = 0;
+    }
   }
 
   // KICK extras: for every step that's not a 4-on-the-floor base, roll
@@ -2818,9 +2851,9 @@ void SimpleSequencer::drawTrigMachineView(){
   if (m >= TM_COUNT) m = 0;
   display.setTextSize(1);
   if (m == TM_KICK){
-    // Compact kick layout — fits all six in 120 px.
+    // Compact kick layout — fits all six in 120 px. Density shows as N/12.
     display.setCursor(2, 12);
-    display.print("KCK D"); display.print(trigDensity[ch]);
+    display.print("KCK D"); display.print(trigDensity[ch]); display.print("/12");
     display.print(" S"); display.print(trigShift[ch]);
     display.print(" P"); display.print(kickNoteSpread[ch]);
     display.print(" R"); display.print(kickRatchetProb[ch]);
@@ -2965,50 +2998,46 @@ void SimpleSequencer::drawPagesView(){
 //   Footer (y=52..63):  active menu name + held channel
 // Draw a stylised machine icon centred at (cx, cy). Used for Menu 4 screen 2.
 static void drawMachineIcon(Adafruit_SH1106G& d, int cx, int cy, uint8_t machine){
+  // Icons shrunk to a 22x22 bounding box so the layout never clips the top
+  // of the screen and there is breathing room above the machine title.
   switch (machine){
     case SimpleSequencer::TM_KICK: {
-      // Solid filled circle — heavy thump
-      d.fillCircle(cx, cy, 14, SH110X_WHITE);
+      d.fillCircle(cx, cy, 11, SH110X_WHITE);
       break;
     }
     case SimpleSequencer::TM_HIHAT: {
-      // Bold X — closed hat sticks
       for (int o = -1; o <= 1; o++){
-        d.drawLine(cx - 13 + o, cy - 13, cx + 13 + o, cy + 13, SH110X_WHITE);
-        d.drawLine(cx + 13 + o, cy - 13, cx - 13 + o, cy + 13, SH110X_WHITE);
+        d.drawLine(cx - 10 + o, cy - 10, cx + 10 + o, cy + 10, SH110X_WHITE);
+        d.drawLine(cx + 10 + o, cy - 10, cx - 10 + o, cy + 10, SH110X_WHITE);
       }
       break;
     }
     case SimpleSequencer::TM_SNARE: {
-      // Filled triangle pointing up — snare crack
-      d.fillTriangle(cx, cy - 14, cx - 14, cy + 12, cx + 14, cy + 12, SH110X_WHITE);
+      d.fillTriangle(cx, cy - 11, cx - 11, cy + 9, cx + 11, cy + 9, SH110X_WHITE);
       break;
     }
     case SimpleSequencer::TM_ANTIKICK: {
-      // Hollow ring with a dot — kick's shadow
-      d.drawCircle(cx, cy, 14, SH110X_WHITE);
-      d.drawCircle(cx, cy, 13, SH110X_WHITE);
+      d.drawCircle(cx, cy, 11, SH110X_WHITE);
+      d.drawCircle(cx, cy, 10, SH110X_WHITE);
       d.fillCircle(cx, cy, 3, SH110X_WHITE);
       break;
     }
     case SimpleSequencer::TM_PERC: {
-      // Four small filled circles — scattered percussion
-      d.fillCircle(cx - 7, cy - 7, 3, SH110X_WHITE);
-      d.fillCircle(cx + 7, cy - 7, 3, SH110X_WHITE);
-      d.fillCircle(cx - 7, cy + 7, 3, SH110X_WHITE);
-      d.fillCircle(cx + 7, cy + 7, 3, SH110X_WHITE);
+      d.fillCircle(cx - 6, cy - 6, 3, SH110X_WHITE);
+      d.fillCircle(cx + 6, cy - 6, 3, SH110X_WHITE);
+      d.fillCircle(cx - 6, cy + 6, 3, SH110X_WHITE);
+      d.fillCircle(cx + 6, cy + 6, 3, SH110X_WHITE);
       d.fillCircle(cx, cy, 2, SH110X_WHITE);
       break;
     }
     case SimpleSequencer::TM_EUCLID: {
-      // Concentric rings — Euclidean rotation
-      d.drawCircle(cx, cy, 14, SH110X_WHITE);
-      d.drawCircle(cx, cy, 9, SH110X_WHITE);
-      d.drawCircle(cx, cy, 4, SH110X_WHITE);
+      d.drawCircle(cx, cy, 11, SH110X_WHITE);
+      d.drawCircle(cx, cy, 7, SH110X_WHITE);
+      d.drawCircle(cx, cy, 3, SH110X_WHITE);
       break;
     }
     default: { // TM_OFF — two thick horizontal lines (mute mark)
-      d.fillRect(cx - 14, cy - 2, 28, 4, SH110X_WHITE);
+      d.fillRect(cx - 10, cy - 2, 20, 4, SH110X_WHITE);
       break;
     }
   }
@@ -3027,68 +3056,75 @@ void SimpleSequencer::drawOverview(){
     static const char* names[TM_COUNT] = {
       "OFF", "KICK", "HIHAT", "SNARE", "ANTIKICK", "PERC", "EUCLID"
     };
-    // Big machine icon centred horizontally at the top
-    drawMachineIcon(display2, 64, 18, m);
+    // Layout (KICK shown to scale, 64x64):
+    //   y0..23   icon (centred at 64,12, radius 11 — small enough not to
+    //            overlap the title below).
+    //   y26..40  machine name in size-2 text, centred.
+    //   y43..51  KICK live-params row (Spread / Ratchet / Fill chip).
+    //   y54..62  density fill bar (Digitone-style segments).
+    // Non-KICK layouts skip the kick row and let the density bar sit at the
+    // same bottom slot.
 
-    // Machine name (size 2, centred). Moves up when KICK to leave room for
-    // the live-params row.
+    drawMachineIcon(display2, 64, 12, m);
+
     const char* nm = names[m];
     int textW = (int)strlen(nm) * 12;
     int tx = (128 - textW) / 2; if (tx < 0) tx = 0;
     display2.setTextSize(2);
-    display2.setCursor(tx, m == TM_KICK ? 30 : 38);
+    display2.setCursor(tx, 26);
     display2.print(nm);
 
-    // Kick live params row (only when KICK is the active machine).
-    // Compact text + tiny segmented bars under the title.
+    // Kick live-params row (only when KICK)
     if (m == TM_KICK){
       display2.setTextColor(SH110X_WHITE);
       display2.setTextSize(1);
-      // Spread (0..5) as 5 small filled boxes
-      display2.setCursor(2, 46);
+      // Spread (0..5) as 5 tiny filled boxes
+      display2.setCursor(2, 43);
       display2.print("SP");
       for (int i = 0; i < 5; i++){
         int bx = 14 + i * 4;
         if (i < (int)kickNoteSpread[ch]){
-          display2.fillRect(bx, 47, 3, 5, SH110X_WHITE);
+          display2.fillRect(bx, 44, 3, 5, SH110X_WHITE);
         } else {
-          display2.drawRect(bx, 47, 3, 5, SH110X_WHITE);
+          display2.drawRect(bx, 44, 3, 5, SH110X_WHITE);
         }
       }
-      // Ratchet probability (0..100) as a small bar
-      display2.setCursor(40, 46);
+      // Ratchet probability bar
+      display2.setCursor(40, 43);
       display2.print("RT");
-      int rbX = 52, rbW = 36, rbH = 5;
-      display2.drawRect(rbX, 47, rbW, rbH, SH110X_WHITE);
+      const int rbX = 52, rbW = 32, rbH = 5;
+      display2.drawRect(rbX, 44, rbW, rbH, SH110X_WHITE);
       int rfw = (kickRatchetProb[ch] * (rbW - 2) + 50) / 100;
       if (rfw > rbW - 2) rfw = rbW - 2;
-      if (rfw > 0) display2.fillRect(rbX + 1, 48, rfw, rbH - 2, SH110X_WHITE);
-      // Fill toggle indicator
+      if (rfw > 0) display2.fillRect(rbX + 1, 45, rfw, rbH - 2, SH110X_WHITE);
+      // Fill toggle chip
+      const int chipX = 90, chipW = 20;
       if (kickExtrasAreFills[ch]){
-        display2.fillRect(94, 46, 18, 7, SH110X_WHITE);
+        display2.fillRect(chipX, 43, chipW, 7, SH110X_WHITE);
         display2.setTextColor(SH110X_BLACK);
-        display2.setCursor(96, 47);
+        display2.setCursor(chipX + 2, 44);
         display2.print("FILL");
         display2.setTextColor(SH110X_WHITE);
       } else {
-        display2.drawRect(94, 46, 18, 7, SH110X_WHITE);
-        display2.setCursor(96, 47);
+        display2.drawRect(chipX, 43, chipW, 7, SH110X_WHITE);
+        display2.setCursor(chipX + 2, 44);
         display2.print("LIVE");
       }
     }
 
-    // Density fill bar at the bottom — Digitakt-style 8-segment block.
-    // Live density on the channel; a thin "leading edge" pulse animates the
-    // filled portion so you can see density changes as you sweep Pot 2.
-    const int barX = 8, barY = 56, barW = 112, barH = 7;
+    // Density fill bar — kick uses 12 segments to mirror its 0..12 scale,
+    // other machines keep the original 8-segment Digitone look.
+    const int barX = 8, barY = 54, barW = 112, barH = 8;
     display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
     int dens = trigDensity[ch];
-    int fillW = ((dens * (barW - 2)) + 50) / 100;
+    int maxD = (m == TM_KICK) ? 12 : 100;
+    int segs = (m == TM_KICK) ? 12 : 8;
+    int fillW = ((dens * (barW - 2)) + maxD/2) / maxD;
     if (fillW > barW - 2) fillW = barW - 2;
     if (fillW > 0){
       display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
-      for (int i = 1; i < 8; i++){
-        int sx = barX + 1 + (i * (barW - 2)) / 8;
+      for (int i = 1; i < segs; i++){
+        int sx = barX + 1 + (i * (barW - 2)) / segs;
         if (sx < barX + 1 + fillW){
           display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
         }
