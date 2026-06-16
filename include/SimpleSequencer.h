@@ -49,16 +49,37 @@ class SimpleSequencer {
     uint8_t stepRatchet[NUM_CHANNELS][TOTAL_STEPS];
     uint8_t stepVelocity[NUM_CHANNELS][TOTAL_STEPS];
     bool stepSlide[NUM_CHANNELS][TOTAL_STEPS];
-    // --- Pages mode (Digitakt-style 1..4 pages per track) ---
+    // --- Pages mode (Digitakt-style 1..MAX_PAGES pages per track) ---
     uint8_t numPages[NUM_CHANNELS]; // 1..MAX_PAGES per channel
     uint8_t editPage[NUM_CHANNELS]; // 0..(numPages-1) which page the user is editing
     uint8_t globalPage;             // 0..(MAX_PAGES-1) — wraps every full 16-step bar
+    uint8_t numSteps[NUM_CHANNELS]; // 1..NUM_STEPS — per-channel pattern length
+    bool pageEditGlobal = true;     // Pages menu: Pot1 edits globalPage (true) or editPage[ch] (false)
+    // --- Per-channel rate multiplier (Pages menu Pot3) ---
+    // Rate index: 0=0.25x 1=0.5x 2=1x 3=2x 4=4x. Default 2.
+    static const uint8_t RATE_COUNT = 5;
+    static const float RATE_VALUES[RATE_COUNT];
+    uint8_t rateIdx = 2;            // target rate slot
+    float rateCurrent = 1.0f;       // smoothed actual rate currently applied
+    float rateTarget  = 1.0f;       // where rateCurrent is heading
+    float rateRampFrom = 1.0f;      // value at ramp start
+    uint32_t rateRampStartMs = 0;   // when ramp began
+    uint32_t rateRampDurMs   = 500; // ramp duration
+    bool rateRamping = false;       // ramp in progress?
+    // --- Page button tap state (entering / cycling pages) ---
+    uint32_t lastPageBtnMs = 0;     // for diagnostic/feedback
     inline uint16_t editIdx(uint8_t ch, uint8_t s) const {
       return (uint16_t)editPage[ch] * (uint16_t)NUM_STEPS + s;
     }
     inline uint16_t playIdx(uint8_t ch, uint8_t s) const {
       uint8_t pg = numPages[ch] > 0 ? (globalPage % numPages[ch]) : 0;
       return (uint16_t)pg * (uint16_t)NUM_STEPS + s;
+    }
+    // Local channel step taking numSteps into account.
+    inline uint8_t localStep(uint8_t ch) const {
+      uint8_t n = numSteps[ch];
+      if (n == 0) n = 1;
+      return (uint8_t)(currentStep % n);
     }
     int8_t heldStep = -1; // Tracks which button is currently held down (-1 means none)
     bool euclidEnabled[NUM_CHANNELS];
@@ -245,6 +266,8 @@ class SimpleSequencer {
       uint8_t savedKickExtrasAreFills[NUM_CHANNELS];
       // Pages mode state (v10)
       uint8_t savedNumPages[NUM_CHANNELS];
+      // Per-channel pattern length (v11)
+      uint8_t savedNumSteps[NUM_CHANNELS];
     };
     void saveState();
     void loadState();

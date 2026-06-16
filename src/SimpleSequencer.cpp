@@ -28,6 +28,11 @@ static uint8_t midiStepTickCounter = 0; // counts MIDI clock ticks toward a 16th
 
 // No special auto-channel mapping: send notes on per-track channels by default
 
+// Rate multiplier slots for Pages menu Pot 3
+const float SimpleSequencer::RATE_VALUES[SimpleSequencer::RATE_COUNT] = {
+  0.25f, 0.5f, 1.0f, 2.0f, 4.0f
+};
+
 // Absolute Timestamp Window for Bulletproof BPM
 #define BPM_TICK_WINDOW 49 // 49 timestamps = exactly 48 gaps (2 full beats)
 static uint32_t tickTimestamps[BPM_TICK_WINDOW];
@@ -87,6 +92,7 @@ SimpleSequencer::SimpleSequencer()
     }
     numPages[c] = 1;
     editPage[c] = 0;
+    numSteps[c] = NUM_STEPS; // default to full 16-step pattern length
     channelPitch[c] = 33; // default A1 — matches Rytm MK2 default TRIG NOTE
     channelVelocity[c] = 100;
     midiChannel[c] = c; // default: CH1->MIDI ch1, CH2->ch2, ... (0-indexed = MIDI ch 1-6)
@@ -308,11 +314,13 @@ void SimpleSequencer::loop(){
             currentStep = 0;
             globalPage = 0;
             for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-              bool isActive = isStepActive(ch, playIdx(ch, currentStep));
+              bool isActive = isStepActive(ch, playIdx(ch, localStep(ch)));
               if (isActive) triggerChannel(ch);
             }
             if (!externalMidiClockActive && !midiTimerRunning) {
-              uint32_t interval = (60000000UL / bpm) / 24;
+              float eff = (float)bpm * rateCurrent;
+              if (eff < 1.0f) eff = 1.0f;
+              uint32_t interval = (uint32_t)(2500000.0f / eff);
               midiClockTimer.begin(sendClockISR, interval);
               midiTimerRunning = true;
             }
@@ -535,8 +543,32 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
-  // --- Page button: modifier only, no action ---
+  // --- Page button: enter Pages menu, or cycle pages while inside it ---
+  // Function + Page is reserved for transport (Start/Stop) and handled
+  // elsewhere — only act on a plain tap.
   if (i == MATRIX_BTN_PAGE_INDEX){
+    if (!isFunctionHeld()){
+      lastPageBtnMs = millis();
+      if (activeMenu != 5){
+        activeMenu = 5;
+        heldStep = -1; focusEncoder = 0;
+        Serial.println("PAGE -> activeMenu=5 (Pages)");
+      } else {
+        // Already inside Pages: each tap cycles the page being edited.
+        // In Global mode this advances globalPage (affects all channels);
+        // in Channel mode it advances editPage[selectedChannel] only.
+        if (pageEditGlobal){
+          globalPage = (uint8_t)((globalPage + 1) % MAX_PAGES);
+          Serial.print("PAGE tap -> globalPage="); Serial.println(globalPage + 1);
+        } else {
+          uint8_t ch = selectedChannel;
+          uint8_t np = numPages[ch] > 0 ? numPages[ch] : 1;
+          editPage[ch] = (uint8_t)((editPage[ch] + 1) % np);
+          Serial.print("PAGE tap CH"); Serial.print(ch+1);
+          Serial.print(" editPage="); Serial.println(editPage[ch] + 1);
+        }
+      }
+    }
     return;
   }
 
@@ -548,9 +580,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU2_INDEX){
-    activeMenu = 5;  // Pages mode (replaces old Step Visualizer)
+    activeMenu = 3;  // Step Visualizer (restored)
     heldStep = -1; focusEncoder = 0;
-    Serial.println("MENU2 -> activeMenu=5 (Pages)");
+    Serial.println("MENU2 -> activeMenu=3 (Step)");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -755,13 +787,18 @@ void SimpleSequencer::readEncoders(){
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
   if (activeMenu == 5){
-    // Pages mode: Pot 1 button cycles numPages 1..MAX_PAGES
     if (pot == 0){
-      uint8_t ch = selectedChannel;
-      numPages[ch] = (numPages[ch] % MAX_PAGES) + 1;
-      if (editPage[ch] >= numPages[ch]) editPage[ch] = numPages[ch] - 1;
-      Serial.print("CH"); Serial.print(ch+1);
-      Serial.print(" numPages="); Serial.println(numPages[ch]);
+      // Pages mode: Pot 1 button toggles Global / Channel page-edit focus.
+      pageEditGlobal = !pageEditGlobal;
+      Serial.print("PAGES mode="); Serial.println(pageEditGlobal ? "GLOBAL" : "CHANNEL");
+    } else if (pot == 2){
+      // Pages mode: Pot 3 button resets rate back to 1x, smoothly ramped.
+      rateIdx = 2; // 1.0x slot
+      rateTarget = RATE_VALUES[rateIdx];
+      rateRampFrom = rateCurrent;
+      rateRampStartMs = millis();
+      rateRamping = (fabsf(rateCurrent - rateTarget) > 0.0005f);
+      Serial.println("RATE -> 1.0x (ramp)");
     }
     return;
   }
@@ -849,7 +886,9 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     if (newBpm > 300) newBpm = 300;
     bpm = (uint32_t)newBpm;
     if (isRunning && !externalMidiClockActive && midiTimerRunning){
-      uint32_t interval = (60000000UL / bpm) / 24;
+      float eff = (float)bpm * rateCurrent;
+      if (eff < 1.0f) eff = 1.0f;
+      uint32_t interval = (uint32_t)(2500000.0f / eff);
       midiClockTimer.update(interval);
     }
     bpmFocusEndMs = millis() + 1500;
@@ -930,20 +969,43 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (activeMenu == 5){
     uint8_t ch = selectedChannel;
     if (pot == 0){
-      int v = (int)editPage[ch] + ticks;
-      uint8_t np = numPages[ch] > 0 ? numPages[ch] : 1;
-      v = ((v % np) + np) % np;
-      editPage[ch] = (uint8_t)v;
-      Serial.print("CH"); Serial.print(ch+1);
-      Serial.print(" editPage="); Serial.println(editPage[ch]+1);
+      // Pot 1: page number — affects global or channel page based on mode.
+      if (pageEditGlobal){
+        int v = (int)globalPage + ticks;
+        v = ((v % MAX_PAGES) + MAX_PAGES) % MAX_PAGES;
+        globalPage = (uint8_t)v;
+        Serial.print("GLOBAL page="); Serial.println(globalPage + 1);
+      } else {
+        // Editing the active channel's page; auto-grow numPages if user dials past it.
+        int v = (int)editPage[ch] + ticks;
+        if (v < 0) v = 0;
+        if (v >= MAX_PAGES) v = MAX_PAGES - 1;
+        if ((uint8_t)v >= numPages[ch]) numPages[ch] = (uint8_t)v + 1;
+        editPage[ch] = (uint8_t)v;
+        Serial.print("CH"); Serial.print(ch+1);
+        Serial.print(" editPage="); Serial.println(editPage[ch] + 1);
+      }
     } else if (pot == 1){
-      int v = (int)numPages[ch] + ticks;
+      // Pot 2: per-channel step count (1..NUM_STEPS).
+      int v = (int)numSteps[ch] + ticks;
       if (v < 1) v = 1;
-      if (v > MAX_PAGES) v = MAX_PAGES;
-      numPages[ch] = (uint8_t)v;
-      if (editPage[ch] >= numPages[ch]) editPage[ch] = numPages[ch] - 1;
+      if (v > NUM_STEPS) v = NUM_STEPS;
+      numSteps[ch] = (uint8_t)v;
       Serial.print("CH"); Serial.print(ch+1);
-      Serial.print(" numPages="); Serial.println(numPages[ch]);
+      Serial.print(" numSteps="); Serial.println(numSteps[ch]);
+    } else if (pot == 2){
+      // Pot 3: rate multiplier (0.25/0.5/1/2/4x). Smoothly ramp to new target.
+      int v = (int)rateIdx + ticks;
+      if (v < 0) v = 0;
+      if (v >= (int)RATE_COUNT) v = RATE_COUNT - 1;
+      if ((uint8_t)v != rateIdx){
+        rateIdx = (uint8_t)v;
+        rateTarget = RATE_VALUES[rateIdx];
+        rateRampFrom = rateCurrent;
+        rateRampStartMs = millis();
+        rateRamping = (fabsf(rateCurrent - rateTarget) > 0.0005f);
+        Serial.print("RATE="); Serial.print(rateTarget, 2); Serial.println("x");
+      }
     }
     return;
   }
@@ -1071,7 +1133,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572476; // Unique signature (v10 — pages mode)
+  data.magicNumber = 13572477; // Unique signature (v11 — per-channel numSteps)
   data.savedBpm = bpm;
 
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -1104,6 +1166,7 @@ void SimpleSequencer::saveState() {
     data.savedKickRatchetProb[c]    = kickRatchetProb[c];
     data.savedKickExtrasAreFills[c] = kickExtrasAreFills[c];
     data.savedNumPages[c]           = numPages[c];
+    data.savedNumSteps[c]           = numSteps[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -1122,7 +1185,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572476) {
+  if (data.magicNumber == 13572477) {
     bpm = data.savedBpm;
 
     for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -1162,6 +1225,8 @@ void SimpleSequencer::loadState() {
       uint8_t np = data.savedNumPages[c];
       numPages[c] = (np >= 1 && np <= MAX_PAGES) ? np : 1;
       editPage[c] = 0;
+      uint8_t ns = data.savedNumSteps[c];
+      numSteps[c] = (ns >= 1 && ns <= NUM_STEPS) ? ns : NUM_STEPS;
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
@@ -1609,6 +1674,28 @@ void SimpleSequencer::runEngine(){
   uint32_t nowMicros = micros();
   uint32_t nowMs = nowMicros / 1000;
 
+  // 0) Advance rate-ramp envelope. Smoothly interpolates rateCurrent from
+  // rateRampFrom toward rateTarget over rateRampDurMs (linear).
+  if (rateRamping){
+    uint32_t elapsed = nowMs - rateRampStartMs;
+    float prevRate = rateCurrent;
+    if (elapsed >= rateRampDurMs){
+      rateCurrent = rateTarget;
+      rateRamping = false;
+    } else {
+      float t = (float)elapsed / (float)rateRampDurMs;
+      rateCurrent = rateRampFrom + (rateTarget - rateRampFrom) * t;
+    }
+    // Update timer interval if the internal clock is driving playback and
+    // rate actually changed meaningfully (avoid hammering update()).
+    if (!externalMidiClockActive && midiTimerRunning && fabsf(rateCurrent - prevRate) > 0.001f){
+      float eff = (float)bpm * rateCurrent;
+      if (eff < 1.0f) eff = 1.0f;
+      uint32_t interval = (uint32_t)(2500000.0f / eff);
+      midiClockTimer.update(interval);
+    }
+  }
+
   // 1) Process any MIDI bytes from hardware MIDI_SERIAL
   while (MIDI_SERIAL.available() > 0){
     uint8_t b = MIDI_SERIAL.read();
@@ -1647,7 +1734,7 @@ void SimpleSequencer::runEngine(){
       globalPage = 0;
       // immediately trigger steps at position 0
       for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-        bool isActive = isStepActive(ch, playIdx(ch, currentStep));
+        bool isActive = isStepActive(ch, playIdx(ch, localStep(ch)));
         if (isActive) triggerChannel(ch);
       }
     }
@@ -1687,7 +1774,9 @@ void SimpleSequencer::runEngine(){
       validTicks = 0; tickIndex = 0;
       // restart internal hardware timer if needed
       if (isRunning && !midiTimerRunning){
-        uint32_t interval = (60000000UL / bpm) / 24;
+        float eff = (float)bpm * rateCurrent;
+        if (eff < 1.0f) eff = 1.0f;
+        uint32_t interval = (uint32_t)(2500000.0f / eff);
         midiClockTimer.begin(sendClockISR, interval);
         midiTimerRunning = true;
       }
@@ -1708,7 +1797,7 @@ void SimpleSequencer::runEngine(){
       // the user touches a knob and stay stable until the next edit.
       // trigger channels that have the step enabled
         for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
-          bool isActive = isStepActive(ch, playIdx(ch, currentStep));
+          bool isActive = isStepActive(ch, playIdx(ch, localStep(ch)));
           if (isActive) triggerChannel(ch);
         }
     }
@@ -2955,59 +3044,46 @@ void SimpleSequencer::drawPagesView(){
   }
   display.setTextColor(SH110X_WHITE);
 
-  // Big "PAGE X/Y" indicator for the selected channel
+  // Mode badge (GLOBAL or CHANNEL) + big page indicator
   uint8_t ch = selectedChannel;
-  uint8_t cur = editPage[ch] + 1;
-  uint8_t tot = numPages[ch];
+  display.setTextSize(1);
+  display.setCursor(2, 12);
+  if (pageEditGlobal){
+    display.print("GLOBAL");
+  } else {
+    display.print("CH"); display.print(ch + 1);
+  }
+
+  // Big page number — depends on which mode is active
   display.setTextSize(3);
-  char buf[8];
-  snprintf(buf, sizeof(buf), "%u/%u", cur, tot);
+  char buf[12];
+  if (pageEditGlobal){
+    snprintf(buf, sizeof(buf), "P%u/%u", (unsigned)(globalPage + 1), (unsigned)MAX_PAGES);
+  } else {
+    snprintf(buf, sizeof(buf), "P%u/%u", (unsigned)(editPage[ch] + 1), (unsigned)numPages[ch]);
+  }
   int tw = (int)strlen(buf) * 18;
-  display.setCursor((128 - tw) / 2, 16);
+  display.setCursor((128 - tw) / 2, 22);
   display.print(buf);
 
-  // 4 page chips at the bottom — filled = selected edit page,
-  //                            ring = exists (within numPages),
-  //                            empty = not allocated.
-  // Also highlight the playing page when running.
-  uint8_t playPg = (numPages[ch] > 0) ? (globalPage % numPages[ch]) : 0;
-  const int chipW = 24, chipH = 14, gapX = 4;
-  int totalW = MAX_PAGES * chipW + (MAX_PAGES - 1) * gapX;
-  int startX = (128 - totalW) / 2;
-  int y = 46;
+  // Footer row: STEPS  RATE
   display.setTextSize(1);
-  for (uint8_t p = 0; p < MAX_PAGES; p++){
-    int x = startX + p * (chipW + gapX);
-    bool exists = (p < numPages[ch]);
-    bool isEdit = (p == editPage[ch]);
-    bool isPlay = (isRunning && p == playPg);
+  display.setCursor(2, 50);
+  display.print("STEPS "); display.print(numSteps[ch]);
 
-    if (isEdit){
-      display.fillRect(x, y, chipW, chipH, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else if (exists){
-      display.drawRect(x, y, chipW, chipH, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-    } else {
-      display.drawRect(x, y, chipW, chipH, SH110X_WHITE);
-      // Dim "not allocated": just a single dot in the middle
-      display.drawPixel(x + chipW/2, y + chipH/2, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-    }
-    if (exists){
-      display.setCursor(x + 9, y + 4);
-      display.print(p + 1);
-    }
-    // Playhead marker = small chevron above the chip
-    if (isPlay){
-      display.fillTriangle(x + chipW/2 - 3, y - 4,
-                           x + chipW/2 + 3, y - 4,
-                           x + chipW/2,     y - 1, SH110X_WHITE);
-    }
-  }
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(2, 57);
-  display.print("Pot1: page  Pot1 btn: count");
+  display.setCursor(64, 50);
+  // Show target rate (with a subtle "..." while ramping)
+  char rbuf[10];
+  float r = RATE_VALUES[rateIdx];
+  if (r >= 1.0f) snprintf(rbuf, sizeof(rbuf), "%.0fx", (double)r);
+  else           snprintf(rbuf, sizeof(rbuf), "%.2fx", (double)r);
+  display.print("RATE "); display.print(rbuf);
+  if (rateRamping) display.print("..");
+
+  // Bottom hint line
+  display.setCursor(2, 58);
+  display.print("P1 page  P2 steps  P3 rate");
+
   display.display();
 }
 
@@ -3560,19 +3636,67 @@ void SimpleSequencer::drawOverview(){
     return;
   }
 
-  // ── Menu 5: Pages mode — full pattern overview across pages ─────
+  // ── Menu 5: Pages mode — per-channel page summary + global page ─
   if (activeMenu == 5){
     display2.setTextColor(SH110X_WHITE);
     display2.setTextSize(1);
-    // Top: channel + page summary
+
+    // Top: GLOBAL page indicator (big-ish on the left, current edit mode on right)
     display2.setCursor(2, 1);
-    display2.print("CH"); display2.print(ch + 1);
-    display2.print("  "); display2.print(numPages[ch]); display2.print(" PAGE");
-    if (numPages[ch] > 1) display2.print("S");
-    // Right side: edit page indicator
-    display2.setCursor(98, 1);
-    display2.print("EDIT P"); display2.print(editPage[ch] + 1);
+    display2.print("GLOBAL P");
+    display2.print((int)(globalPage + 1));
+    display2.print("/");
+    display2.print((int)MAX_PAGES);
+    // Right edge: which scope Pot1 is editing right now
+    display2.setCursor(86, 1);
+    display2.print(pageEditGlobal ? "[GLB]" : "[CH ]");
+    if (!pageEditGlobal){
+      display2.setCursor(110, 1);
+      display2.print((int)(selectedChannel + 1));
+    }
     display2.drawFastHLine(2, 10, 124, SH110X_WHITE);
+
+    // 7-row table: channel | edit page | total pages | bar showing pages
+    const int rowH = 7;
+    const int gridY = 13;
+    for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+      int y = gridY + c * rowH;
+      bool isSel = (c == selectedChannel);
+      if (isSel){
+        display2.fillRect(0, y - 1, 128, rowH, SH110X_WHITE);
+        display2.setTextColor(SH110X_BLACK);
+      } else {
+        display2.setTextColor(SH110X_WHITE);
+      }
+      // Channel label
+      display2.setCursor(2, y);
+      display2.print("CH"); display2.print((int)(c + 1));
+      // Mute marker
+      if (muted[c]){
+        display2.setCursor(20, y);
+        display2.print("M");
+      }
+      // Edit page / total
+      display2.setCursor(30, y);
+      display2.print("P"); display2.print((int)(editPage[c] + 1));
+      display2.print("/"); display2.print((int)numPages[c]);
+      // Number of steps
+      display2.setCursor(64, y);
+      display2.print("S"); display2.print((int)numSteps[c]);
+      // Playhead page indicator (which page this channel is currently on)
+      uint8_t playPg = numPages[c] > 0 ? (uint8_t)(globalPage % numPages[c]) : 0;
+      display2.setCursor(92, y);
+      display2.print("> P"); display2.print((int)(playPg + 1));
+    }
+    display2.setTextColor(SH110X_WHITE);
+    display2.display();
+    return;
+  }
+
+  // (Legacy multi-page grid view kept disabled by the early return above)
+  if (false){
+    display2.setTextColor(SH110X_WHITE);
+    display2.setTextSize(1);
 
     // Show all pages stacked vertically — each page is one row of 16 cells.
     // 4 rows of 8 px height max (32px total), with channel page label on the left.
