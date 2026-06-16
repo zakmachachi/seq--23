@@ -991,16 +991,25 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         globalPage = (uint8_t)v;
         Serial.print("GLOBAL page="); Serial.println(globalPage + 1);
       } else {
-        // Editing the active channel's page; auto-grow numPages if user dials
-        // past it, duplicating page 1's contents into each new page so the
-        // user isn't dropped onto an empty page.
-        int v = (int)editPage[ch] + ticks;
-        if (v < 0) v = 0;
-        if (v >= MAX_PAGES) v = MAX_PAGES - 1;
-        if ((uint8_t)v >= numPages[ch]) growPagesAndDuplicate(ch, (uint8_t)v + 1);
-        editPage[ch] = (uint8_t)v;
+        // Channel mode: Pot 1 sets the channel's pattern length in pages
+        // (1..MAX_PAGES). Dialling up grows numPages and seeds new pages
+        // with a copy of page 1; dialling down shrinks numPages and clamps
+        // the edit-page cursor. Use the Page button tap to navigate the
+        // edit page within the pattern.
+        int v = (int)numPages[ch] + ticks;
+        if (v < 1) v = 1;
+        if (v > MAX_PAGES) v = MAX_PAGES;
+        uint8_t target = (uint8_t)v;
+        if (target > numPages[ch]){
+          growPagesAndDuplicate(ch, target);
+        } else if (target < numPages[ch]){
+          numPages[ch] = target;
+        }
+        if (editPage[ch] >= numPages[ch]){
+          editPage[ch] = (uint8_t)(numPages[ch] - 1);
+        }
         Serial.print("CH"); Serial.print(ch+1);
-        Serial.print(" editPage="); Serial.println(editPage[ch] + 1);
+        Serial.print(" numPages="); Serial.println(numPages[ch]);
       }
     } else if (pot == 1){
       // Pot 2: per-channel step count (1..NUM_STEPS).
@@ -3117,12 +3126,22 @@ void SimpleSequencer::drawPagesView(){
   }
 
   // Big page number — depends on which mode is active
+  //   Global mode  : current playing page out of MAX_PAGES
+  //   Channel mode : the channel's pattern length (Pot1) with current edit
+  //                  page shown smaller above. Page button taps cycle the
+  //                  edit page within numPages.
   display.setTextSize(3);
   char buf[12];
   if (pageEditGlobal){
     snprintf(buf, sizeof(buf), "P%u/%u", (unsigned)(globalPage + 1), (unsigned)MAX_PAGES);
   } else {
-    snprintf(buf, sizeof(buf), "P%u/%u", (unsigned)(editPage[ch] + 1), (unsigned)numPages[ch]);
+    // Big: pattern length. Small annotation above shows edit page.
+    snprintf(buf, sizeof(buf), "%uPGS", (unsigned)numPages[ch]);
+    display.setTextSize(1);
+    display.setCursor(96, 12);
+    display.print("EDIT P");
+    display.print((int)(editPage[ch] + 1));
+    display.setTextSize(3);
   }
   int tw = (int)strlen(buf) * 18;
   display.setCursor((128 - tw) / 2, 22);
@@ -3142,9 +3161,13 @@ void SimpleSequencer::drawPagesView(){
   display.print("RATE "); display.print(rbuf);
   if (rateRamping) display.print("..");
 
-  // Bottom hint line
+  // Bottom hint line — wording depends on the active scope
   display.setCursor(2, 58);
-  display.print("P1 page  P2 steps  P3 rate");
+  if (pageEditGlobal){
+    display.print("P1 page  P2 steps  P3 rate");
+  } else {
+    display.print("P1 pages P2 steps  P3 rate");
+  }
 
   display.display();
 }
