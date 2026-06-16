@@ -799,6 +799,18 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       rateRampStartMs = millis();
       rateRamping = (fabsf(rateCurrent - rateTarget) > 0.0005f);
       Serial.println("RATE -> 1.0x (ramp)");
+    } else if (pot == 5){
+      // Pages mode: Pot 6 button = global reset.
+      // Every channel back to 1 page / 16 steps, edit cursor and globalPage
+      // back to page 1. Step contents are left intact (only the structural
+      // length parameters are reset).
+      for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+        numPages[c] = 1;
+        numSteps[c] = NUM_STEPS;
+        editPage[c] = 0;
+      }
+      globalPage = 0;
+      Serial.println("PAGES global reset -> 1 page, 16 steps");
     }
     return;
   }
@@ -984,18 +996,29 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (activeMenu == 5){
     uint8_t ch = selectedChannel;
     if (pot == 0){
-      // Pot 1: page number — affects global or channel page based on mode.
+      // Pot 1: pattern length in pages. In Global mode the dialled value is
+      // broadcast to every channel so all tracks share the same length;
+      // in Channel mode only the selected channel changes.
+      // Use the Page button tap to navigate the edit page within numPages.
       if (pageEditGlobal){
-        int v = (int)globalPage + ticks;
-        v = ((v % MAX_PAGES) + MAX_PAGES) % MAX_PAGES;
-        globalPage = (uint8_t)v;
-        Serial.print("GLOBAL page="); Serial.println(globalPage + 1);
+        int v = (int)numPages[ch] + ticks;
+        if (v < 1) v = 1;
+        if (v > MAX_PAGES) v = MAX_PAGES;
+        uint8_t target = (uint8_t)v;
+        for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+          if (target > numPages[c]){
+            growPagesAndDuplicate(c, target);
+          } else if (target < numPages[c]){
+            numPages[c] = target;
+          }
+          if (editPage[c] >= numPages[c]){
+            editPage[c] = (uint8_t)(numPages[c] - 1);
+          }
+        }
+        if (globalPage >= target) globalPage = (uint8_t)(target - 1);
+        Serial.print("GLOBAL numPages="); Serial.println(target);
       } else {
-        // Channel mode: Pot 1 sets the channel's pattern length in pages
-        // (1..MAX_PAGES). Dialling up grows numPages and seeds new pages
-        // with a copy of page 1; dialling down shrinks numPages and clamps
-        // the edit-page cursor. Use the Page button tap to navigate the
-        // edit page within the pattern.
+        // Channel mode: Pot 1 sets the selected channel's pattern length only.
         int v = (int)numPages[ch] + ticks;
         if (v < 1) v = 1;
         if (v > MAX_PAGES) v = MAX_PAGES;
@@ -1012,13 +1035,21 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print(" numPages="); Serial.println(numPages[ch]);
       }
     } else if (pot == 1){
-      // Pot 2: per-channel step count (1..NUM_STEPS).
+      // Pot 2: pattern step count (1..NUM_STEPS).
+      // Global mode broadcasts to all channels; Channel mode targets only
+      // the active channel.
       int v = (int)numSteps[ch] + ticks;
       if (v < 1) v = 1;
       if (v > NUM_STEPS) v = NUM_STEPS;
-      numSteps[ch] = (uint8_t)v;
-      Serial.print("CH"); Serial.print(ch+1);
-      Serial.print(" numSteps="); Serial.println(numSteps[ch]);
+      uint8_t target = (uint8_t)v;
+      if (pageEditGlobal){
+        for (uint8_t c = 0; c < NUM_CHANNELS; c++) numSteps[c] = target;
+        Serial.print("GLOBAL numSteps="); Serial.println(target);
+      } else {
+        numSteps[ch] = target;
+        Serial.print("CH"); Serial.print(ch+1);
+        Serial.print(" numSteps="); Serial.println(target);
+      }
     } else if (pot == 2){
       // Pot 3: rate multiplier (0.25/0.5/1/2/4x). Smoothly ramp to new target.
       int v = (int)rateIdx + ticks;
