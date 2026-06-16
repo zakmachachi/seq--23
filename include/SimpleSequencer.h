@@ -99,6 +99,15 @@ class SimpleSequencer {
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
+    // Copy one full 16-step page worth of per-step state (steps, pitches,
+    // velocities, slides, ratchets, gates, fill marks, machine overlays)
+    // from srcPg to dstPg on channel ch. Used to seed newly-allocated pages
+    // with the contents of page 0 so growing pattern length doesn't reveal
+    // empty pages.
+    void duplicatePageContent(uint8_t ch, uint8_t srcPg, uint8_t dstPg);
+    // Grow numPages[ch] to at least 'target', duplicating page 0 into each
+    // newly-allocated slot. No-op if target <= current numPages.
+    void growPagesAndDuplicate(uint8_t ch, uint8_t target);
 
     // --- TRIGGER MACHINES (Menu 4) ---
     uint8_t trigMachine[NUM_CHANNELS];           // active machine type per channel

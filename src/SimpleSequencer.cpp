@@ -606,7 +606,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       if (i < MAX_PAGES){
         uint8_t target = (uint8_t)i;
         if (target >= numPages[selectedChannel]){
-          numPages[selectedChannel] = target + 1;
+          growPagesAndDuplicate(selectedChannel, (uint8_t)(target + 1));
         }
         editPage[selectedChannel] = target;
         Serial.print("CH"); Serial.print(selectedChannel+1);
@@ -907,6 +907,21 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     return;
   }
 
+  // --- GLOBAL MODIFIER: Channel-held + Pot 2 = per-channel root NOTE ---
+  // Lets the user edit the channel's note in any menu (notably the drum
+  // machine view) without leaving machine controls behind.
+  if (pot == 1 && heldChannel >= 0 && heldChannel < (int)NUM_CHANNELS){
+    int oldRoot = (int)channelPitch[heldChannel];
+    int p = oldRoot + ticks;
+    p = constrain(p, 0, 127);
+    int delta = p - oldRoot;
+    channelPitch[heldChannel] = (uint8_t)p;
+    if (delta != 0) transposeChannelNotes(heldChannel, delta);
+    Serial.print("CH"); Serial.print(heldChannel+1);
+    Serial.print(" NOTE="); Serial.println(channelPitch[heldChannel]);
+    return;
+  }
+
   if (activeMenu == 1){
     uint8_t ch = selectedChannel;
     switch (pot){
@@ -976,11 +991,13 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         globalPage = (uint8_t)v;
         Serial.print("GLOBAL page="); Serial.println(globalPage + 1);
       } else {
-        // Editing the active channel's page; auto-grow numPages if user dials past it.
+        // Editing the active channel's page; auto-grow numPages if user dials
+        // past it, duplicating page 1's contents into each new page so the
+        // user isn't dropped onto an empty page.
         int v = (int)editPage[ch] + ticks;
         if (v < 0) v = 0;
         if (v >= MAX_PAGES) v = MAX_PAGES - 1;
-        if ((uint8_t)v >= numPages[ch]) numPages[ch] = (uint8_t)v + 1;
+        if ((uint8_t)v >= numPages[ch]) growPagesAndDuplicate(ch, (uint8_t)v + 1);
         editPage[ch] = (uint8_t)v;
         Serial.print("CH"); Serial.print(ch+1);
         Serial.print(" editPage="); Serial.println(editPage[ch] + 1);
@@ -1466,15 +1483,48 @@ void SimpleSequencer::transposeChannelNotes(uint8_t ch, int semitones){
   }
 }
 
+void SimpleSequencer::duplicatePageContent(uint8_t ch, uint8_t srcPg, uint8_t dstPg){
+  if (srcPg >= MAX_PAGES || dstPg >= MAX_PAGES || srcPg == dstPg) return;
+  uint16_t sb = (uint16_t)srcPg * NUM_STEPS;
+  uint16_t db = (uint16_t)dstPg * NUM_STEPS;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    steps[ch][db + s]            = steps[ch][sb + s];
+    pitch[ch][db + s]            = pitch[ch][sb + s];
+    noteLen[ch][db + s]          = noteLen[ch][sb + s];
+    stepRatchet[ch][db + s]      = stepRatchet[ch][sb + s];
+    stepVelocity[ch][db + s]     = stepVelocity[ch][sb + s];
+    stepSlide[ch][db + s]        = stepSlide[ch][sb + s];
+    fillState[ch][db + s]        = fillState[ch][sb + s];
+    machineOverlay[ch][db + s]   = machineOverlay[ch][sb + s];
+    euclidPattern[ch][db + s]    = euclidPattern[ch][sb + s];
+  }
+}
+
+void SimpleSequencer::growPagesAndDuplicate(uint8_t ch, uint8_t target){
+  if (target > MAX_PAGES) target = MAX_PAGES;
+  if (target <= numPages[ch]) return;
+  uint8_t oldN = numPages[ch];
+  for (uint8_t pg = oldN; pg < target; pg++){
+    duplicatePageContent(ch, 0, pg);
+  }
+  numPages[ch] = target;
+}
+
 void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   uint8_t mode = euclidScaleMode[ch];
-  uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+  uint8_t totalPages = numPages[ch];
+  if (totalPages < 1) totalPages = 1;
+
   if (mode == 0) {
-    for (uint8_t s = 0; s < NUM_STEPS; s++) {
-      pitch[ch][base + s]       = 255;
-      stepSlide[ch][base + s]   = false;
-      stepVelocity[ch][base + s] = 255;
-      noteLen[ch][base + s]     = 255;
+    // Clear generated note overrides on every active page.
+    for (uint8_t pg = 0; pg < totalPages; pg++){
+      uint16_t base = (uint16_t)pg * NUM_STEPS;
+      for (uint8_t s = 0; s < NUM_STEPS; s++) {
+        pitch[ch][base + s]        = 255;
+        stepSlide[ch][base + s]    = false;
+        stepVelocity[ch][base + s] = 255;
+        noteLen[ch][base + s]      = 255;
+      }
     }
     return;
   }
@@ -1483,7 +1533,7 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   const uint8_t* scale;
   uint8_t size = getScale(mode, &scale);
 
-  // octaveSpread now acts in semitones (0..60). For each step we sample a
+  // octaveSpread acts in semitones (0..60). For each step we sample a
   // semitone offset above root with exponential bias toward 0, then snap
   // to the nearest scale degree at-or-below that offset so notes stay in key.
   const uint8_t MAX_SPREAD = 60;
@@ -1502,36 +1552,40 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   }
   if (nValid == 0){ valid[0] = 0; nValid = 1; }
 
-  for (uint8_t s = 0; s < NUM_STEPS; s++) {
-    // Exponential bias: pick from valid[] with weight exp(-i/T) where T is half the count.
-    // Falls back to uniform when spread = 0.
-    uint8_t pick;
-    if (spread == 0 || nValid <= 1){
-      pick = 0;
-    } else {
-      float T = (float)nValid * 0.5f;
-      float total = 0.0f;
-      float cum[64];
-      for (uint8_t i = 0; i < nValid; i++){
-        total += expf(-(float)i / T);
-        cum[i] = total;
+  // Fill every active page with fresh notes (each page gets independent picks).
+  for (uint8_t pg = 0; pg < totalPages; pg++){
+    uint16_t base = (uint16_t)pg * NUM_STEPS;
+    for (uint8_t s = 0; s < NUM_STEPS; s++) {
+      // Exponential bias: pick from valid[] with weight exp(-i/T) where T is half the count.
+      // Falls back to uniform when spread = 0.
+      uint8_t pick;
+      if (spread == 0 || nValid <= 1){
+        pick = 0;
+      } else {
+        float T = (float)nValid * 0.5f;
+        float total = 0.0f;
+        float cum[64];
+        for (uint8_t i = 0; i < nValid; i++){
+          total += expf(-(float)i / T);
+          cum[i] = total;
+        }
+        float r = ((float)random(1, 1000001)) * (total / 1000000.0f);
+        pick = nValid - 1;
+        for (uint8_t i = 0; i < nValid; i++){
+          if (r <= cum[i]){ pick = i; break; }
+        }
       }
-      float r = ((float)random(1, 1000001)) * (total / 1000000.0f);
-      pick = nValid - 1;
-      for (uint8_t i = 0; i < nValid; i++){
-        if (r <= cum[i]){ pick = i; break; }
-      }
-    }
-    int note = (int)root + (int)valid[pick];
-    pitch[ch][base + s] = (uint8_t)constrain(note, 0, 127);
+      int note = (int)root + (int)valid[pick];
+      pitch[ch][base + s] = (uint8_t)constrain(note, 0, 127);
 
-    stepSlide[ch][base + s]    = (random(0, 100) < randomSlideProb[ch]);
-    int v = (int)channelVelocity[ch] + random(-10, 10);
-    stepVelocity[ch][base + s] = (uint8_t)constrain(v, 0, 127);
-    noteLen[ch][base + s]      = noteLenIdx[ch];
-    // Note: steps[] is intentionally NOT touched here. Whether a step fires
-    // is the user's rhythm decision (manual toggle or Euclid). Generative
-    // mode only paints the pitches.
+      stepSlide[ch][base + s]    = (random(0, 100) < randomSlideProb[ch]);
+      int v = (int)channelVelocity[ch] + random(-10, 10);
+      stepVelocity[ch][base + s] = (uint8_t)constrain(v, 0, 127);
+      noteLen[ch][base + s]      = noteLenIdx[ch];
+      // Note: steps[] is intentionally NOT touched here. Whether a step fires
+      // is the user's rhythm decision (manual toggle or Euclid). Generative
+      // mode only paints the pitches.
+    }
   }
 }
 
@@ -2312,9 +2366,17 @@ void SimpleSequencer::updateLEDs(){
   uint8_t pulse = (uint8_t)((millis() / 4) & 0xFF);
   uint8_t pulseBri = (pulse < 128) ? (pulse * 2) : (255 - (pulse - 128) * 2);
 
+  // Playhead lights up only when the playback page matches the page the
+  // user is currently editing — so editing page 2 while page 1 is playing
+  // shows page 2's pattern with no white light moving across.
+  uint8_t selCh   = selectedChannel;
+  uint8_t playPg  = (numPages[selCh] > 0) ? (uint8_t)(globalPage % numPages[selCh]) : 0;
+  bool pageMatchesPlay = (playPg == editPage[selCh]);
+  uint8_t lstep = localStep(selCh);
+
   for (uint8_t s = 0; s < LED_COUNT && s < NUM_STEPS; s++){
-    bool active = isStepActive(selectedChannel, editIdx(selectedChannel, s));
-    bool isPlayhead = isRunning && (s == currentStep);
+    bool active = isStepActive(selCh, editIdx(selCh, s));
+    bool isPlayhead = isRunning && pageMatchesPlay && (s == lstep);
 
     if (isPlayhead){
       // Playhead: white normally, green when Fill is held (so you see when fill is active)
@@ -2331,9 +2393,9 @@ void SimpleSequencer::updateLEDs(){
     }
 
     // Decorations for Menu 4 overlay state and fill marks
-    uint16_t eI = editIdx(selectedChannel, s);
-    if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
-      uint8_t ov = machineOverlay[selectedChannel][eI];
+    uint16_t eI = editIdx(selCh, s);
+    if (activeMenu == 4 && trigMachine[selCh] != TM_OFF){
+      uint8_t ov = machineOverlay[selCh][eI];
       if (!isPlayhead){
         if (ov == 1){
           ledStrip.setPixelColor(s, ledStrip.Color(180, 180, 180));
@@ -2341,7 +2403,7 @@ void SimpleSequencer::updateLEDs(){
           ledStrip.setPixelColor(s, ledStrip.Color(40, 0, 0));
         }
       }
-    } else if (fillState[selectedChannel][eI] == 1 && !isPlayhead){
+    } else if (fillState[selCh][eI] == 1 && !isPlayhead){
       // Fill-only step: solid green when Fill is held (the step will trigger),
       // gentle pulse green when Fill not held (so you can see fills exist).
       if (fillModeActive){
