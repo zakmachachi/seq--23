@@ -857,6 +857,10 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       // Regenerate notes using current settings
       randomizeEuclidMelody(selectedChannel);
       Serial.print("REGEN CH"); Serial.println(selectedChannel+1);
+    } else if (pot == 2){
+      // Pot 3 button: mutate — change one random active note on the edit
+      // page (toggle slide, toggle accent, change length, or change pitch).
+      mutatePattern(selectedChannel);
     }
   }
 }
@@ -1503,12 +1507,19 @@ static uint8_t getScale(uint8_t mode, const uint8_t** outScale){
 }
 
 // Re-roll only the slide flags based on randomSlideProb. Leaves notes untouched.
-// Operates on the current edit page only.
+// Operates on the current edit page only. Slides cluster: after a slide step
+// the next-step probability is boosted by +50% (capped at 100%) to recreate
+// the 303-style consecutive-slide phrasing.
 void SimpleSequencer::rerollSlides(uint8_t ch){
   uint8_t prob = randomSlideProb[ch];
   uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+  bool prevSlide = false;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
-    stepSlide[ch][base + s] = (random(0, 100) < prob);
+    int eff = (int)prob + (prevSlide ? 50 : 0);
+    if (eff > 100) eff = 100;
+    bool sl = (random(0, eff > 0 ? 100 : 1) < eff);
+    stepSlide[ch][base + s] = sl;
+    prevSlide = sl;
   }
 }
 
@@ -1592,14 +1603,23 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   }
   if (nValid == 0){ valid[0] = 0; nValid = 1; }
 
+  // Probability the picked note is forced to be the root (gives the melody a
+  // tonal centre regardless of spread).
+  const int ROOT_BIAS_PERCENT = 35;
+
   // Fill every active page with fresh notes (each page gets independent picks).
   for (uint8_t pg = 0; pg < totalPages; pg++){
     uint16_t base = (uint16_t)pg * NUM_STEPS;
+    // Slide clustering state — reset per page so a page can start fresh.
+    bool prevSlide = false;
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
-      // Exponential bias: pick from valid[] with weight exp(-i/T) where T is half the count.
-      // Falls back to uniform when spread = 0.
+      // Exponential bias: pick from valid[] with weight exp(-i/T) where T is
+      // half the count. Falls back to uniform when spread = 0. With a 35%
+      // probability we override the pick to the root (offset 0) so the
+      // tonic recurs often enough to anchor the phrase.
       uint8_t pick;
-      if (spread == 0 || nValid <= 1){
+      bool forceRoot = (random(0, 100) < ROOT_BIAS_PERCENT);
+      if (forceRoot || spread == 0 || nValid <= 1){
         pick = 0;
       } else {
         float T = (float)nValid * 0.5f;
@@ -1618,13 +1638,106 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
       int note = (int)root + (int)valid[pick];
       pitch[ch][base + s] = (uint8_t)constrain(note, 0, 127);
 
-      stepSlide[ch][base + s]    = (random(0, 100) < randomSlideProb[ch]);
+      // Slide clustering: a slide on the previous step boosts the next-step
+      // slide probability by +50% (capped at 100). Recreates 303-style
+      // consecutive-slide phrasing without forcing the user to set it high.
+      int slideProb = (int)randomSlideProb[ch] + (prevSlide ? 50 : 0);
+      if (slideProb > 100) slideProb = 100;
+      bool sl = slideProb > 0 ? (random(0, 100) < slideProb) : false;
+      stepSlide[ch][base + s] = sl;
+      prevSlide = sl;
+
       int v = (int)channelVelocity[ch] + random(-10, 10);
       stepVelocity[ch][base + s] = (uint8_t)constrain(v, 0, 127);
       noteLen[ch][base + s]      = noteLenIdx[ch];
       // Note: steps[] is intentionally NOT touched here. Whether a step fires
       // is the user's rhythm decision (manual toggle or Euclid). Generative
       // mode only paints the pitches.
+    }
+  }
+}
+
+// Pick one random active step on the current edit page and apply a single
+// mutation: toggle slide, toggle accent, change note length, or change note
+// value. Used for "subtle evolution" — keeps the pattern intact and just
+// nudges one note.
+void SimpleSequencer::mutatePattern(uint8_t ch){
+  uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+  uint8_t actives[NUM_STEPS];
+  uint8_t nA = 0;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    bool on = euclidEnabled[ch] ? euclidPattern[ch][base + s]
+                                : steps[ch][base + s];
+    if (on) actives[nA++] = s;
+  }
+  if (nA == 0){
+    Serial.print("MUTATE CH"); Serial.print(ch+1);
+    Serial.println(" -> no active steps");
+    return;
+  }
+  uint8_t pickStep = actives[random(0, nA)];
+  uint16_t idx = base + pickStep;
+  uint8_t mutation = (uint8_t)random(0, 4);
+  switch (mutation){
+    case 0: { // Toggle slide
+      stepSlide[ch][idx] = !stepSlide[ch][idx];
+      Serial.print("MUT slide CH"); Serial.print(ch+1);
+      Serial.print(" step "); Serial.print(pickStep+1);
+      Serial.println(stepSlide[ch][idx] ? " ON" : " OFF");
+      break;
+    }
+    case 1: { // Toggle accent (max vs default velocity)
+      uint8_t curV = stepVelocity[ch][idx];
+      if (curV == 255) curV = channelVelocity[ch];
+      if (curV >= 120){
+        stepVelocity[ch][idx] = channelVelocity[ch];
+        Serial.print("MUT accent OFF CH");
+      } else {
+        stepVelocity[ch][idx] = 127;
+        Serial.print("MUT accent ON CH");
+      }
+      Serial.print(ch+1);
+      Serial.print(" step "); Serial.println(pickStep+1);
+      break;
+    }
+    case 2: { // Change note length to a different index
+      uint8_t cur = noteLen[ch][idx];
+      if (cur == 255) cur = noteLenIdx[ch];
+      uint8_t next = cur;
+      if (NOTE_LEN_COUNT > 1){
+        do { next = (uint8_t)random(0, NOTE_LEN_COUNT); } while (next == cur);
+      }
+      noteLen[ch][idx] = next;
+      Serial.print("MUT len CH"); Serial.print(ch+1);
+      Serial.print(" step "); Serial.print(pickStep+1);
+      Serial.print(" -> "); Serial.println(next);
+      break;
+    }
+    case 3: { // Change note value (re-pick from active scale)
+      uint8_t mode = euclidScaleMode[ch];
+      if (mode == 0) mode = lastScaleMode[ch] > 0 ? lastScaleMode[ch] : 1;
+      const uint8_t* scale;
+      uint8_t size = getScale(mode, &scale);
+      uint8_t SPRD = octaveSpread[ch];
+      if (SPRD > 60) SPRD = 60;
+      if (SPRD == 0) SPRD = 12; // mutation always allows at least one octave
+      uint8_t valid[64];
+      uint8_t nValid = 0;
+      for (int oct = 0; oct * 12 <= (int)SPRD && nValid < 64; oct++){
+        for (uint8_t i = 0; i < size && nValid < 64; i++){
+          int off = oct * 12 + (int)scale[i];
+          if (off > (int)SPRD) break;
+          valid[nValid++] = (uint8_t)off;
+        }
+      }
+      if (nValid == 0){ valid[0] = 0; nValid = 1; }
+      uint8_t pick = (uint8_t)random(0, nValid);
+      int note = (int)channelPitch[ch] + (int)valid[pick];
+      pitch[ch][idx] = (uint8_t)constrain(note, 0, 127);
+      Serial.print("MUT note CH"); Serial.print(ch+1);
+      Serial.print(" step "); Serial.print(pickStep+1);
+      Serial.print(" -> "); Serial.println(pitch[ch][idx]);
+      break;
     }
   }
 }

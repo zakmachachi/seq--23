@@ -99,6 +99,10 @@ class SimpleSequencer {
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
+    // Mutate one random active step on the edit page: toggle slide, toggle
+    // accent, change note length, or change note value. Used as a "subtle
+    // evolution" alternative to a full regenerate.
+    void mutatePattern(uint8_t ch);
     // Copy one full 16-step page worth of per-step state (steps, pitches,
     // velocities, slides, ratchets, gates, fill marks, machine overlays)
     // from srcPg to dstPg on channel ch. Used to seed newly-allocated pages
