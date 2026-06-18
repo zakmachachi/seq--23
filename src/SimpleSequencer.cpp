@@ -162,7 +162,7 @@ void SimpleSequencer::begin(){
 
   // initialize display
   display.begin(0x3C);
-  display.setRotation(2); // PCB mounts the OLED upside down — flip 180°
+  display.setRotation(SCREEN_ROTATION); // 0 = normal (release); override to 2 for upside-down PCB
 
   // second I2C bus + second OLED (overview screen)
   Wire1.begin();
@@ -171,7 +171,7 @@ void SimpleSequencer::begin(){
   Wire1.beginTransmission(0x3C);
   if (Wire1.endTransmission() == 0){
     display2.begin(0x3C);
-    display2.setRotation(2); // same upside-down mounting on PCB
+    display2.setRotation(SCREEN_ROTATION); // matches the primary screen
     display2Present = true;
     Serial.println("OLED2 detected on Wire1");
   } else {

@@ -3,6 +3,14 @@
 
 #include <Arduino.h>
 
+// --- OLED orientation ---------------------------------------------
+// SH110x rotation: 0 = normal, 2 = 180° (upside-down). The public release
+// builds at 0°. Boards with the OLEDs mounted upside down override this with a
+// build flag (-D SCREEN_ROTATION=2), e.g. in a local platformio_override.ini.
+#ifndef SCREEN_ROTATION
+#define SCREEN_ROTATION 0
+#endif
+
 
 // --- Button matrix (5 rows x 6 columns) ------------------------
 // Hardware: 5 row pins (inputs with internal pull-ups), 6 column pins (outputs)
