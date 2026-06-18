@@ -97,6 +97,10 @@ class SimpleSequencer {
     uint8_t randomSlideProb[NUM_CHANNELS]; // Probability 0-100 a generated step has Slide
     uint8_t octaveSpread[NUM_CHANNELS];    // 0..60 = max semitones above root for random per-step picks
     uint8_t lastScaleMode[NUM_CHANNELS];   // remembered scale to restore on Pot 1 toggle
+    // Pot 6 press toggles per-channel random velocity: each triggered note that
+    // uses the channel default velocity is jittered by +/- RANDOM_VEL_RANGE.
+    bool randomVelEnabled[NUM_CHANNELS];
+    static const uint8_t RANDOM_VEL_RANGE = 27;
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
     // Mutate one random active step on the edit page: toggle slide, toggle
@@ -199,6 +203,9 @@ class SimpleSequencer {
     void drawOverview(); // secondary OLED: global state dashboard
     void drawDebugGrid();
     void drawNotesView();
+    // Secondary OLED piano-roll: the selected channel's notes for the current
+    // edit page drawn as blocks (height = pitch, width = note length).
+    void drawNotesKeyboard();
     void drawEuclidView();
     void drawStepVisualiser();
     void bootAnimation();

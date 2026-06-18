@@ -102,6 +102,7 @@ SimpleSequencer::SimpleSequencer()
     randomSlideProb[c] = 0;   // 0% slide by default
     octaveSpread[c]    = 0;   // 0 = no octave spread (notes stay in root octave)
     lastScaleMode[c]   = 1;   // remember Major as last-active scale
+    randomVelEnabled[c] = false; // Pot 6 press toggles per-channel random velocity
     // Trigger machine defaults
     trigMachine[c] = TM_OFF;
     trigDensity[c] = 50;
@@ -861,6 +862,13 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       // Pot 3 button: mutate — change one random active note on the edit
       // page (toggle slide, toggle accent, change length, or change pitch).
       mutatePattern(selectedChannel);
+    } else if (pot == 5){
+      // Pot 6 button: toggle random velocity for this channel. When on, every
+      // note that uses the channel default velocity is jittered +/-27.
+      uint8_t ch = selectedChannel;
+      randomVelEnabled[ch] = !randomVelEnabled[ch];
+      Serial.print("RND VEL CH"); Serial.print(ch+1);
+      Serial.println(randomVelEnabled[ch] ? " ON" : " OFF");
     }
   }
 }
@@ -940,8 +948,57 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
 
   if (activeMenu == 1){
     uint8_t ch = selectedChannel;
+
+    // --- P-LOCKS: holding a step re-targets the pots at that single step ---
+    // While a step button is held, the per-step override arrays are edited
+    // instead of the channel-wide values, so you can pin a fixed note, gate,
+    // slide or velocity on one step. These overrides are wiped when the
+    // channel is regenerated (randomizeEuclidMelody) so the step "re-joins".
+    if (heldStep >= 0 && heldStep < (int8_t)NUM_STEPS){
+      uint16_t eI = editIdx(ch, (uint8_t)heldStep);
+      bool edited = true;
+      switch (pot){
+        case 0: { // Note (pitch) for this step
+          int cur = (pitch[ch][eI] == 255) ? (int)channelPitch[ch] : (int)pitch[ch][eI];
+          pitch[ch][eI] = (uint8_t)constrain(cur + ticks, 0, 127);
+          Serial.print("PLOCK note s"); Serial.print(heldStep+1);
+          Serial.print("="); Serial.println(pitch[ch][eI]);
+          break;
+        }
+        case 3: { // Slide on/off for this step (direction sets state)
+          stepSlide[ch][eI] = (ticks > 0);
+          Serial.print("PLOCK slide s"); Serial.print(heldStep+1);
+          Serial.println(stepSlide[ch][eI] ? "=ON" : "=OFF");
+          break;
+        }
+        case 4: { // Gate length for this step
+          int cur = (noteLen[ch][eI] == 255) ? (int)noteLenIdx[ch] : (int)noteLen[ch][eI];
+          noteLen[ch][eI] = (uint8_t)constrain(cur + ticks, 0, (int)NOTE_LEN_COUNT - 1);
+          Serial.print("PLOCK gate s"); Serial.print(heldStep+1);
+          Serial.print("="); Serial.println(noteLen[ch][eI]);
+          break;
+        }
+        case 5: { // Velocity for this step
+          int cur = (stepVelocity[ch][eI] == 255) ? (int)channelVelocity[ch] : (int)stepVelocity[ch][eI];
+          stepVelocity[ch][eI] = (uint8_t)constrain(cur + ticks, 0, 127);
+          Serial.print("PLOCK vel s"); Serial.print(heldStep+1);
+          Serial.print("="); Serial.println(stepVelocity[ch][eI]);
+          break;
+        }
+        default: edited = false; break; // scale/spread have no per-step meaning
+      }
+      if (edited){
+        // Activate the held step so the p-lock is audible, and cancel the
+        // on-release toggle so tweaking never flips the step off.
+        steps[ch][eI] = true;
+        if (euclidEnabled[ch]) euclidPattern[ch][eI] = true;
+        pendingToggle[heldStep] = false;
+      }
+      return;
+    }
+
     switch (pot){
-      case 0: { // Root note — TRANSPOSE existing per-step notes (no regenerate)
+      case 0: { // Pot 1: Root note — TRANSPOSE existing per-step notes (no regenerate)
         int oldRoot = (int)channelPitch[ch];
         int p = oldRoot + ticks;
         p = constrain(p, 0, 127);
@@ -951,7 +1008,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("ROOT="); Serial.println(channelPitch[ch]);
         break;
       }
-      case 1: { // Scale selection — store only (next regenerate applies it)
+      case 1: { // Pot 2: Scale selection — store only (next regenerate applies it)
         int mode = (int)euclidScaleMode[ch];
         if (mode <= 0) mode = 1;
         mode += ticks;
@@ -962,7 +1019,20 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("SCALE="); Serial.println(mode);
         break;
       }
-      case 2: { // Gate length (per-channel)
+      case 2: { // Pot 3: Octave spread 0..60 semitones — store only (next regenerate applies it)
+        octaveSpread[ch] = (uint8_t)constrain(
+          (int)octaveSpread[ch] + ticks, 0, 60);
+        Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
+        break;
+      }
+      case 3: { // Pot 4: Random Slide probability — re-roll slides immediately
+        randomSlideProb[ch] = (uint8_t)constrain(
+          (int)randomSlideProb[ch] + ticks, 0, 100);
+        rerollSlides(ch);
+        Serial.print("SLIDE%="); Serial.println(randomSlideProb[ch]);
+        break;
+      }
+      case 4: { // Pot 5: Gate length (per-channel)
         int prev = noteLenIdx[ch];
         noteLenIdx[ch] = (uint8_t)constrain(prev + ticks, 0, (int)NOTE_LEN_COUNT - 1);
         if (noteLenIdx[ch] != prev && euclidScaleMode[ch] != 0){
@@ -973,23 +1043,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("="); Serial.println(noteLenIdx[ch]);
         break;
       }
-      case 3: { // Random Slide probability — re-roll slides immediately
-        randomSlideProb[ch] = (uint8_t)constrain(
-          (int)randomSlideProb[ch] + ticks, 0, 100);
-        rerollSlides(ch);
-        Serial.print("SLIDE%="); Serial.println(randomSlideProb[ch]);
-        break;
-      }
-      case 4: { // Base velocity 0..127
+      case 5: { // Pot 6: Base velocity 0..127
         channelVelocity[ch] = (uint8_t)constrain(
           (int)channelVelocity[ch] + ticks, 0, 127);
         Serial.print("VEL="); Serial.println(channelVelocity[ch]);
-        break;
-      }
-      case 5: { // Octave spread 0..60 semitones — store only (next regenerate applies it)
-        octaveSpread[ch] = (uint8_t)constrain(
-          (int)octaveSpread[ch] + ticks, 0, 60);
-        Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
         break;
       }
     }
@@ -1666,13 +1723,16 @@ void SimpleSequencer::mutatePattern(uint8_t ch){
   uint8_t actives[NUM_STEPS];
   uint8_t nA = 0;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
-    bool on = euclidEnabled[ch] ? euclidPattern[ch][base + s]
-                                : steps[ch][base + s];
-    if (on) actives[nA++] = s;
+    // Only mutate notes that are actually being triggered by the sequencer:
+    // honour machine overlays/patterns and skip anti-fill steps so we never
+    // touch a step that won't sound in the current pattern.
+    if (!isStepActive(ch, base + s)) continue;
+    if (fillState[ch][base + s] == 2) continue; // anti-fill: never plays
+    actives[nA++] = s;
   }
   if (nA == 0){
     Serial.print("MUTATE CH"); Serial.print(ch+1);
-    Serial.println(" -> no active steps");
+    Serial.println(" -> no active (triggered) steps");
     return;
   }
   uint8_t pickStep = actives[random(0, nA)];
@@ -2027,7 +2087,18 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   uint8_t note = constrain(p, 0, 127);
 
   uint8_t vel = stepVelocity[ch][pIdx];
-  if (vel == 255) vel = channelVelocity[ch];
+  if (vel == 255){
+    vel = channelVelocity[ch];
+    // Random velocity only jitters notes that follow the channel default,
+    // leaving per-step (p-locked) velocities fixed.
+    if (randomVelEnabled[ch]){
+      int lo = (int)vel - RANDOM_VEL_RANGE;
+      int hi = (int)vel + RANDOM_VEL_RANGE;
+      if (lo < 0) lo = 0;
+      if (hi > 127) hi = 127;
+      vel = (uint8_t)random(lo, hi + 1);
+    }
+  }
 
   // 2. THE MONOSYNTH LEGATO MAGIC — route to per-channel MIDI Out
   static bool prevSlide[NUM_CHANNELS] = {false};
@@ -2570,6 +2641,22 @@ void SimpleSequencer::updateLEDs(){
       }
     }
   }
+
+  // ── Channel LEDs (idx 23..29 on the shared chain) ───────────────
+  // Selected channel: GREEN if unmuted, YELLOW if muted.
+  // Every other channel: RED if unmuted, OFF if muted.
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+    uint32_t col;
+    if (c == selectedChannel){
+      col = muted[c] ? ledStrip.Color(255, 180, 0)   // yellow
+                     : ledStrip.Color(0, 255, 0);     // green
+    } else {
+      col = muted[c] ? ledStrip.Color(0, 0, 0)        // off
+                     : ledStrip.Color(255, 0, 0);     // red
+    }
+    ledStrip.setPixelColor(ledForChannel(c), col);
+  }
+
   ledStrip.show();
 }
 
@@ -2894,7 +2981,10 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
 }
 
 void SimpleSequencer::drawNotesView(){
-  // Menu 1: Generative performance page for the selected channel
+  // Menu 1: Generative performance page for the selected channel.
+  // Channel select/mute state now lives on the channel LEDs (see updateLEDs),
+  // so the top of the screen is freed up for a bigger key/scale header and a
+  // 2x3 parameter grid that lines up with the 6 physical pots.
   display.clearDisplay();
   const char* noteNames[]   = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
   const char* scaleNames[]  = {"OFF","MAJOR","MINOR","PENTA","LOCR","DIM","ATONL"};
@@ -2903,68 +2993,62 @@ void SimpleSequencer::drawNotesView(){
   if (sm > 6) sm = 6;
   bool genOn = (sm != 0);
 
-  // ── CHANNEL STRIP: all 7 with selected + mute state ─────────
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = 2 + c * 17;
-    bool sel = (c == selectedChannel);
-    if (sel){
-      display.fillRect(bx, 0, 16, 10, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.drawRect(bx, 0, 16, 10, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-    }
-    display.setTextSize(1);
-    display.setCursor(bx + 4, 1);
-    display.print(c + 1);
-    if (muted[c]){
-      display.drawLine(bx + 1, 5, bx + 14, 5,
-                       sel ? SH110X_BLACK : SH110X_WHITE);
-    }
-  }
   display.setTextColor(SH110X_WHITE);
 
-  // ── ROOT + SCALE ROW ────────────────────────────────────────
+  // ── HEADER: CH + big root note + scale + GEN/OFF chip ───────────
+  display.setTextSize(1);
+  display.setCursor(2, 1);
+  display.print("CH"); display.print(ch + 1);
+
   uint8_t p = channelPitch[ch];
   display.setTextSize(2);
-  display.setCursor(2, 13);
-  display.print(noteNames[p % 12]); display.print((p / 12) - 1);
+  display.setCursor(2, 12);
+  display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
 
-  // Scale name in size-1 so it doesn't fight the GEN chip for the right side
   display.setTextSize(1);
-  display.setCursor(44, 17);
+  display.setCursor(48, 16);
   display.print(scaleNames[sm]);
 
-  // GEN / OFF chip (top right) — pulled in 4px so it stops at x=124
+  // GEN / OFF chip (top right) — stops at x=124
   if (genOn){
-    display.fillRect(102, 12, 20, 11, SH110X_WHITE);
+    display.fillRect(102, 1, 22, 11, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
-    display.setTextSize(1);
-    display.setCursor(104, 14);
+    display.setCursor(105, 3);
     display.print("GEN");
     display.setTextColor(SH110X_WHITE);
   } else {
-    display.drawRect(102, 12, 20, 11, SH110X_WHITE);
-    display.setTextSize(1);
-    display.setCursor(104, 14);
+    display.drawRect(102, 1, 22, 11, SH110X_WHITE);
+    display.setCursor(105, 3);
     display.print("OFF");
   }
-  display.drawFastHLine(2, 31, 124, SH110X_WHITE);
+  display.drawFastHLine(0, 30, 128, SH110X_WHITE);
 
-  // ── PARAM ROWS ──────────────────────────────────────────────
+  // ── 2x3 PARAM GRID (columns line up with the 6 pots) ────────────
+  // Row 1 = pots 1-3 (KEY / SCALE / SPREAD), Row 2 = pots 4-6 (SLIDE / GATE / VEL).
+  const int colX[3] = {2, 45, 88};
+  const int lblY1 = 34, valY1 = 44; // row 1
+  const int lblY2 = 50, valY2 = 60; // row 2
   display.setTextSize(1);
-  display.setCursor(2, 35);
-  display.print("SLD:"); display.print(randomSlideProb[ch]); display.print("%");
-  display.setCursor(64, 35);
-  display.print("SPRD:"); display.print(octaveSpread[ch]);
 
-  display.setCursor(2, 46);
-  display.print("VEL:"); display.print(channelVelocity[ch]);
-  display.setCursor(64, 46);
-  display.print("GT:"); display.print(noteLenNames[noteLenIdx[ch]]);
+  // Row 1 labels
+  display.setCursor(colX[0], lblY1); display.print("KEY");
+  display.setCursor(colX[1], lblY1); display.print("SCALE");
+  display.setCursor(colX[2], lblY1); display.print("SPRD");
+  // Row 1 values
+  display.setCursor(colX[0], valY1);
+  display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
+  display.setCursor(colX[1], valY1); display.print(scaleNames[sm]);
+  display.setCursor(colX[2], valY1); display.print(octaveSpread[ch]);
 
-  display.setCursor(2, 57);
-  display.print("BPM:"); display.print(bpm);
+  // Row 2 labels
+  display.setCursor(colX[0], lblY2); display.print("SLD");
+  display.setCursor(colX[1], lblY2); display.print("GATE");
+  display.setCursor(colX[2], lblY2); display.print("VEL");
+  // Row 2 values
+  display.setCursor(colX[0], valY2); display.print(randomSlideProb[ch]); display.print("%");
+  display.setCursor(colX[1], valY2); display.print(noteLenNames[noteLenIdx[ch]]);
+  display.setCursor(colX[2], valY2); display.print(channelVelocity[ch]);
+  if (randomVelEnabled[ch]) display.print("R"); // random-velocity indicator
 
   display.display();
 }
@@ -3369,6 +3453,92 @@ static void drawMachineIcon(Adafruit_SH1106G& d, int cx, int cy, uint8_t machine
   }
 }
 
+void SimpleSequencer::drawNotesKeyboard(){
+  // Secondary OLED for Menu 1: piano-roll of the selected channel's notes on
+  // the current edit page. X = the 16 steps, Y = pitch (higher = nearer the
+  // top), block width = note length. Only steps that actually trigger are
+  // drawn (isStepActive), so what you see is what will sound.
+  display2.clearDisplay();
+  display2.setTextColor(SH110X_WHITE);
+  static const char* noteNames[]  = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  static const char* scaleNames[] = {"OFF","MAJOR","MINOR","PENTA","LOCR","DIM","ATONL"};
+  uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
+  uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 6;
+
+  // Header: channel, root note, scale, edit page.
+  display2.setTextSize(1);
+  display2.setCursor(2, 1);
+  display2.print("CH"); display2.print(ch + 1);
+  uint8_t rootN = channelPitch[ch];
+  display2.setCursor(34, 1);
+  display2.print(noteNames[rootN % 12]); display2.print((int)(rootN / 12) - 1);
+  display2.setCursor(66, 1);
+  display2.print(scaleNames[sm]);
+  display2.setCursor(112, 1);
+  display2.print("P"); display2.print(editPage[ch] + 1);
+  display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
+
+  const int plotTop = 13, plotBot = 63;
+  const int plotH = plotBot - plotTop;
+  const int colW = 128 / NUM_STEPS; // 8px per step
+
+  // Collect the triggered notes on the edit page and find the pitch span.
+  uint8_t pv[NUM_STEPS], wd[NUM_STEPS];
+  bool act[NUM_STEPS];
+  int loP = 127, hiP = 0; bool any = false;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint16_t eI = editIdx(ch, s);
+    act[s] = isStepActive(ch, eI);
+    if (!act[s]) continue;
+    uint8_t pitchV = (pitch[ch][eI] == 255) ? channelPitch[ch] : pitch[ch][eI];
+    uint8_t li     = (noteLen[ch][eI] == 255) ? noteLenIdx[ch] : noteLen[ch][eI];
+    if (li >= NOTE_LEN_COUNT) li = noteLenIdx[ch];
+    uint8_t w = noteLenTicks[li] / 6; // 6 ticks == one 1/16 step
+    if (w < 1) w = 1;
+    if (w > NUM_STEPS) w = NUM_STEPS;
+    pv[s] = pitchV; wd[s] = w;
+    if (pitchV < loP) loP = pitchV;
+    if (pitchV > hiP) hiP = pitchV;
+    any = true;
+  }
+
+  if (!any){
+    display2.setCursor(16, 34);
+    display2.print("(no active notes)");
+    display2.display();
+    return;
+  }
+
+  // Pad the range a touch and enforce a minimum span so single-note patterns
+  // don't draw a giant block across the whole screen.
+  loP -= 1; hiP += 1; if (loP < 0) loP = 0;
+  int range = hiP - loP;
+  if (range < 4){ int c = (hiP + loP) / 2; loP = c - 2; hiP = c + 2; if (loP < 0){ hiP -= loP; loP = 0; } range = hiP - loP; }
+  if (range < 1) range = 1;
+
+  // Playhead column (only meaningful when the playing page is the edit page).
+  uint8_t playPg = (numPages[ch] > 0) ? (uint8_t)(globalPage % numPages[ch]) : 0;
+  bool pageMatchesPlay = (playPg == editPage[ch]);
+  if (isRunning && pageMatchesPlay){
+    int px = localStep(ch) * colW;
+    display2.drawFastVLine(px, plotTop, plotH, SH110X_WHITE);
+  }
+
+  // Draw the note blocks.
+  const int bh = 3;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    if (!act[s]) continue;
+    int x = s * colW;
+    int w = wd[s] * colW - 1; if (w < 2) w = 2; if (x + w > 127) w = 127 - x;
+    int y = plotBot - (int)((long)(pv[s] - loP) * (plotH - bh) / range);
+    if (y < plotTop) y = plotTop;
+    if (y > plotBot - bh) y = plotBot - bh;
+    display2.fillRect(x, y, w, bh, SH110X_WHITE);
+  }
+
+  display2.display();
+}
+
 void SimpleSequencer::drawOverview(){
   display2.clearDisplay();
   display2.setTextColor(SH110X_WHITE);
@@ -3527,239 +3697,9 @@ void SimpleSequencer::drawOverview(){
     return;
   }
 
-  // ── Menu 1: Notes — focused-parameter view following last-rotated pot ──
+  // ── Menu 1: Notes — piano-roll of the channel's notes on the edit page ──
   if (activeMenu == 1){
-    static const char* noteNames[]  = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-    static const char* scaleNames[] = {"OFF","MAJOR","MINOR","PENTA","LOCRIAN","DIM","ATONAL"};
-    static const char* gateNames[]  = {"1","3/4","1/2","3/8","1/4","3/16","1/8","3/32","1/16","1/24","1/32"};
-
-    // Persistent focus: once any pot has been turned the screen stays on that
-    // panel until another pot is touched. No timeout. The summary only shows
-    // before the very first rotation.
-    bool focused = (lastTouchedPot >= 0);
-
-    // Common header: small label naming the focused parameter
-    static const char* labels[6] = {
-      "ROOT", "SCALE", "GATE", "SLIDE %", "VELOCITY", "SPREAD"
-    };
-
-    display2.setTextColor(SH110X_WHITE);
-
-    if (!focused){
-      // Default Notes overview — show channel, root, scale, and the 4 main
-      // generative params as compact bars so the user has a recap to glance at.
-      display2.setTextSize(1);
-      display2.setCursor(2, 1);
-      display2.print("CH"); display2.print(ch + 1);
-      display2.print(" >M"); display2.print(midiChannel[ch] + 1);
-      uint8_t rootN = channelPitch[ch];
-      display2.setCursor(58, 1);
-      display2.print(noteNames[rootN % 12]); display2.print((int)((rootN/12) - 1));
-      display2.setCursor(86, 1);
-      uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 0;
-      display2.print(scaleNames[sm]);
-      display2.drawFastHLine(2, 11, 124, SH110X_WHITE);
-
-      // 4 mini bars. Layout sized so a 3-digit value (max "127") fits.
-      auto miniBar = [&](const char* lbl, int v, int max, int y){
-        display2.setTextSize(1);
-        display2.setCursor(2, y); display2.print(lbl);
-        int bx = 28, bw = 72, bh = 7;
-        display2.drawRect(bx, y, bw, bh, SH110X_WHITE);
-        if (v > 0 && max > 0){
-          int fw = ((v * (bw - 2)) + max/2) / max;
-          if (fw > bw - 2) fw = bw - 2;
-          if (fw > 0) display2.fillRect(bx + 1, y + 1, fw, bh - 2, SH110X_WHITE);
-        }
-        // Right-align value in a 3-digit slot that ends at x=124 (safe edge).
-        char vbuf[6]; snprintf(vbuf, sizeof(vbuf), "%d", v);
-        int vw = (int)strlen(vbuf) * 6;
-        display2.setCursor(124 - vw, y);
-        display2.print(vbuf);
-      };
-      miniBar("VEL",  channelVelocity[ch], 127, 16);
-      miniBar("GAT",  noteLenIdx[ch],       10, 26);
-      miniBar("SLD",  randomSlideProb[ch], 100, 36);
-      miniBar("SPR",  octaveSpread[ch],     60, 46);
-      // Hint at the bottom
-      display2.setCursor(2, 57); display2.print("TURN A POT TO FOCUS");
-      display2.display();
-      return;
-    }
-
-    // FOCUS HEADER
-    display2.setTextSize(1);
-    display2.setCursor(2, 1);
-    display2.print(labels[lastTouchedPot]);
-    display2.setCursor(108, 1);
-    display2.print("P"); display2.print((int)(lastTouchedPot + 1));
-    display2.drawFastHLine(2, 10, 124, SH110X_WHITE);
-
-    switch (lastTouchedPot){
-      case 0: { // ROOT NOTE
-        uint8_t n = channelPitch[ch];
-        const char* nm = noteNames[n % 12];
-        int oct = (int)(n / 12) - 1;
-        // Big note glyph centred
-        display2.setTextSize(3);
-        char big[6];
-        snprintf(big, sizeof(big), "%s%d", nm, oct);
-        int bw = (int)strlen(big) * 18;
-        display2.setCursor((128 - bw) / 2, 16);
-        display2.print(big);
-        // Small piano keyboard at the bottom with root highlighted
-        // White keys: 0,2,4,5,7,9,11; black keys: 1,3,6,8,10
-        const int kbX = 4, kbY = 50, kw = 8, kh = 12;
-        int idx = n % 12;
-        static const uint8_t whiteOrder[7] = {0,2,4,5,7,9,11};
-        for (int i = 0; i < 7; i++){
-          int x = kbX + i * kw;
-          if (whiteOrder[i] == idx){
-            display2.fillRect(x, kbY, kw - 1, kh, SH110X_WHITE);
-          } else {
-            display2.drawRect(x, kbY, kw - 1, kh, SH110X_WHITE);
-          }
-        }
-        // Black keys overlay
-        const int8_t blackPos[5] = {0, 1, 3, 4, 5}; // white-key index before the black key
-        const uint8_t blackPC[5] = {1, 3, 6, 8, 10};
-        for (int i = 0; i < 5; i++){
-          int x = kbX + blackPos[i] * kw + kw/2 + 1;
-          bool sel = (blackPC[i] == idx);
-          if (sel){
-            display2.fillRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_WHITE);
-          } else {
-            display2.fillRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_BLACK);
-            display2.drawRect(x, kbY, kw - 2, kh * 2 / 3, SH110X_WHITE);
-          }
-        }
-        break;
-      }
-      case 1: { // SCALE
-        uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 0;
-        const char* nm = scaleNames[sm];
-        display2.setTextSize(2);
-        int tw = (int)strlen(nm) * 12;
-        display2.setCursor((128 - tw) / 2, 18);
-        display2.print(nm);
-        // Chromatic intervals row — 12 squares, highlighted ones belong to the scale
-        static const uint16_t scaleMask[7] = {
-          0,                          // OFF
-          0b101010110101,             // Major:   0,2,4,5,7,9,11
-          0b010101101101,             // Minor:   0,2,3,5,7,8,10
-          0b001010010101,             // Penta:   0,2,4,7,9
-          0b010101101011,             // Locrian: 0,1,3,5,6,8,10
-          0b011011011011,             // Dim:     0,1,3,4,6,7,9,10
-          0b111111111111              // Atonal:  all 12
-        };
-        const int sqW = 8, sqH = 8, sqY = 40, sqX = 16;
-        uint16_t mask = scaleMask[sm];
-        for (int i = 0; i < 12; i++){
-          int x = sqX + i * (sqW);
-          bool on = (mask >> i) & 1;
-          if (on){
-            display2.fillRect(x, sqY, sqW - 1, sqH, SH110X_WHITE);
-          } else {
-            display2.drawRect(x, sqY, sqW - 1, sqH, SH110X_WHITE);
-          }
-        }
-        display2.setTextSize(1);
-        display2.setCursor(2, 54);
-        display2.print("C D E F G A B");
-        break;
-      }
-      case 2: { // GATE (per-channel)
-        display2.setTextSize(3);
-        uint8_t gi = noteLenIdx[ch] % 11;
-        const char* nm = gateNames[gi];
-        int tw = (int)strlen(nm) * 18;
-        display2.setCursor((128 - tw) / 2, 18);
-        display2.print(nm);
-        // Mini horizontal bar showing length relative to whole note
-        int ticks = (int)noteLenTicks[gi];
-        const int bx = 4, by = 50, bw = 120, bh = 9;
-        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
-        int fw = (ticks * (bw - 2)) / 96;
-        if (fw > bw - 2) fw = bw - 2;
-        if (fw > 0) display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
-        break;
-      }
-      case 3: { // SLIDE %
-        int v = randomSlideProb[ch];
-        display2.setTextSize(3);
-        char buf[6]; snprintf(buf, sizeof(buf), "%d%%", v);
-        int tw = (int)strlen(buf) * 18;
-        display2.setCursor((128 - tw) / 2, 16);
-        display2.print(buf);
-        // Slide-chain visualization: 16 dots in a row, every Nth connected
-        // by a line based on probability (every step has v% chance of slide
-        // — render a representative pattern using a simple stride).
-        const int dy = 50, dx = 8;
-        int spacing = 7;
-        for (int i = 0; i < 16; i++){
-          int x = dx + i * spacing;
-          display2.fillCircle(x, dy, 2, SH110X_WHITE);
-        }
-        // Draw connecting lines proportional to slide probability.
-        int linked = (v * 16 + 50) / 100;
-        for (int i = 0; i < linked && i < 15; i++){
-          int x1 = dx + i * spacing;
-          int x2 = dx + (i + 1) * spacing;
-          display2.drawFastHLine(x1, dy, x2 - x1, SH110X_WHITE);
-        }
-        break;
-      }
-      case 4: { // VELOCITY
-        int v = channelVelocity[ch];
-        display2.setTextSize(3);
-        char buf[6]; snprintf(buf, sizeof(buf), "%d", v);
-        int tw = (int)strlen(buf) * 18;
-        display2.setCursor((128 - tw) / 2, 16);
-        display2.print(buf);
-        // Big segmented bar (Digitakt style, 16 segments)
-        const int bx = 4, by = 50, bw = 120, bh = 11;
-        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
-        int fw = ((v * (bw - 2)) + 63) / 127;
-        if (fw > bw - 2) fw = bw - 2;
-        if (fw > 0){
-          display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
-          for (int i = 1; i < 16; i++){
-            int sx = bx + 1 + (i * (bw - 2)) / 16;
-            if (sx < bx + 1 + fw){
-              display2.drawFastVLine(sx, by + 1, bh - 2, SH110X_BLACK);
-            }
-          }
-          int pulsePos = bx + 1 + fw - 1;
-          if ((now / 100) % 2 == 0){
-            display2.drawFastVLine(pulsePos, by, bh, SH110X_WHITE);
-          }
-        }
-        break;
-      }
-      case 5: { // SPREAD (octave/semitone spread)
-        int v = octaveSpread[ch];
-        display2.setTextSize(3);
-        char buf[8]; snprintf(buf, sizeof(buf), "%d st", v);
-        int tw = (int)strlen(buf) * 18;
-        display2.setCursor((128 - tw) / 2, 16);
-        display2.print(buf);
-        // Range visualization on a horizontal piano-like strip showing how
-        // far above the root the spread reaches.
-        const int by = 50, bh = 10, bx = 4, bw = 120;
-        display2.drawRect(bx, by, bw, bh, SH110X_WHITE);
-        // Map spread 0..60 semitones onto the bar
-        int fw = (v * (bw - 2)) / 60;
-        if (fw > bw - 2) fw = bw - 2;
-        if (fw > 0) display2.fillRect(bx + 1, by + 1, fw, bh - 2, SH110X_WHITE);
-        // Octave markers every 12 semitones
-        for (int oct = 1; oct <= 5; oct++){
-          int sx = bx + (oct * 12 * (bw - 2)) / 60;
-          display2.drawFastVLine(sx, by - 2, bh + 4, SH110X_WHITE);
-        }
-        break;
-      }
-    }
-    display2.display();
+    drawNotesKeyboard();
     return;
   }
 

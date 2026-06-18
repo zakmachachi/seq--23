@@ -76,9 +76,25 @@ static const uint8_t MIDI_RX_PIN = 21; // MIDI IN (connect from MIDI IN opto)
 // MIDI serial interface (Serial5 on Teensy 4.1 uses pins 20/21)
 #define MIDI_SERIAL Serial5
 
-// --- WS2812 step LEDs (one per step button) ---
+// --- WS2812 LEDs (single chain wired in series) ---
+// Physical wiring (hardware docs use 1-based "LED numbers"; firmware uses
+// 0-based indices, shown below):
+//   LED 1..16   step buttons          -> idx 0..15
+//   LED 17      Page button           -> idx 16
+//   LED 18      Fill button           -> idx 17
+//   LED 19..22  Menu 1..4 buttons     -> idx 18..21
+//   LED 23      Function button       -> idx 22
+//   LED 24..30  Channel LEDs (ch7..ch1)-> idx 23..29 (ch1=29 ... ch7=23)
 static const uint8_t LED_PIN = 29;
-static const uint8_t LED_COUNT = NUM_STEPS; // 16 LEDs, one per step
-static const uint8_t LED_BRIGHTNESS = 80;   // 0..255
+static const uint8_t LED_STEP_COUNT = NUM_STEPS; // first 16 LEDs = step buttons
+static const uint8_t LED_COUNT = 30;             // full chain length
+static const uint8_t LED_BRIGHTNESS = 80;        // 0..255
+// UI / channel LED indices on the shared chain (0-based)
+static const uint8_t LED_PAGE_INDEX     = 16;
+static const uint8_t LED_FILL_INDEX     = 17;
+static const uint8_t LED_MENU_BASE      = 18; // menu1..menu4 = idx 18..21
+static const uint8_t LED_FUNCTION_INDEX = 22;
+// Channel LED for a 0-based channel: ch1->29, ch2->28, ... ch7->23.
+static inline uint8_t ledForChannel(uint8_t ch){ return (uint8_t)(29 - ch); }
 
 #endif
