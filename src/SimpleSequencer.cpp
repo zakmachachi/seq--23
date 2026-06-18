@@ -607,18 +607,17 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
 
   // --- Step buttons 0-15 only ---
   if (i < NUM_STEPS){
-    // Pages mode: step buttons 1..4 directly jump to that page (auto-extending
-    // numPages if the target is beyond the current page count).
-    if (activeMenu == 5){
-      if (i < MAX_PAGES){
-        uint8_t target = (uint8_t)i;
-        if (target >= numPages[selectedChannel]){
-          growPagesAndDuplicate(selectedChannel, (uint8_t)(target + 1));
-        }
-        editPage[selectedChannel] = target;
-        Serial.print("CH"); Serial.print(selectedChannel+1);
-        Serial.print(" goto page "); Serial.println(target+1);
+    // Pages mode: Function + step 1..4 jumps straight to that page
+    // (auto-extending numPages if needed). A plain step press falls through to
+    // the normal toggle below so you can edit the pattern from the Pages menu.
+    if (activeMenu == 5 && isFunctionHeld() && i < MAX_PAGES){
+      uint8_t target = (uint8_t)i;
+      if (target >= numPages[selectedChannel]){
+        growPagesAndDuplicate(selectedChannel, (uint8_t)(target + 1));
       }
+      editPage[selectedChannel] = target;
+      Serial.print("CH"); Serial.print(selectedChannel+1);
+      Serial.print(" goto page "); Serial.println(target+1);
       return;
     }
     if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
