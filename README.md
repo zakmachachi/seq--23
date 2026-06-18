@@ -36,7 +36,7 @@ Pin mappings live in [include/SeqConfig.h](include/SeqConfig.h).
 | WS2812 LED chain | data pin 29, 30 LEDs in series | Step + channel + UI indicator LEDs |
 | MIDI OUT | Serial5 TX = pin 20, RX = pin 21, 31250 baud | Drives any standard MIDI receiver |
 
-Both OLEDs are rotated 180°. The second screen is optional — if it isn't present at boot the firmware just runs the primary screen.
+Screen orientation is a build option, `SCREEN_ROTATION` (default **0°** for the public release). Boards with the OLEDs mounted upside down build at 180° via a local, gitignored `platformio_override.ini` containing `build_flags = -D SCREEN_ROTATION=2` — `platformio.ini` auto-loads any `*_override.ini` through `extra_configs`. The second screen is optional — if it isn't present at boot the firmware just runs the primary screen.
 
 ### Matrix index map
 
