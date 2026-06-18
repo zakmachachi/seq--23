@@ -2586,10 +2586,6 @@ void SimpleSequencer::updateLEDs(){
   uint8_t cg = (chCol >> 8) & 0xFF;
   uint8_t cb = chCol & 0xFF;
 
-  // Slow pulse phase for blinking decorations (0..255 sine-ish ramp)
-  uint8_t pulse = (uint8_t)((millis() / 4) & 0xFF);
-  uint8_t pulseBri = (pulse < 128) ? (pulse * 2) : (255 - (pulse - 128) * 2);
-
   // Playhead lights up only when the playback page matches the page the
   // user is currently editing — so editing page 2 while page 1 is playing
   // shows page 2's pattern with no white light moving across.
@@ -2603,12 +2599,7 @@ void SimpleSequencer::updateLEDs(){
     bool isPlayhead = isRunning && pageMatchesPlay && (s == lstep);
 
     if (isPlayhead){
-      // Playhead: white normally, green when Fill is held (so you see when fill is active)
-      if (fillModeActive){
-        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 80));
-      } else {
-        ledStrip.setPixelColor(s, ledStrip.Color(255, 255, 255));
-      }
+      ledStrip.setPixelColor(s, ledStrip.Color(255, 255, 255));
     } else if (active){
       ledStrip.setPixelColor(s, ledStrip.Color(cr, cg, cb));
     } else {
@@ -2616,7 +2607,8 @@ void SimpleSequencer::updateLEDs(){
       ledStrip.setPixelColor(s, ledStrip.Color(cr / 16, cg / 16, cb / 16));
     }
 
-    // Decorations for Menu 4 overlay state and fill marks
+    // Decorations for Menu 4 overlay state and fill marks — kept steady so the
+    // grid doesn't flash/animate when Fill is held.
     uint16_t eI = editIdx(selCh, s);
     if (activeMenu == 4 && trigMachine[selCh] != TM_OFF){
       uint8_t ov = machineOverlay[selCh][eI];
@@ -2628,17 +2620,8 @@ void SimpleSequencer::updateLEDs(){
         }
       }
     } else if (fillState[selCh][eI] == 1 && !isPlayhead){
-      // Fill-only step: solid green when Fill is held (the step will trigger),
-      // gentle pulse green when Fill not held (so you can see fills exist).
-      if (fillModeActive){
-        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 60));
-      } else {
-        uint8_t g = 40 + (pulseBri / 3); // 40..125 pulsing
-        ledStrip.setPixelColor(s, ledStrip.Color(0, g, 0));
-      }
-      if (active && fillModeActive){
-        ledStrip.setPixelColor(s, ledStrip.Color(0, 255, 0));
-      }
+      // Fill-only step: steady dim green so you can see fills exist.
+      ledStrip.setPixelColor(s, ledStrip.Color(0, 70, 0));
     }
   }
 
@@ -2656,6 +2639,26 @@ void SimpleSequencer::updateLEDs(){
     }
     ledStrip.setPixelColor(ledForChannel(c), col);
   }
+
+  // ── Menu / modifier indicator LEDs (idx 16..22) ─────────────────
+  // Clear the UI band, then light the active menu plus any held modifiers.
+  for (uint8_t idx = LED_PAGE_INDEX; idx <= LED_FUNCTION_INDEX; idx++)
+    ledStrip.setPixelColor(idx, 0);
+  // Physical button -> activeMenu: Notes=MENU1(18), Step=MENU2(19),
+  // Euclid=MENU3(20), TrigMachines=MENU4(21); Pages lights the Page LED (16).
+  uint8_t menuLed = 255;
+  switch (activeMenu){
+    case 1: menuLed = LED_MENU_BASE + 0; break; // Notes
+    case 3: menuLed = LED_MENU_BASE + 1; break; // Step Visualiser
+    case 2: menuLed = LED_MENU_BASE + 2; break; // Euclid
+    case 4: menuLed = LED_MENU_BASE + 3; break; // Trigger Machines
+    case 5: menuLed = LED_PAGE_INDEX;    break; // Pages
+    default: break;
+  }
+  if (menuLed != 255) ledStrip.setPixelColor(menuLed, ledStrip.Color(120, 120, 120));
+  // Modifier LEDs light while held.
+  if (fillModeActive)   ledStrip.setPixelColor(LED_FILL_INDEX,     ledStrip.Color(0, 180, 40));
+  if (isFunctionHeld()) ledStrip.setPixelColor(LED_FUNCTION_INDEX, ledStrip.Color(200, 120, 0));
 
   ledStrip.show();
 }
@@ -2995,39 +2998,36 @@ void SimpleSequencer::drawNotesView(){
 
   display.setTextColor(SH110X_WHITE);
 
-  // ── HEADER: CH + big root note + scale + GEN/OFF chip ───────────
-  display.setTextSize(1);
-  display.setCursor(2, 1);
-  display.print("CH"); display.print(ch + 1);
-
+  // ── HEADER: big root note + scale + GEN/OFF chip ────────────────
+  // Channel/mute state now shows on the channel LEDs, so no CH number here.
   uint8_t p = channelPitch[ch];
   display.setTextSize(2);
-  display.setCursor(2, 12);
+  display.setCursor(2, 0);
   display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
 
   display.setTextSize(1);
-  display.setCursor(48, 16);
+  display.setCursor(50, 4);
   display.print(scaleNames[sm]);
 
   // GEN / OFF chip (top right) — stops at x=124
   if (genOn){
-    display.fillRect(102, 1, 22, 11, SH110X_WHITE);
+    display.fillRect(102, 0, 22, 11, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
-    display.setCursor(105, 3);
+    display.setCursor(105, 2);
     display.print("GEN");
     display.setTextColor(SH110X_WHITE);
   } else {
-    display.drawRect(102, 1, 22, 11, SH110X_WHITE);
-    display.setCursor(105, 3);
+    display.drawRect(102, 0, 22, 11, SH110X_WHITE);
+    display.setCursor(105, 2);
     display.print("OFF");
   }
-  display.drawFastHLine(0, 30, 128, SH110X_WHITE);
+  display.drawFastHLine(0, 16, 128, SH110X_WHITE);
 
   // ── 2x3 PARAM GRID (columns line up with the 6 pots) ────────────
   // Row 1 = pots 1-3 (KEY / SCALE / SPREAD), Row 2 = pots 4-6 (SLIDE / GATE / VEL).
   const int colX[3] = {2, 45, 88};
-  const int lblY1 = 34, valY1 = 44; // row 1
-  const int lblY2 = 50, valY2 = 60; // row 2
+  const int lblY1 = 21, valY1 = 31; // row 1
+  const int lblY2 = 44, valY2 = 54; // row 2 (54..60 fits under 64)
   display.setTextSize(1);
 
   // Row 1 labels
@@ -3465,20 +3465,18 @@ void SimpleSequencer::drawNotesKeyboard(){
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
   uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 6;
 
-  // Header: channel, root note, scale, edit page.
+  // Header: root note, scale, edit page (channel shown on the LEDs now).
   display2.setTextSize(1);
-  display2.setCursor(2, 1);
-  display2.print("CH"); display2.print(ch + 1);
   uint8_t rootN = channelPitch[ch];
-  display2.setCursor(34, 1);
+  display2.setCursor(2, 1);
   display2.print(noteNames[rootN % 12]); display2.print((int)(rootN / 12) - 1);
-  display2.setCursor(66, 1);
+  display2.setCursor(44, 1);
   display2.print(scaleNames[sm]);
-  display2.setCursor(112, 1);
+  display2.setCursor(104, 1);
   display2.print("P"); display2.print(editPage[ch] + 1);
   display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
 
-  const int plotTop = 13, plotBot = 63;
+  const int plotTop = 13, plotBot = 62; // leave a 1px bottom margin
   const int plotH = plotBot - plotTop;
   const int colW = 128 / NUM_STEPS; // 8px per step
 
@@ -3520,16 +3518,16 @@ void SimpleSequencer::drawNotesKeyboard(){
   uint8_t playPg = (numPages[ch] > 0) ? (uint8_t)(globalPage % numPages[ch]) : 0;
   bool pageMatchesPlay = (playPg == editPage[ch]);
   if (isRunning && pageMatchesPlay){
-    int px = localStep(ch) * colW;
+    int px = localStep(ch) * colW + 1;
     display2.drawFastVLine(px, plotTop, plotH, SH110X_WHITE);
   }
 
-  // Draw the note blocks.
+  // Draw the note blocks, inset 1px each side so nothing touches the border.
   const int bh = 3;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     if (!act[s]) continue;
-    int x = s * colW;
-    int w = wd[s] * colW - 1; if (w < 2) w = 2; if (x + w > 127) w = 127 - x;
+    int x = s * colW + 1;
+    int w = wd[s] * colW - 2; if (w < 2) w = 2; if (x + w > 126) w = 126 - x;
     int y = plotBot - (int)((long)(pv[s] - loP) * (plotH - bh) / range);
     if (y < plotTop) y = plotTop;
     if (y > plotBot - bh) y = plotBot - bh;
