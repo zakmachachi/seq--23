@@ -197,6 +197,9 @@ void SimpleSequencer::begin(){
   // attempt to auto-load saved state from EEPROM
   loadState();
 
+  // Boot straight into the Notes page so there's a real menu on screen instead
+  // of the placeholder default overview.
+  activeMenu = 1;
 }
 
 // Removed helper setStepLED and refreshStepLEDs; using updateLEDs() below.
@@ -2971,23 +2974,25 @@ void SimpleSequencer::bootAnimation() {
   ledStrip.clear();
   ledStrip.show();
 
+  // Centred boot card (size-1, 6px per char): "made by Bob and Zak" is 19
+  // chars = 114px, so x=7 keeps it on-screen.
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(44, 20); display.print("seq-23");
-  display.setCursor(16, 32); display.print("made by Bob and Zak");
-  display.setCursor(28, 44); display.print("v. prototype");
+  display.setCursor(46, 20); display.print("seq-23");
+  display.setCursor(7,  34); display.print("made by Bob and Zak");
+  display.setCursor(28, 48); display.print("v. prototype");
   display.display();
 
   if (display2Present){
     display2.fillRect(0, 0, 128, 64, SH110X_WHITE);
     display2.setTextColor(SH110X_BLACK);
     display2.setTextSize(1);
-    display2.setCursor(44, 20); display2.print("seq-23");
-    display2.setCursor(16, 32); display2.print("made by Bob and Zak");
-    display2.setCursor(28, 44); display2.print("v. prototype");
+    display2.setCursor(46, 20); display2.print("seq-23");
+    display2.setCursor(7,  34); display2.print("made by Bob and Zak");
+    display2.setCursor(28, 48); display2.print("v. prototype");
     display2.display();
   }
-  delay(900);
+  delay(3000); // hold the boot card up for 3 seconds
 
   // Restore normal LED brightness for runtime
   ledStrip.setBrightness(LED_BRIGHTNESS);
@@ -3709,17 +3714,12 @@ void SimpleSequencer::drawOverview(){
       display2.fillCircle(cx, cy, 1, SH110X_WHITE);
     }
 
-    // Status text below the circle (size 2 if OFF, size 1 status line if ON)
-    display2.setTextColor(SH110X_WHITE);
-    if (!enabled){
-      // Big "OFF" centred
-      display2.setTextSize(2);
-      const char* txt = "OFF";
-      int tw = (int)strlen(txt) * 12;
-      display2.setCursor((128 - tw) / 2, 44);
-      display2.print(txt);
-    } else {
+    // When Euclid is off the dotted ring already reads as "off", so skip the
+    // redundant OFF label and the empty pulses bar. Only show the status line
+    // and the fill bar while it's enabled.
+    if (enabled){
       // "P 6/16  O 2" status line
+      display2.setTextColor(SH110X_WHITE);
       char buf[16];
       snprintf(buf, sizeof(buf), "P %u/16  O %u",
                (unsigned)pulses[ch], (unsigned)euclidOffset[ch]);
@@ -3727,26 +3727,26 @@ void SimpleSequencer::drawOverview(){
       display2.setTextSize(1);
       display2.setCursor((128 - tw) / 2, 46);
       display2.print(buf);
-    }
 
-    // Pulses fill bar at the bottom (Digitone-style 16 segments)
-    const int barX = 4, barY = 56, barW = 120, barH = 7;
-    display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
-    int p = enabled ? pulses[ch] : 0;
-    if (p > NUM_STEPS) p = NUM_STEPS;
-    int fillW = (p * (barW - 2)) / NUM_STEPS;
-    if (fillW > 0){
-      display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
-      for (int i = 1; i < NUM_STEPS; i++){
-        int sx = barX + 1 + (i * (barW - 2)) / NUM_STEPS;
-        if (sx < barX + 1 + fillW){
-          display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
+      // Pulses fill bar at the bottom (Digitone-style 16 segments)
+      const int barX = 4, barY = 56, barW = 120, barH = 7;
+      display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
+      int p = pulses[ch];
+      if (p > NUM_STEPS) p = NUM_STEPS;
+      int fillW = (p * (barW - 2)) / NUM_STEPS;
+      if (fillW > 0){
+        display2.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
+        for (int i = 1; i < NUM_STEPS; i++){
+          int sx = barX + 1 + (i * (barW - 2)) / NUM_STEPS;
+          if (sx < barX + 1 + fillW){
+            display2.drawFastVLine(sx, barY + 1, barH - 2, SH110X_BLACK);
+          }
         }
-      }
-      // Pulsing leading edge to give a "filling" feel when sweeping Pot 1
-      int pulsePos = barX + 1 + fillW - 1;
-      if ((now / 100) % 2 == 0){
-        display2.drawFastVLine(pulsePos, barY, barH, SH110X_WHITE);
+        // Pulsing leading edge to give a "filling" feel when sweeping Pot 1
+        int pulsePos = barX + 1 + fillW - 1;
+        if ((now / 100) % 2 == 0){
+          display2.drawFastVLine(pulsePos, barY, barH, SH110X_WHITE);
+        }
       }
     }
 
