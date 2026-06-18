@@ -101,6 +101,14 @@ class SimpleSequencer {
     // uses the channel default velocity is jittered by +/- RANDOM_VEL_RANGE.
     bool randomVelEnabled[NUM_CHANNELS];
     static const uint8_t RANDOM_VEL_RANGE = 27;
+    // Pot 5 (encoder 5) press toggles per-channel random gate length: each note
+    // that uses the channel default gate gets a random length across the full
+    // 1/32..1 range.
+    bool randomGateEnabled[NUM_CHANNELS];
+    // Function + encoder 3 sets a -100..+100 melodic contour bias per channel:
+    // positive favours ascending motion when a pattern is generated, negative
+    // descending, 0 = unbiased. Shown as an arrow on the Menu 1 screen 2.
+    int8_t contourBias[NUM_CHANNELS];
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
     // Mutate one random active step on the edit page: toggle slide, toggle

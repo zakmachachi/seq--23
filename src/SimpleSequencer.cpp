@@ -107,6 +107,8 @@ SimpleSequencer::SimpleSequencer()
     octaveSpread[c]    = 0;   // 0 = no octave spread (notes stay in root octave)
     lastScaleMode[c]   = 1;   // remember Major as last-active scale
     randomVelEnabled[c] = false; // Pot 6 press toggles per-channel random velocity
+    randomGateEnabled[c] = false;// Pot 5 press toggles per-channel random gate length
+    contourBias[c]      = 0;     // Function + encoder 3: melodic contour bias
     // Trigger machine defaults
     trigMachine[c] = TM_OFF;
     trigDensity[c] = 50;
@@ -866,6 +868,14 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       // Pot 3 button: mutate — change one random active note on the edit
       // page (toggle slide, toggle accent, change length, or change pitch).
       mutatePattern(selectedChannel);
+    } else if (pot == 4){
+      // Pot 5 button: toggle random gate length for this channel. When on,
+      // every note that uses the channel default gate gets a random length
+      // across the full 1/32..1 range.
+      uint8_t ch = selectedChannel;
+      randomGateEnabled[ch] = !randomGateEnabled[ch];
+      Serial.print("RND GATE CH"); Serial.print(ch+1);
+      Serial.println(randomGateEnabled[ch] ? " ON" : " OFF");
     } else if (pot == 5){
       // Pot 6 button: toggle random velocity for this channel. When on, every
       // note that uses the channel default velocity is jittered +/-27.
@@ -921,6 +931,19 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     }
     bpmFocusEndMs = millis() + 1500;
     Serial.print("BPM="); Serial.println(bpm);
+    return;
+  }
+
+  // --- GLOBAL MODIFIER: Function + Pot 3 (encoder 3) = melody contour bias ---
+  // Clockwise -> ascending bias, anti-clockwise -> descending. Applied on the
+  // next pattern generation. Shown as an arrow on the Menu 1 screen 2.
+  if (pot == 2 && isFunctionHeld()){
+    int v = (int)contourBias[selectedChannel] + ticks * 8; // ~8% per detent
+    if (v < -100) v = -100;
+    if (v > 100)  v = 100;
+    contourBias[selectedChannel] = (int8_t)v;
+    Serial.print("CONTOUR CH"); Serial.print(selectedChannel+1);
+    Serial.print("="); Serial.println(contourBias[selectedChannel]);
     return;
   }
 
@@ -1671,32 +1694,59 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
   // tonal centre regardless of spread).
   const int ROOT_BIAS_PERCENT = 35;
 
+  // Contour bias (-100..+100): when non-zero, notes walk up/down the scale
+  // instead of being sampled independently. Stronger bias -> more consistently
+  // ascending (positive) or descending (negative). Root anchoring fades out as
+  // the bias grows so a full sweep can run cleanly.
+  int contour = contourBias[ch];
+
   // Fill every active page with fresh notes (each page gets independent picks).
   for (uint8_t pg = 0; pg < totalPages; pg++){
     uint16_t base = (uint16_t)pg * NUM_STEPS;
     // Slide clustering state — reset per page so a page can start fresh.
     bool prevSlide = false;
+    // Contour walk position (scale-degree index into valid[]). Ascending bias
+    // starts low and climbs; descending starts high and falls.
+    int cur = (contour > 0) ? 0 : (contour < 0 ? (nValid - 1) : 0);
     for (uint8_t s = 0; s < NUM_STEPS; s++) {
       // Exponential bias: pick from valid[] with weight exp(-i/T) where T is
       // half the count. Falls back to uniform when spread = 0. With a 35%
       // probability we override the pick to the root (offset 0) so the
       // tonic recurs often enough to anchor the phrase.
       uint8_t pick;
-      bool forceRoot = (random(0, 100) < ROOT_BIAS_PERCENT);
-      if (forceRoot || spread == 0 || nValid <= 1){
-        pick = 0;
-      } else {
-        float T = (float)nValid * 0.5f;
-        float total = 0.0f;
-        float cum[64];
-        for (uint8_t i = 0; i < nValid; i++){
-          total += expf(-(float)i / T);
-          cum[i] = total;
+      if (contour != 0 && spread != 0 && nValid > 1){
+        int absC = contour < 0 ? -contour : contour;
+        int rootProb = (ROOT_BIAS_PERCENT * (100 - absC)) / 100;
+        if ((int)random(0, 100) < rootProb){
+          pick = 0; cur = 0;
+        } else {
+          int pUp = 50 + contour / 2;          // +100 -> always up, -100 -> always down
+          if (pUp < 0) pUp = 0;
+          if (pUp > 100) pUp = 100;
+          bool up = (int)random(0, 100) < pUp;
+          int stepDeg = (int)random(1, 3);      // move 1..2 scale degrees
+          cur += up ? stepDeg : -stepDeg;
+          if (cur < 0) cur = 0;
+          if (cur > nValid - 1) cur = nValid - 1;
+          pick = (uint8_t)cur;
         }
-        float r = ((float)random(1, 1000001)) * (total / 1000000.0f);
-        pick = nValid - 1;
-        for (uint8_t i = 0; i < nValid; i++){
-          if (r <= cum[i]){ pick = i; break; }
+      } else {
+        bool forceRoot = (random(0, 100) < ROOT_BIAS_PERCENT);
+        if (forceRoot || spread == 0 || nValid <= 1){
+          pick = 0;
+        } else {
+          float T = (float)nValid * 0.5f;
+          float total = 0.0f;
+          float cum[64];
+          for (uint8_t i = 0; i < nValid; i++){
+            total += expf(-(float)i / T);
+            cum[i] = total;
+          }
+          float r = ((float)random(1, 1000001)) * (total / 1000000.0f);
+          pick = nValid - 1;
+          for (uint8_t i = 0; i < nValid; i++){
+            if (r <= cum[i]){ pick = i; break; }
+          }
         }
       }
       int note = (int)root + (int)valid[pick];
@@ -2129,7 +2179,12 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
 
   // 3. RATCHET & GATE LENGTH
   uint8_t lenIdx = noteLen[ch][pIdx];
-  if (lenIdx == 255) lenIdx = noteLenIdx[ch];
+  if (lenIdx == 255){
+    lenIdx = noteLenIdx[ch];
+    // Random gate only affects notes that follow the channel default, leaving
+    // per-step (p-locked) gate lengths fixed. Full 1/32..1 range.
+    if (randomGateEnabled[ch]) lenIdx = (uint8_t)random(0, (int)NOTE_LEN_COUNT);
+  }
 
   uint8_t rIdx = stepRatchet[ch][pIdx];
   // Merge machine-driven ratchets (e.g., kick fill notes) with user P-Locks
@@ -3054,6 +3109,7 @@ void SimpleSequencer::drawNotesView(){
   // Row 2 values
   display.setCursor(colX[0], valY2); display.print(randomSlideProb[ch]); display.print("%");
   display.setCursor(colX[1], valY2); display.print(noteLenNames[noteLenIdx[ch]]);
+  if (randomGateEnabled[ch]) display.print(" R"); // random-gate indicator
   display.setCursor(colX[2], valY2); display.print(channelVelocity[ch]);
   if (randomVelEnabled[ch]) display.print("R"); // random-velocity indicator
 
@@ -3061,62 +3117,68 @@ void SimpleSequencer::drawNotesView(){
 }
 
 void SimpleSequencer::drawEuclidView(){
-  // Menu 2: show euclid params + per-channel mute state for all tracks
+  // Menu 3 (Euclid): formatted like the Notes page — a header (pattern grid +
+  // ON/OFF chip) over a 2x3 parameter grid whose columns line up with the 6
+  // pots: P1 PULSE  P2 OFST  P3 SCALE / P4 VEL  P5 GATE  P6 SLD.
   display.clearDisplay();
   uint32_t now = millis();
-
-  // Channel + mute state now shown on the channel LEDs, so no tab strip here.
   display.setTextColor(SH110X_WHITE);
-
-  // ── PARAMS ROW ───────────────────────────────────────────────────
-  display.setTextSize(1);
-  display.setCursor(2, 2);
-  display.print("H:"); display.print(pulses[selectedChannel]);
-  display.setCursor(28, 2);
-  display.print("O:"); display.print(euclidOffset[selectedChannel]);
-  display.setCursor(56, 2);
   const char* scaleNames[] = {"OFF","MAJ","MIN","PEN","LOC","DIM","ATO"};
-  uint8_t sm = euclidScaleMode[selectedChannel];
-  if (sm > 6) sm = 6;
-  display.print("S:"); display.print(scaleNames[sm]);
-  display.setCursor(96, 2);
-  display.print(euclidEnabled[selectedChannel] ? "ON" : "OFF");
+  uint8_t ch = selectedChannel;
+  bool en = euclidEnabled[ch];
+  uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 6;
 
-  // ── PATTERN GRID: 16 steps as small squares ──────────────────────
-  // sq=7 + gap=1 = 8 per cell. 16 cells = 128 — at the edge. Shrink to sq=6
-  // (gap stays 1) so the grid is 16*7 - 1 = 111px, sitting inside startX=4.
-  const uint8_t sq = 6, gap = 1, startX = 4, startY = 26;
+  // ── HEADER: 16-step pattern (left) + ON/OFF chip (right) ─────────
+  const uint8_t sq = 5, gap = 1, sx = 2, sy = 1;
+  uint8_t lstep = localStep(ch);
   for (uint8_t s = 0; s < NUM_STEPS; s++){
-    int x = startX + s * (sq + gap);
-    bool active = euclidEnabled[selectedChannel]
-                  ? euclidPattern[selectedChannel][s]
-                  : steps[selectedChannel][s];
-    bool isHead = isRunning && (s == currentStep);
+    int x = sx + s * (sq + gap);
+    uint16_t eI = editIdx(ch, s);
+    bool active = en ? euclidPattern[ch][eI] : steps[ch][eI];
+    bool isHead = isRunning && (s == lstep);
     if (isHead){
-      display.fillRect(x, startY, sq, sq, SH110X_WHITE);
-      if ((now / 125) % 2 == 0)
-        display.fillRect(x+2, startY+2, 3, 3, SH110X_BLACK);
+      display.fillRect(x, sy, sq, sq, SH110X_WHITE);
+      if ((now / 125) % 2 == 0) display.fillRect(x+1, sy+1, 3, 3, SH110X_BLACK);
     } else if (active){
-      display.fillRect(x, startY, sq, sq, SH110X_WHITE);
+      display.fillRect(x, sy, sq, sq, SH110X_WHITE);
     } else {
-      display.drawRect(x, startY, sq, sq, SH110X_WHITE);
+      display.drawRect(x, sy, sq, sq, SH110X_WHITE);
     }
   }
+  if (en){
+    display.fillRect(100, 0, 24, 9, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
+    display.setCursor(105, 1); display.print("ON");
+    display.setTextColor(SH110X_WHITE);
+  } else {
+    display.drawRect(100, 0, 24, 9, SH110X_WHITE);
+    display.setCursor(103, 1); display.print("OFF");
+  }
+  display.drawFastHLine(0, 12, 128, SH110X_WHITE);
 
-  // ── VEL + GATE + SLD ROW ─────────────────────────────────────────
-  display.setCursor(2, 38);
-  display.print("Vel:"); display.print(channelVelocity[selectedChannel]);
-  display.setCursor(56, 38);
-  display.print("Gate:"); display.print(noteLenNames[noteLenIdx[selectedChannel]]);
-  display.setCursor(2, 46);
-  display.print("Sld:"); display.print(randomSlideProb[selectedChannel]); display.print("%");
+  // ── 2x3 PARAM GRID (columns line up with the 6 pots) ────────────
+  const int colX[3] = {2, 45, 88};
+  const int lblY1 = 16, valY1 = 26; // row 1 (pots 1-3)
+  const int lblY2 = 42, valY2 = 52; // row 2 (pots 4-6)
+  display.setTextSize(1);
 
-  // ── BOTTOM: spinner + BPM ────────────────────────────────────────
-  const char spinFrames[] = {'-','\\','|','/'};
-  display.setCursor(2, 56);
-  display.print(isRunning ? spinFrames[(now/120)%4] : '.');
-  display.setCursor(84, 56);
-  display.print("BPM:"); display.print(bpm);
+  // Row 1 labels
+  display.setCursor(colX[0], lblY1); display.print("PULS");
+  display.setCursor(colX[1], lblY1); display.print("OFST");
+  display.setCursor(colX[2], lblY1); display.print("SCALE");
+  // Row 1 values
+  display.setCursor(colX[0], valY1); display.print(pulses[ch]);
+  display.setCursor(colX[1], valY1); display.print(euclidOffset[ch]);
+  display.setCursor(colX[2], valY1); display.print(scaleNames[sm]);
+
+  // Row 2 labels
+  display.setCursor(colX[0], lblY2); display.print("VEL");
+  display.setCursor(colX[1], lblY2); display.print("GATE");
+  display.setCursor(colX[2], lblY2); display.print("SLD");
+  // Row 2 values
+  display.setCursor(colX[0], valY2); display.print(channelVelocity[ch]);
+  display.setCursor(colX[1], valY2); display.print(noteLenNames[noteLenIdx[ch]]);
+  display.setCursor(colX[2], valY2); display.print(randomSlideProb[ch]); display.print("%");
 
   display.display();
 }
@@ -3445,8 +3507,30 @@ void SimpleSequencer::drawNotesKeyboard(){
   const int plotTop = 13, plotBot = 62; // 1px bottom margin
   const int plotH = plotBot - plotTop;
   // Column width scales to the pattern length so all steps fill the width.
-  const int plotW = 126; // 1px left + 1px right margin
+  // Reserve a strip on the right for the contour-bias arrow.
   const int x0 = 1;
+  const int plotW = 116;
+
+  // ── Contour-bias arrow (Function + encoder 3) ───────────────────
+  // Grows upward for an ascending bias, downward for descending.
+  {
+    int cb = contourBias[ch];
+    int axc = 123;
+    int midY = (plotTop + plotBot) / 2;
+    int maxLen = (plotH / 2) - 1;
+    int len = (abs(cb) * maxLen) / 100;
+    if (cb == 0){
+      display2.drawFastHLine(axc - 2, midY, 5, SH110X_WHITE);
+    } else if (cb > 0){
+      display2.drawFastVLine(axc, midY - len, len, SH110X_WHITE);
+      display2.drawLine(axc, midY - len, axc - 2, midY - len + 3, SH110X_WHITE);
+      display2.drawLine(axc, midY - len, axc + 2, midY - len + 3, SH110X_WHITE);
+    } else {
+      display2.drawFastVLine(axc, midY, len, SH110X_WHITE);
+      display2.drawLine(axc, midY + len, axc - 2, midY + len - 3, SH110X_WHITE);
+      display2.drawLine(axc, midY + len, axc + 2, midY + len - 3, SH110X_WHITE);
+    }
+  }
 
   // Collect the triggered notes on the display page and find the pitch span.
   uint8_t pv[NUM_STEPS], wd[NUM_STEPS];
