@@ -53,6 +53,10 @@ static const uint8_t NOTE_LEN_DEFAULT_IDX = 8; // 1/16 in the new array
 // Division printable names
 static const char* divisionNames[] = { "Whole", "Half", "Quarter", "Eighth", "Sixteenth" };
 
+// Trigger-machine helpers defined further down; forward-declared so the pot
+// handlers above their definition can size density to each machine's pool.
+static uint8_t machinePoolMax(uint8_t machine);
+
 static float getDivisionFactor(SimpleSequencer::Division d){
   switch(d){
     case SimpleSequencer::DIV_WHOLE: return 4.0f;
@@ -115,8 +119,8 @@ SimpleSequencer::SimpleSequencer()
     kickNoteSpread[c] = 0;
     kickRatchetProb[c] = 0;
     kickExtrasAreFills[c] = 0;
-    kickExtraCount[c] = 0;
-    for (uint8_t i = 0; i < 12; i++) kickExtraSeq[c][i] = 0;
+    machineExtraCount[c] = 0;
+    for (uint8_t i = 0; i < NUM_STEPS; i++) machineExtraSeq[c][i] = 0;
     // Gate length default per channel
     noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
   }
@@ -1137,19 +1141,19 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         const int N = (int)TM_COUNT;
         v = ((v % N) + N) % N;
         trigMachine[ch] = (uint8_t)v;
-        // Clamp density to the new machine's range to avoid stale values
-        // popping back when the user swaps machines.
-        if (trigMachine[ch] == TM_KICK && trigDensity[ch] > 12) trigDensity[ch] = 12;
+        // Newly-selected machines start at their skeleton (density 0) with a
+        // fresh accumulation, so you always dial extras up from nothing.
+        trigDensity[ch] = 0;
+        machineExtraCount[ch] = 0;
         if (trigMachine[ch] == TM_EUCLID) updateEuclid(ch);
         regenerateMachinePattern(ch);
         Serial.print("MACHINE CH"); Serial.print(ch+1);
         Serial.print(" = "); Serial.println(trigMachine[ch]);
         break;
       }
-      case 1: { // Pot 2: density
-        // KICK uses 0..12 (each unit = one additional kick on top of 4/4 base).
-        // Other machines retain the legacy 0..100 threshold range.
-        int maxV = (trigMachine[ch] == TM_KICK) ? 12 : 100;
+      case 1: { // Pot 2: density — incremental extras (0..machine pool size)
+        int maxV = machinePoolMax(trigMachine[ch]);
+        if (maxV < 1) maxV = 1; // EUCLID/OFF have no pool
         trigDensity[ch] = (uint8_t)constrain((int)trigDensity[ch] + ticks, 0, maxV);
         regenerateMachinePattern(ch);
         Serial.print("DENSITY="); Serial.println(trigDensity[ch]);
@@ -1361,33 +1365,40 @@ void SimpleSequencer::loadState() {
 // Weight 100 means "always on at any density >= 0".
 // Step indices below are 0-based: step 1 in the user's terminology = idx 0.
 
-// KICK: 4-on-the-floor skeleton (idx 0,4,8,12 at weight 100, always on).
-// Other steps weighted lower so density needs to climb high before any
-// extras come in — much sparser feel suited to live performance.
+// All machines now share one engine: weight==100 = skeleton (always on, the
+// "density 0" pattern); every other weight is the draw probability for the
+// accumulating extras (density adds one weighted-random step at a time). Since
+// no weight is 0, max density fills all 16 steps for every machine — so they
+// converge to the same pattern at the top and only differ in how they fill in.
+
+// KICK: 4-on-the-floor skeleton (0,4,8,12). Extras strongly favour the 8th-note
+// offbeats (2,6,10,14, weight 70) so density splits 4/4 -> 8/8 first, with the
+// other 1/16ths (weight 15) as occasional ~30% variation.
 static const uint8_t W_KICK[16] = {
-  100, 10, 30, 10, 100, 10, 30, 10, 100, 10, 30, 10, 100, 10, 30, 18
+  100, 15, 70, 15, 100, 15, 70, 15, 100, 15, 70, 15, 100, 15, 70, 15
 };
 
-// HIHAT: starts dense at high density, erodes at low density. Offbeats (2,6,10,14)
-// are most resistant; downbeats (0,4,8,12) next; other 1/16ths least resistant.
+// HIHAT: skeleton on the offbeats (2,6,10,14). Fills the downbeats (0,4,8,12,
+// weight 70) next, then the other 1/16ths (weight 40).
 static const uint8_t W_HIHAT[16] = {
-  80, 50, 100, 50, 80, 50, 100, 50, 80, 50, 100, 50, 80, 50, 100, 50
+  70, 40, 100, 40, 70, 40, 100, 40, 70, 40, 100, 40, 70, 40, 100, 40
 };
 
-// SNARE: backbeats on idx 4 and 12 dominate. Light fills around them.
+// SNARE: skeleton on the backbeats (4,12). Extras are ghost notes that cluster
+// just before/after the backbeats.
 static const uint8_t W_SNARE[16] = {
-  10, 10, 10, 20, 100, 20, 10, 25, 10, 10, 10, 25, 100, 25, 15, 30
+  15, 15, 20, 40, 100, 40, 20, 15, 15, 15, 20, 40, 100, 40, 20, 30
 };
 
-// ANTI-KICK: triggers between kicks. 1/8 offbeats (2,6,10,14) are primary;
-// 1/16 in-betweens fill in at higher density.
+// ANTI-KICK: skeleton on the 1/8 offbeats (2,6,10,14). Other 1/16ths (40) fill
+// before the downbeats (10).
 static const uint8_t W_ANTIKICK[16] = {
   10, 40, 100, 40, 10, 40, 100, 40, 10, 40, 100, 40, 10, 40, 100, 40
 };
 
-// PERC: even 1/16ths with weighting toward both onbeats and offbeats.
+// PERC: skeleton on every 1/8 (even steps). Extras fill the in-between 1/16ths.
 static const uint8_t W_PERC[16] = {
-  90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50, 90, 50
+  100, 50, 100, 50, 100, 50, 100, 50, 100, 50, 100, 50, 100, 50, 100, 50
 };
 
 static const uint8_t* getMachineWeights(uint8_t machine){
@@ -1401,15 +1412,18 @@ static const uint8_t* getMachineWeights(uint8_t machine){
   }
 }
 
+// Number of non-skeleton steps a machine can accumulate (its max density).
+static uint8_t machinePoolMax(uint8_t machine){
+  const uint8_t* w = getMachineWeights(machine);
+  if (!w) return 0;
+  uint8_t n = 0;
+  for (uint8_t s = 0; s < NUM_STEPS; s++) if (w[s] != 100) n++;
+  return n;
+}
+
 void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
   uint8_t m = trigMachine[ch];
-  uint8_t density = trigDensity[ch];
   uint8_t shift = trigShift[ch] % NUM_STEPS;
-
-  // Threshold: a step is on iff weight >= (100 - density).
-  // density 0   -> threshold 100 -> only weight==100 steps on (machine "skeleton")
-  // density 100 -> threshold 0   -> every step with weight > 0 on
-  int threshold = 100 - (int)density;
 
   if (m == TM_OFF || m >= TM_COUNT){
     for (uint8_t s = 0; s < NUM_STEPS; s++) machinePattern[ch][s] = false;
@@ -1430,57 +1444,50 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     return;
   }
 
-  // KICK accumulates extras: each density tick adds one new random source
-  // position to the channel's stored sequence, and previous positions stay
-  // put. Decreasing density just plays fewer entries; increasing again
-  // restores them (only adds beyond the current count get new draws).
-  if (m == TM_KICK){
-    // Place 4-on-the-floor base kicks (shift-aware) and clear ratchet cache.
-    for (uint8_t s = 0; s < NUM_STEPS; s++){
-      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-      machinePattern[ch][s] = (W_KICK[src] == 100);
-      machineRatchet[ch][s] = 0;
-    }
-    uint8_t n = density;
-    if (n > 12) n = 12;
+  // Unified accumulation engine for every machine:
+  //  - Lay the skeleton (weight==100 steps, shift-aware) = the density-0 sound.
+  //  - Each density tick adds one new weighted-random extra to the stored
+  //    sequence; lower weights come in less often, giving the machine its
+  //    character. Decreasing density plays fewer entries; increasing again
+  //    restores them. Dropping to 0 clears the list so it re-seeds fresh.
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+    machinePattern[ch][s] = (w[src] == 100);
+    machineRatchet[ch][s] = 0;
+  }
 
-    // If density grew beyond what's stored, draw new random source positions
-    // from the unused (non-base, not-already-picked) pool.
-    if (n > kickExtraCount[ch]){
-      bool used[NUM_STEPS] = {false};
-      // base source positions = 0,4,8,12 (W_KICK==100)
+  uint8_t poolMax = machinePoolMax(m);
+  uint8_t n = trigDensity[ch];
+  if (n > poolMax) n = poolMax;
+  if (n == 0) machineExtraCount[ch] = 0; // re-seed on the way back up
+
+  // Grow the stored accumulation with weighted draws (without replacement)
+  // over source positions, using the machine weights as probabilities.
+  if (n > machineExtraCount[ch]){
+    bool used[NUM_STEPS] = {false};
+    for (uint8_t s = 0; s < NUM_STEPS; s++) if (w[s] == 100) used[s] = true;
+    for (uint8_t i = 0; i < machineExtraCount[ch]; i++) used[machineExtraSeq[ch][i]] = true;
+    while (n > machineExtraCount[ch] && machineExtraCount[ch] < NUM_STEPS){
+      uint32_t total = 0;
+      for (uint8_t s = 0; s < NUM_STEPS; s++) if (!used[s]) total += w[s];
+      if (total == 0) break;
+      uint32_t r = (uint32_t)random(0, (long)total);
+      uint8_t pick = 255;
       for (uint8_t s = 0; s < NUM_STEPS; s++){
-        if (W_KICK[s] == 100) used[s] = true;
+        if (used[s]) continue;
+        if (r < w[s]){ pick = s; break; }
+        r -= w[s];
       }
-      for (uint8_t i = 0; i < kickExtraCount[ch]; i++){
-        used[kickExtraSeq[ch][i]] = true;
-      }
-      // Build unused pool, then random-pick `need` from it without
-      // replacement.
-      uint8_t pool[NUM_STEPS];
-      uint8_t nPool = 0;
-      for (uint8_t s = 0; s < NUM_STEPS; s++) if (!used[s]) pool[nPool++] = s;
-      uint8_t need = n - kickExtraCount[ch];
-      while (need > 0 && nPool > 0 && kickExtraCount[ch] < 12){
-        int pick = (int)random(0, (int)nPool);
-        kickExtraSeq[ch][kickExtraCount[ch]++] = pool[pick];
-        pool[pick] = pool[--nPool];
-        need--;
-      }
+      if (pick == 255) break;
+      used[pick] = true;
+      machineExtraSeq[ch][machineExtraCount[ch]++] = pick;
     }
-    // Render: first n entries of the stored sequence, shift applied.
-    uint8_t render = (n < kickExtraCount[ch]) ? n : kickExtraCount[ch];
-    for (uint8_t i = 0; i < render; i++){
-      uint8_t srcPos = kickExtraSeq[ch][i];
-      uint8_t visPos = (srcPos + shift) % NUM_STEPS;
-      machinePattern[ch][visPos] = true;
-    }
-  } else {
-    for (uint8_t s = 0; s < NUM_STEPS; s++){
-      uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
-      machinePattern[ch][s] = ((int)w[src] >= threshold);
-      machineRatchet[ch][s] = 0;
-    }
+  }
+  // Render the first n stored extras (shift applied).
+  uint8_t render = (n < machineExtraCount[ch]) ? n : machineExtraCount[ch];
+  for (uint8_t i = 0; i < render; i++){
+    uint8_t visPos = (machineExtraSeq[ch][i] + shift) % NUM_STEPS;
+    machinePattern[ch][visPos] = true;
   }
 
   // KICK extras: for every step that's not a 4-on-the-floor base, roll
@@ -2970,7 +2977,7 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
   kickNoteSpread[ch] = 0;
   kickRatchetProb[ch] = 0;
   kickExtrasAreFills[ch] = 0;
-  kickExtraCount[ch] = 0;
+  machineExtraCount[ch] = 0;
   // Silence any sustaining note on this channel
   if (lastNotePlaying[ch] < 128){
     midiSendNoteOff(midiChannel[ch] & 0x0F, lastNotePlaying[ch], 0);
@@ -3058,40 +3065,21 @@ void SimpleSequencer::drawEuclidView(){
   display.clearDisplay();
   uint32_t now = millis();
 
-  // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
-  // Each chip 17px wide, 11 tall
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = 2 + c * 17;
-    bool sel = (c == selectedChannel);
-    if (sel){
-      display.fillRect(bx, 0, 16, 11, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.drawRect(bx, 0, 16, 11, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-    }
-    display.setTextSize(1);
-    display.setCursor(bx + 4, 2);
-    display.print(c + 1);
-    if (muted[c]){
-      display.drawLine(bx + 1, 5, bx + 14, 5,
-                       sel ? SH110X_BLACK : SH110X_WHITE);
-    }
-  }
+  // Channel + mute state now shown on the channel LEDs, so no tab strip here.
   display.setTextColor(SH110X_WHITE);
 
   // ── PARAMS ROW ───────────────────────────────────────────────────
   display.setTextSize(1);
-  display.setCursor(2, 14);
+  display.setCursor(2, 2);
   display.print("H:"); display.print(pulses[selectedChannel]);
-  display.setCursor(28, 14);
+  display.setCursor(28, 2);
   display.print("O:"); display.print(euclidOffset[selectedChannel]);
-  display.setCursor(56, 14);
+  display.setCursor(56, 2);
   const char* scaleNames[] = {"OFF","MAJ","MIN","PEN","LOC","DIM","ATO"};
   uint8_t sm = euclidScaleMode[selectedChannel];
   if (sm > 6) sm = 6;
   display.print("S:"); display.print(scaleNames[sm]);
-  display.setCursor(96, 14);
+  display.setCursor(96, 2);
   display.print(euclidEnabled[selectedChannel] ? "ON" : "OFF");
 
   // ── PATTERN GRID: 16 steps as small squares ──────────────────────
@@ -3138,31 +3126,13 @@ void SimpleSequencer::drawStepVisualiser(){
   display.clearDisplay();
   uint32_t now = millis();
 
-  // ── TOP BAR: 7 channel tabs with selected + mute state ───────────
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = 2 + c * 17;
-    bool isSelected = (c == selectedChannel);
-    bool isMuted    = muted[c];
-    if (isSelected){
-      display.fillRect(bx, 0, 16, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.drawRect(bx, 0, 16, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-      if (isMuted){
-        display.drawLine(bx+1, 4, bx+14, 4, SH110X_WHITE);
-      }
-    }
-    display.setTextSize(1);
-    display.setCursor(bx + 3, 1);
-    display.print(c + 1);
-  }
+  // Channel + mute state now shown on the channel LEDs, so no tab strip here.
   display.setTextColor(SH110X_WHITE);
 
   // ── STEP GRID: 16 steps in 2 rows of 8 ───────────────────────
   // Each cell is 14px wide x 16px tall with 2px gap. gridX=1 to fit cleanly.
   const uint8_t cellW = 14, cellH = 16, gapX = 2, gapY = 3;
-  const uint8_t gridX = 1, gridY = 13;
+  const uint8_t gridX = 1, gridY = 6;
 
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t col = s % 8;
@@ -3237,42 +3207,30 @@ void SimpleSequencer::drawTrigMachineView(){
     "OFF", "KICK", "HIHAT", "SNARE", "ANTIK", "PERC", "EUCL"
   };
 
-  // Top: channel tabs
-  for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-    int bx = 2 + c * 17;
-    if (c == selectedChannel){
-      display.fillRect(bx, 0, 16, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    } else {
-      display.drawRect(bx, 0, 16, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_WHITE);
-      if (muted[c]) display.drawLine(bx+1, 4, bx+14, 4, SH110X_WHITE);
-    }
-    display.setTextSize(1);
-    display.setCursor(bx + 3, 1);
-    display.print(c + 1);
-  }
+  // Channel + mute state now shown on the channel LEDs, so no tab strip here.
   display.setTextColor(SH110X_WHITE);
 
   // Param row: machine | density | shift  (+ kick extras when KICK is active)
   uint8_t ch = selectedChannel;
   uint8_t m = trigMachine[ch];
   if (m >= TM_COUNT) m = 0;
+  uint8_t poolMax = machinePoolMax(m);
   display.setTextSize(1);
   if (m == TM_KICK){
-    // Compact kick layout — fits all six in 120 px. Density shows as N/12.
-    display.setCursor(2, 12);
-    display.print("KCK D"); display.print(trigDensity[ch]); display.print("/12");
+    // Compact kick layout — fits all six in 120 px. Density shows as N/max.
+    display.setCursor(2, 2);
+    display.print("KCK D"); display.print(trigDensity[ch]); display.print("/"); display.print(poolMax);
     display.print(" S"); display.print(trigShift[ch]);
     display.print(" P"); display.print(kickNoteSpread[ch]);
     display.print(" R"); display.print(kickRatchetProb[ch]);
     display.print(kickExtrasAreFills[ch] ? " F" : "");
   } else {
-    display.setCursor(2, 12);
+    display.setCursor(2, 2);
     display.print("M:"); display.print(machineNames[m]);
-    display.setCursor(56, 12);
+    display.setCursor(56, 2);
     display.print("D:"); display.print(trigDensity[ch]);
-    display.setCursor(94, 12);
+    if (poolMax > 0){ display.print("/"); display.print(poolMax); }
+    display.setCursor(104, 2);
     display.print("S:"); display.print(trigShift[ch]);
   }
 
@@ -3284,7 +3242,7 @@ void SimpleSequencer::drawTrigMachineView(){
   // Cell width 13 + 2px gap = 15 per step. 8 cells = 118 px starting at x=4
   // → last cell ends at x=122, inside the safe area.
   const uint8_t cellW = 13, cellH = 16, gapX = 2, gapY = 3;
-  const uint8_t startX = 4, startY = 24;
+  const uint8_t startX = 4, startY = 16;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t col = s % 8;
     uint8_t row = s / 8;
@@ -3454,10 +3412,12 @@ static void drawMachineIcon(Adafruit_SH1106G& d, int cx, int cy, uint8_t machine
 }
 
 void SimpleSequencer::drawNotesKeyboard(){
-  // Secondary OLED for Menu 1: piano-roll of the selected channel's notes on
-  // the current edit page. X = the 16 steps, Y = pitch (higher = nearer the
-  // top), block width = note length. Only steps that actually trigger are
-  // drawn (isStepActive), so what you see is what will sound.
+  // Secondary OLED for Menu 1: piano-roll of the selected channel's notes.
+  // X = steps (only the channel's active pattern length), Y = pitch (higher =
+  // nearer the top), block width = note length (clipped to the next note so
+  // bars don't overlap). When running it follows the page that's PLAYING, so a
+  // multi-page channel scrolls through its pages; when stopped it shows the
+  // edit page. Only steps that actually trigger are drawn (isStepActive).
   display2.clearDisplay();
   display2.setTextColor(SH110X_WHITE);
   static const char* noteNames[]  = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
@@ -3465,27 +3425,35 @@ void SimpleSequencer::drawNotesKeyboard(){
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
   uint8_t sm = euclidScaleMode[ch]; if (sm > 6) sm = 6;
 
-  // Header: root note, scale, edit page (channel shown on the LEDs now).
+  // Page to show: the playing page while running, otherwise the edit page.
+  uint8_t playPg = (numPages[ch] > 0) ? (uint8_t)(globalPage % numPages[ch]) : 0;
+  uint8_t dispPg = isRunning ? playPg : editPage[ch];
+  uint16_t base  = (uint16_t)dispPg * NUM_STEPS;
+  uint8_t nSteps = numSteps[ch]; if (nSteps < 1) nSteps = 1; if (nSteps > NUM_STEPS) nSteps = NUM_STEPS;
+
+  // Header: root note, scale, page (channel shown on the LEDs now).
   display2.setTextSize(1);
   uint8_t rootN = channelPitch[ch];
   display2.setCursor(2, 1);
   display2.print(noteNames[rootN % 12]); display2.print((int)(rootN / 12) - 1);
   display2.setCursor(44, 1);
   display2.print(scaleNames[sm]);
-  display2.setCursor(104, 1);
-  display2.print("P"); display2.print(editPage[ch] + 1);
+  display2.setCursor(98, 1);
+  display2.print("P"); display2.print(dispPg + 1); display2.print("/"); display2.print(numPages[ch]);
   display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
 
-  const int plotTop = 13, plotBot = 62; // leave a 1px bottom margin
+  const int plotTop = 13, plotBot = 62; // 1px bottom margin
   const int plotH = plotBot - plotTop;
-  const int colW = 128 / NUM_STEPS; // 8px per step
+  // Column width scales to the pattern length so all steps fill the width.
+  const int plotW = 126; // 1px left + 1px right margin
+  const int x0 = 1;
 
-  // Collect the triggered notes on the edit page and find the pitch span.
+  // Collect the triggered notes on the display page and find the pitch span.
   uint8_t pv[NUM_STEPS], wd[NUM_STEPS];
   bool act[NUM_STEPS];
   int loP = 127, hiP = 0; bool any = false;
-  for (uint8_t s = 0; s < NUM_STEPS; s++){
-    uint16_t eI = editIdx(ch, s);
+  for (uint8_t s = 0; s < nSteps; s++){
+    uint16_t eI = base + s;
     act[s] = isStepActive(ch, eI);
     if (!act[s]) continue;
     uint8_t pitchV = (pitch[ch][eI] == 255) ? channelPitch[ch] : pitch[ch][eI];
@@ -3493,7 +3461,7 @@ void SimpleSequencer::drawNotesKeyboard(){
     if (li >= NOTE_LEN_COUNT) li = noteLenIdx[ch];
     uint8_t w = noteLenTicks[li] / 6; // 6 ticks == one 1/16 step
     if (w < 1) w = 1;
-    if (w > NUM_STEPS) w = NUM_STEPS;
+    if (w > nSteps) w = nSteps;
     pv[s] = pitchV; wd[s] = w;
     if (pitchV < loP) loP = pitchV;
     if (pitchV > hiP) hiP = pitchV;
@@ -3514,20 +3482,28 @@ void SimpleSequencer::drawNotesKeyboard(){
   if (range < 4){ int c = (hiP + loP) / 2; loP = c - 2; hiP = c + 2; if (loP < 0){ hiP -= loP; loP = 0; } range = hiP - loP; }
   if (range < 1) range = 1;
 
-  // Playhead column (only meaningful when the playing page is the edit page).
-  uint8_t playPg = (numPages[ch] > 0) ? (uint8_t)(globalPage % numPages[ch]) : 0;
-  bool pageMatchesPlay = (playPg == editPage[ch]);
-  if (isRunning && pageMatchesPlay){
-    int px = localStep(ch) * colW + 1;
+  // Helper: x pixel for the start of step s (columns scaled to nSteps).
+  auto colX = [&](int s){ return x0 + (s * plotW) / nSteps; };
+
+  // Playhead column.
+  if (isRunning){
+    int px = colX(localStep(ch));
     display2.drawFastVLine(px, plotTop, plotH, SH110X_WHITE);
   }
 
-  // Draw the note blocks, inset 1px each side so nothing touches the border.
+  // Draw the note blocks. Width is the note length but clipped to the next
+  // active step so adjacent bars read as separate notes.
   const int bh = 3;
-  for (uint8_t s = 0; s < NUM_STEPS; s++){
+  for (uint8_t s = 0; s < nSteps; s++){
     if (!act[s]) continue;
-    int x = s * colW + 1;
-    int w = wd[s] * colW - 2; if (w < 2) w = 2; if (x + w > 126) w = 126 - x;
+    // distance to the next active step (cap the bar there)
+    int span = wd[s];
+    for (int d = 1; d < (int)nSteps; d++){
+      if (act[(s + d) % nSteps]){ if (d < span) span = d; break; }
+    }
+    int x = colX(s) + 1;
+    int xEnd = colX(s + span); // start of the step after this note ends
+    int w = xEnd - x - 1; if (w < 2) w = 2; if (x + w > x0 + plotW) w = x0 + plotW - x;
     int y = plotBot - (int)((long)(pv[s] - loP) * (plotH - bh) / range);
     if (y < plotTop) y = plotTop;
     if (y > plotBot - bh) y = plotBot - bh;
@@ -3568,13 +3544,13 @@ void SimpleSequencer::drawOverview(){
     display2.setCursor(tx, 26);
     display2.print(nm);
 
-    // Density fill bar — kick uses 12 segments to mirror its 0..12 scale,
-    // other machines keep the original 8-segment Digitone look.
+    // Density fill bar — one segment per slot in the machine's extra pool, so
+    // the bar fills one notch per added trigger.
     const int barX = 8, barY = 54, barW = 112, barH = 8;
     display2.drawRect(barX, barY, barW, barH, SH110X_WHITE);
     int dens = trigDensity[ch];
-    int maxD = (m == TM_KICK) ? 12 : 100;
-    int segs = (m == TM_KICK) ? 12 : 8;
+    int maxD = machinePoolMax(m); if (maxD < 1) maxD = 1;
+    int segs = maxD;
     int fillW = ((dens * (barW - 2)) + maxD/2) / maxD;
     if (fillW > barW - 2) fillW = barW - 2;
     if (fillW > 0){
