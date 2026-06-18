@@ -228,6 +228,12 @@ class SimpleSequencer {
     bool matrixState[MATRIX_KEYS]; // debounced stable state (true = pressed)
     unsigned long matrixLastDebounce[MATRIX_KEYS];
 
+    // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
+    bool slideAllHold = false;   // Function + Fill: slide every note on the active channel
+    bool accentAllHold = false;  // Function + Page: accent every note on the active channel
+    uint32_t clearComboStartMs = 0; // Function + Page + Fill held: clear after 1s
+    bool clearComboFired = false;
+
     // --- MODIFIER ACCESSORS ---
     bool isFunctionHeld();
     bool isFillHeld();

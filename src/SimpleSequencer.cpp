@@ -275,27 +275,43 @@ void SimpleSequencer::handleButtonIRQ(uint8_t idx){
 }
 
 void SimpleSequencer::loop(){
-  // --- TRACK THE FILL PERFORMANCE BUTTON (matrix mapped) ---
-  bool fillNow = isFillHeld();
-  if (fillNow != fillBtnLastState){
-    Serial.print("FILL_BTN ");
-    Serial.print(fillNow ? "HELD" : "RELEASED");
-    Serial.print(" (matrix idx=");
-    Serial.print(MATRIX_BTN_FILL_INDEX);
-    Serial.println(")");
-    fillBtnLastState = fillNow;
-  }
-  fillModeActive = fillNow;
-
   // UI-only loop: read controls and update display. Time-critical MIDI work runs in engine timer.
   readButtons();
   readEncoders();
-  // handle start/stop button debounce (Arduino-style)
-  // NOTE: Start/Stop now requires BOTH the FN and FILL buttons held together (pins 27 + 28)
   unsigned long now = millis();
 
-  // require both START and CHANNEL matrix buttons to be held for a transport toggle
-  bool startReading = isFunctionHeld() && matrixState[MATRIX_BTN_PAGE_INDEX];
+  // --- LIVE MODIFIERS (computed from fresh matrix state) ---
+  bool fnHeld   = isFunctionHeld();
+  bool fillNow  = isFillHeld();
+  bool pageHeld = (MATRIX_BTN_PAGE_INDEX < MATRIX_KEYS) && matrixState[MATRIX_BTN_PAGE_INDEX];
+  // Plain Fill = global fill performance (unchanged). Function+Fill = slide-all
+  // and Function+Page = accent-all, both on the active channel only.
+  fillModeActive = fillNow && !fnHeld;
+  slideAllHold   = fillNow && fnHeld;
+  accentAllHold  = pageHeld && fnHeld;
+  if (fillModeActive != fillBtnLastState){
+    Serial.print("FILL "); Serial.println(fillModeActive ? "ON" : "OFF");
+    fillBtnLastState = fillModeActive;
+  }
+
+  // --- CLEAR: Function + Page + Fill held together for 1s clears active ch ---
+  if (fnHeld && pageHeld && fillNow){
+    if (clearComboStartMs == 0){
+      clearComboStartMs = now;
+    } else if (!clearComboFired && (now - clearComboStartMs) >= 1000){
+      clearTrack(selectedChannel);
+      clearComboFired = true;
+      clearAnimCh = selectedChannel;
+      clearAnimEndMs = now + 700;
+      Serial.print("CLEAR (hold) CH"); Serial.println(selectedChannel + 1);
+    }
+  } else {
+    clearComboStartMs = 0;
+    clearComboFired = false;
+  }
+
+  // Transport (Play/Stop) is now Function + Menu 4 held together.
+  bool startReading = fnHeld && matrixState[MATRIX_BTN_MENU4_INDEX];
   if (startReading != startLastReading){
     startLastDebounceTime = now;
   }
@@ -544,12 +560,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
-  // --- Fill button: held = performance modifier; Function + Fill = clear track ---
+  // --- Fill button: held-only modifier (plain = global fill; Function+Fill =
+  // slide-all). No on-press action; handled live in loop(). ---
   if (i == MATRIX_BTN_FILL_INDEX){
-    if (isFunctionHeld()){
-      clearTrack(selectedChannel);
-      Serial.print("CLEAR CH"); Serial.println(selectedChannel + 1);
-    }
     return;
   }
 
@@ -602,9 +615,13 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU4_INDEX){
-    activeMenu = 4;  // Trigger Machines page
-    heldStep = -1; focusEncoder = 0;
-    Serial.println("MENU4 -> activeMenu=4 (Trigger Machines)");
+    // Function + Menu 4 is the transport (Play/Stop) combo, handled in loop();
+    // only switch menus on a plain tap.
+    if (!isFunctionHeld()){
+      activeMenu = 4;  // Trigger Machines page
+      heldStep = -1; focusEncoder = 0;
+      Serial.println("MENU4 -> activeMenu=4 (Trigger Machines)");
+    }
     return;
   }
 
@@ -710,7 +727,7 @@ bool SimpleSequencer::isFillHeld(){
 }
 
 // Aliases so existing runEngine/loop code compiles without changes
-bool SimpleSequencer::isStartHeld()   { return isFunctionHeld() && matrixState[MATRIX_BTN_PAGE_INDEX]; }
+bool SimpleSequencer::isStartHeld()   { return isFunctionHeld() && matrixState[MATRIX_BTN_MENU4_INDEX]; }
 bool SimpleSequencer::isChannelHeld() { return matrixState[MATRIX_BTN_PAGE_INDEX]; }
 
 void SimpleSequencer::readEncoders(){
@@ -2158,6 +2175,11 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
       vel = (uint8_t)random(lo, hi + 1);
     }
   }
+  // Accent-all (Function + Page) forces max velocity on the active channel.
+  if (accentAllHold && ch == selectedChannel) vel = 127;
+  // Slide-all (Function + Fill) forces slide on the active channel.
+  bool slideNow = stepSlide[ch][pIdx] || encoderSlideHold ||
+                  (slideAllHold && ch == selectedChannel);
 
   // 2. THE MONOSYNTH LEGATO MAGIC — route to per-channel MIDI Out
   static bool prevSlide[NUM_CHANNELS] = {false};
@@ -2177,7 +2199,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   }
 
   lastNotePlaying[ch] = note;
-  prevSlide[ch] = stepSlide[ch][pIdx] || encoderSlideHold;
+  prevSlide[ch] = slideNow;
 
   // 3. RATCHET & GATE LENGTH
   uint8_t lenIdx = noteLen[ch][pIdx];
@@ -2213,7 +2235,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
     uint32_t ticks = noteLenTicks[lenIdx];
     uint32_t gateLength;
 
-    if (stepSlide[ch][pIdx]) {
+    if (slideNow) {
       gateLength = (ticks < 7) ? 7 : (ticks + 1);
     } else {
       gateLength = (ticks > 1) ? (ticks - 1) : 1;
@@ -2384,8 +2406,8 @@ void SimpleSequencer::drawDisplay(){
   const char* scaleNames[] = {"OFF", "LOC", "DIM", "ATO"};
   const char* ratchetNames[] = {"OFF", "1/16", "1/24", "1/32", "1/48", "1/96"};
 
-  // ── DEBUG MODE: Hold both FN + FILL to show full grid ──────────
-  bool debugHold = isFunctionHeld() && isFillHeld();
+  // ── DEBUG MODE ── (disabled: FN+FILL is now the slide-all performance modifier)
+  bool debugHold = false;
   if (debugHold){
     drawDebugGrid();
     // Thin status line at top
@@ -2723,6 +2745,30 @@ void SimpleSequencer::updateLEDs(){
   // Modifier LEDs light while held.
   if (fillModeActive)   ledStrip.setPixelColor(LED_FILL_INDEX,     ledStrip.Color(0, 180, 40));
   if (isFunctionHeld()) ledStrip.setPixelColor(LED_FUNCTION_INDEX, ledStrip.Color(200, 120, 0));
+
+  // When paused, slow-pulse Function + Menu 4 white to hint the play combo.
+  if (!isRunning){
+    float s = sinf((float)millis() * 0.004f) * 0.5f + 0.5f;
+    uint8_t pw = (uint8_t)(s * 200.0f);
+    ledStrip.setPixelColor(LED_FUNCTION_INDEX,  ledStrip.Color(pw, pw, pw));
+    ledStrip.setPixelColor(LED_MENU_BASE + 3,   ledStrip.Color(pw, pw, pw));
+  }
+
+  // Slide-all / accent-all performance overlays take over the whole strip.
+  if (accentAllHold){
+    // All LEDs flash red.
+    bool on = ((millis() / 120) % 2) == 0;
+    uint32_t col = on ? ledStrip.Color(255, 0, 0) : 0;
+    for (uint8_t i = 0; i < LED_COUNT; i++) ledStrip.setPixelColor(i, col);
+  } else if (slideAllHold){
+    // All LEDs ripple as a dark-purple wave.
+    uint32_t t = millis();
+    for (uint8_t i = 0; i < LED_COUNT; i++){
+      float ph = sinf((float)i * 0.6f - (float)t * 0.012f) * 0.5f + 0.5f;
+      uint8_t b = (uint8_t)(ph * 120.0f);
+      ledStrip.setPixelColor(i, ledStrip.Color((uint8_t)(b * 0.55f), 0, b));
+    }
+  }
 
   ledStrip.show();
 }
