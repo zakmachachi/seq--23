@@ -425,6 +425,9 @@ void SimpleSequencer::loop(){
     if (c == 'v' || c == 'V'){
       cvSelfTest();
     }
+    if (c == 'x' || c == 'X'){
+      pixiDiag();
+    }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
     }
@@ -3119,6 +3122,33 @@ void SimpleSequencer::cvSelfTest(){
 
   for (uint8_t i = 0; i < NUM_CV_OUTS; i++) pixi.setVoltage0to10(CV_PORTS[i], 0.0f);
   Serial.println("CV self-test done (outputs at 0V)");
+}
+
+// Serial 'x': read PIXI registers back over SPI to tell whether the bus is
+// working at all. If the write/readback of port_cfg matches, SPI read+write is
+// good and any "no voltage" problem is power/range/wiring on the analog side
+// (e.g. AVDDIO/AVSSIO rails). If it mismatches or dev_id is 0x0000/0xFFFF, SPI
+// itself isn't talking to the chip (MOSI/MISO/SCK/CS wiring or chip power).
+void SimpleSequencer::pixiDiag(){
+  ensurePixi();
+  uint8_t p = CV_PORTS[0];
+  Serial.println("--- PIXI DIAG ---");
+  Serial.print("dev_id         = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_ID), HEX);
+  Serial.print("device_control = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_CONTROL), HEX);
+  Serial.print("port_cfg[");  Serial.print(p); Serial.print("]   = 0x");
+  Serial.println(pixi.readReg(Max11300::REG_PORT_CFG_BASE + p), HEX);
+  Serial.print("dac_data[");  Serial.print(p); Serial.print("]   = 0x");
+  Serial.println(pixi.readReg(Max11300::REG_DAC_DATA_BASE + p), HEX);
+  // Write/readback test on the port config register.
+  pixi.writeReg(Max11300::REG_PORT_CFG_BASE + p, 0x5100); // DAC, 0-10V range
+  uint16_t rb = pixi.readReg(Max11300::REG_PORT_CFG_BASE + p);
+  Serial.print("port_cfg writeback 0x5100 -> 0x"); Serial.println(rb, HEX);
+  Serial.println(rb == 0x5100 ? "SPI WRITE/READ OK -> check analog supplies (AVDDIO/AVSSIO)"
+                              : "SPI MISMATCH -> check MOSI/MISO/SCK/CS wiring + chip power");
+  // Re-apply DAC config + mid voltage so the output should sit ~5V if powered.
+  pixi.configDac(p, Max11300::RANGE_0_TO_10);
+  pixi.setVoltage0to10(p, 5.0f);
+  Serial.println("set port to 5.00V (measure now)");
 }
 
 // Store + push a manual voltage to one CV output (0..10V). Safe to call when no
