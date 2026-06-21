@@ -636,7 +636,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   if (i == MATRIX_BTN_MENU2_INDEX){
     activeMenu = 6;  // Analog CV outputs
     heldStep = -1; focusEncoder = 0;
-    ensurePixi();    // first entry brings up the MAX11300
+    // NOTE: do NOT auto-init the PIXI here — SPI bring-up is currently hanging,
+    // and that would freeze the UI on menu entry. Run it on demand via serial
+    // 'x' (diag) or 'v' (self-test) until the SPI issue is resolved.
     Serial.println("MENU2 -> activeMenu=6 (Analog Outs)");
     return;
   }

@@ -33,21 +33,28 @@ uint16_t Max11300::readReg(uint8_t addr){
 }
 
 bool Max11300::begin(){
+  // Breadcrumbs: if the bus hangs, the last line printed pinpoints the call.
+  Serial.println("  pixi.begin: pinMode/CS");
   pinMode(_cs, OUTPUT);
   digitalWrite(_cs, HIGH);
+  Serial.println("  pixi.begin: SPI.begin()");
   SPI.begin();
 
   // Soft reset for a known state, then let it settle.
+  Serial.println("  pixi.begin: write RESET");
   writeReg(REG_DEVICE_CONTROL, DEVCTL_RESET);
   delay(5);
 
   // Bring up internal DAC reference + immediate update mode.
+  Serial.println("  pixi.begin: write RUN");
   writeReg(REG_DEVICE_CONTROL, DEVCTL_RUN);
   delay(5); // reference settle
 
   // Device ID part field (bits [15:12]) is 0x4 on the MAX11300. Accept any
   // non-0x0000/0xFFFF read as "present" so a slightly different ID still works.
+  Serial.println("  pixi.begin: read dev_id");
   uint16_t id = readReg(REG_DEVICE_ID);
+  Serial.print("  pixi.begin: dev_id=0x"); Serial.println(id, HEX);
   _present = (id != 0x0000 && id != 0xFFFF);
   return _present;
 }
