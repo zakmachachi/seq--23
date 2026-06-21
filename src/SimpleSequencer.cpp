@@ -428,6 +428,9 @@ void SimpleSequencer::loop(){
     if (c == 'x' || c == 'X'){
       pixiDiag();
     }
+    if (c == 'y' || c == 'Y'){
+      pixiPinTest();
+    }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
     }
@@ -3151,6 +3154,40 @@ void SimpleSequencer::pixiDiag(){
   pixi.configDac(p, Max11300::RANGE_0_TO_10);
   pixi.setVoltage0to10(p, 5.0f);
   Serial.println("set port to 5.00V (measure now)");
+}
+
+// Serial 'y': continuity/level test with just a multimeter. Drives CS/SCK/MOSI
+// as plain GPIO (HIGH for 6s, then LOW for 6s) so you can probe those pins at
+// the MAX11300 end and confirm the wire actually carries the level. Then reads
+// MISO with a pull-up: reads 1 = line can go high (OK-ish); reads 0 = MISO is
+// held low (shorted to GND, unpowered chip, or not connected to a driver).
+void SimpleSequencer::pixiPinTest(){
+  Serial.println("--- PIXI PIN TEST ---");
+  pinMode(MAX_CS, OUTPUT);
+  pinMode(MAX_SCK, OUTPUT);
+  pinMode(MAX_MOSI, OUTPUT);
+  Serial.println("CS(37) SCK(13) MOSI(11) = HIGH for 6s (should read ~3.3V at the chip)");
+  digitalWrite(MAX_CS, HIGH); digitalWrite(MAX_SCK, HIGH); digitalWrite(MAX_MOSI, HIGH);
+  delay(6000);
+  Serial.println("CS(37) SCK(13) MOSI(11) = LOW for 6s (should read ~0V at the chip)");
+  digitalWrite(MAX_CS, LOW); digitalWrite(MAX_SCK, LOW); digitalWrite(MAX_MOSI, LOW);
+  delay(6000);
+
+  pinMode(MAX_MISO, INPUT_PULLUP);
+  delay(2);
+  int misoPU = digitalRead(MAX_MISO);
+  pinMode(MAX_MISO, INPUT);
+  delay(2);
+  int misoZ = digitalRead(MAX_MISO);
+  Serial.print("MISO(12): with pull-up="); Serial.print(misoPU);
+  Serial.print("  floating="); Serial.println(misoZ);
+  Serial.println("  (pull-up=0 => MISO held low: chip unpowered / not driving / shorted)");
+
+  // Restore SPI mux and allow ensurePixi to run again on the next 'x'.
+  SPI.begin();
+  pixiInit = false;
+  pixiPresent = false;
+  Serial.println("PIN TEST done. Re-run 'x' to retry SPI.");
 }
 
 // Store + push a manual voltage to one CV output (0..10V). Safe to call when no

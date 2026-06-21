@@ -211,6 +211,7 @@ class SimpleSequencer {
     void ensurePixi();         // init the PIXI once (kept out of boot)
     void cvSelfTest(); // serial 'v': step the CV outs through 0/2.5/5/10V
     void pixiDiag();   // serial 'x': dump PIXI regs + SPI write/readback test
+    void pixiPinTest(); // serial 'y': drive CS/SCK/MOSI as GPIO + read MISO (multimeter)
     // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
     float cvVolts[NUM_CV_OUTS];
     void setCvOut(uint8_t idx, float volts); // clamp, store, write to the PIXI
