@@ -43,13 +43,21 @@ static const uint8_t MATRIX_BTN_CH[7] = {29, 28, 27, 26, 25, 24, 23}; // Ch1-7 â
 static const uint8_t MATRIX_BTN_START_INDEX   = MATRIX_BTN_FUNCTION_INDEX; // kept for runEngine compat
 static const uint8_t MATRIX_BTN_CHANNEL_INDEX = MATRIX_BTN_PAGE_INDEX;     // kept for runEngine compat
 
-// Analog outs (for CV) #TODO: update these for new PCB when needed; not currently used but will be in future updates
-static const uint8_t MAX_MOSI = 11; // SPI MOSI pin for DAC (not used at the moment but will be in future updates)
-static const uint8_t MAX_MISO = 12; // SPI MISO pin for DAC (not used at the moment but will be in future updates)
-static const uint8_t MAX_INTB = 28; // DAC interrupt pin (not used at the moment but will be in future updates)
-static const uint8_t MAX_CNVTB = 32 ; // DAC convert pin (not used at the moment but will be in future updates)
-static const uint8_t MAX_CS = 37; // DAC chip select pin (not used at the moment but will be in future updates)
-static const uint8_t MAX_SCK = 13; // SPI clock pin for DAC (not used at the moment but will be in future updates)
+// --- Analog CV outputs via MAX11300 (PIXI) over SPI ---------------
+// The MAX11300 uses the Teensy hardware SPI bus (MOSI 11 / MISO 12 / SCK 13).
+static const uint8_t MAX_MOSI  = 11; // SPI MOSI (Teensy -> MAX11300 DIN)
+static const uint8_t MAX_MISO  = 12; // SPI MISO (MAX11300 DOUT -> Teensy)
+static const uint8_t MAX_SCK   = 13; // SPI clock (SCLK)
+static const uint8_t MAX_CS    = 37; // chip select (CSB, active low)
+static const uint8_t MAX_CNVTB = 32; // CNVTB convert-start (ADC; unused for DAC-only)
+static const uint8_t MAX_INTB  = 28; // INTB interrupt (unused for now)
+static const uint32_t MAX11300_SPI_HZ = 8000000; // 8 MHz (part supports up to 20 MHz)
+
+// Assignable CV outputs. Each entry is a MAX11300 PIXI port (0..19) wired to a
+// physical CV jack, configured as a 0..10V DAC (1V/oct fits in this range).
+// Adjust the port list to match the PCB once the jack wiring is known.
+static const uint8_t NUM_CV_OUTS = 4;
+static const uint8_t CV_PORTS[NUM_CV_OUTS] = {0, 1, 2, 3};
 
 // --- Potentiometer mappings (each pot has two analog inputs + a push button) ---
 // Format per pot: PotX: PinA, PinB, Button

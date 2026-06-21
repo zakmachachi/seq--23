@@ -197,6 +197,20 @@ void SimpleSequencer::begin(){
   // attempt to auto-load saved state from EEPROM
   loadState();
 
+  // --- Analog CV outputs (MAX11300 PIXI) ---
+  pixiPresent = pixi.begin();
+  if (pixiPresent){
+    uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
+    Serial.print("PIXI MAX11300 detected, dev_id=0x"); Serial.println(id, HEX);
+    for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+      pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
+    }
+    Serial.print("Configured "); Serial.print(NUM_CV_OUTS);
+    Serial.println(" CV outs as 0-10V DACs (send 'v' to self-test)");
+  } else {
+    Serial.println("PIXI MAX11300 not detected on SPI");
+  }
+
   // Boot straight into the Notes page so there's a real menu on screen instead
   // of the placeholder default overview.
   activeMenu = 1;
@@ -396,6 +410,9 @@ void SimpleSequencer::loop(){
     }
     if (c == 'r' || c == 'R'){
       printEncoderRaw();
+    }
+    if (c == 'v' || c == 'V'){
+      cvSelfTest();
     }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
@@ -3052,6 +3069,31 @@ void SimpleSequencer::bootAnimation() {
   }
 }
 
+
+// Serial 'v': bring-up check for the MAX11300 CV outputs. First sets each out
+// to a distinct voltage (0 / 2.5 / 5 / 10V) so you can confirm which jack is
+// which, then sweeps all outs together through those levels. Measure with a
+// multimeter; blocking is fine for a bench test.
+void SimpleSequencer::cvSelfTest(){
+  if (!pixiPresent){ Serial.println("CV self-test: PIXI not present"); return; }
+  Serial.println("--- CV SELF-TEST (0-10V DACs) ---");
+  const float levels[4] = {0.0f, 2.5f, 5.0f, 10.0f};
+
+  Serial.println("Distinct: out0=0V out1=2.5V out2=5V out3=10V (extra outs=0)");
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    pixi.setVoltage0to10(CV_PORTS[i], (i < 4) ? levels[i] : 0.0f);
+  }
+  delay(3000);
+
+  for (uint8_t L = 0; L < 4; L++){
+    for (uint8_t i = 0; i < NUM_CV_OUTS; i++) pixi.setVoltage0to10(CV_PORTS[i], levels[L]);
+    Serial.print("All CV outs = "); Serial.print(levels[L], 3); Serial.println(" V");
+    delay(1500);
+  }
+
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++) pixi.setVoltage0to10(CV_PORTS[i], 0.0f);
+  Serial.println("CV self-test done (outputs at 0V)");
+}
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
   // Clear every page slot for this channel

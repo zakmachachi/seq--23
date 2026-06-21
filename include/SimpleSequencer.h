@@ -4,6 +4,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include "SeqConfig.h"
+#include "Max11300.h"
 #include <EEPROM.h>
 // OLED
 #include <Wire.h>
@@ -203,6 +204,11 @@ class SimpleSequencer {
     // secondary OLED on Wire1 (Teensy 4.1: SDA1=17, SCL1=16) — global overview screen
     Adafruit_SH1106G display2{128, 64, &Wire1};
     bool display2Present = false;
+    // --- ANALOG CV OUTPUTS (MAX11300 PIXI over SPI) ---
+    Max11300 pixi{MAX_CS, MAX11300_SPI_HZ};
+    bool pixiPresent = false;
+    void cvSelfTest(); // serial 'v': step the CV outs through 0/2.5/5/10V
+
     // --- HARDWARE LED GRID ---
     Adafruit_NeoPixel ledStrip;
     void updateLEDs();
