@@ -48,7 +48,7 @@ The matrix is row-major (`idx = row × 6 + col`). Verified assignments:
 | 16 | Page (Pages menu + transport/perf modifier) |
 | 17 | Fill (performance) |
 | 18 | Menu 1 — Notes (Generative) |
-| 19 | Menu 2 — Step Visualizer |
+| 19 | Menu 2 — Analog Outs (CV) |
 | 20 | Menu 3 — Euclid |
 | 21 | Menu 4 — Trigger Machines |
 | 22 | Function (modifier) |
@@ -158,8 +158,8 @@ Per-channel generative note engine. The six pots are laid out in two rows of thr
 
 **Screen 2:** a piano-roll of the channel's notes — block height = pitch, width = note length (clipped to the next note). It follows the page that's **playing** on multi-page channels, and shows the contour-bias arrow on the right.
 
-### Menu 2 — Step Visualizer
-Read-only step grid showing the current channel's pattern, per-step state (Fill / Ratchet / Slide marks), and playhead. **Screen 2** shows a 7-row all-channel overview with playhead and ratchet pips.
+### Menu 2 — Analog Outs (CV)
+Analog CV outputs via the MAX11300 (PIXI) over SPI. `NUM_CV_OUTS` assignable ports (default 4 → PIXI ports 0–3) are configured as 0–10V DACs. First version is a manual control surface — pots 1..N set each output's voltage (0–10V), which also serves as a no-serial bring-up test. **Screen 2** shows level bars per output. Assignment modes (follow channel pitch / gate / velocity / etc.) are TBD. Pins: MOSI 11 / MISO 12 / SCK 13 / CS 37 / CNVTB 32 / INTB 28. Serial `v` runs a voltage self-test. (The old Step Visualizer view still exists in firmware but is no longer bound to a menu button.)
 
 ### Menu 3 — Euclid
 Euclidean rhythm generator, laid out like the Notes page (pattern grid + ON/OFF header over a pot-aligned 2×3 grid):

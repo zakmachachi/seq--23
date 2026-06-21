@@ -126,6 +126,7 @@ SimpleSequencer::SimpleSequencer()
     // Gate length default per channel
     noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
   }
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvVolts[i] = 0.0f;
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
     matrixState[k] = false;
@@ -620,9 +621,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU2_INDEX){
-    activeMenu = 3;  // Step Visualizer (restored)
+    activeMenu = 6;  // Analog CV outputs
     heldStep = -1; focusEncoder = 0;
-    Serial.println("MENU2 -> activeMenu=3 (Step)");
+    Serial.println("MENU2 -> activeMenu=6 (Analog Outs)");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -931,6 +932,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   static const uint8_t divNotes[6]       = {3, 12, 3, 1, 3, 3};
   static const uint8_t divEuclid[6]      = {3, 3, 5, 3, 3, 1}; // pot 6 = slide%, native sensitivity
   static const uint8_t divTrigMachine[6] = {5, 4, 2, 3, 3, 3}; // density (pot2) slower for kick's 0..12 range
+  static const uint8_t divAnalog[6]      = {2, 2, 2, 2, 2, 2}; // CV outs: uniform, ~0.05V per detent
   static const uint8_t divDefault[6]     = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
@@ -942,6 +944,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (activeMenu == 1) divTable = divNotes;
   else if (activeMenu == 2) divTable = divEuclid;
   else if (activeMenu == 4) divTable = divTrigMachine;
+  else if (activeMenu == 6) divTable = divAnalog;
   int dv = (pot < 6 && divTable[pot] > 0) ? (int)divTable[pot] : 1;
   potAcc[pot] += ticks;
   int forward = potAcc[pot] / dv;
@@ -1257,6 +1260,16 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         break;
       }
       default: break;
+    }
+    return;
+  }
+
+  // --- Menu 2: Analog CV outputs — pots set each output's voltage (0..10V) ---
+  if (activeMenu == 6){
+    if (pot < NUM_CV_OUTS){
+      setCvOut(pot, cvVolts[pot] + (float)ticks * 0.1f);
+      Serial.print("CV"); Serial.print(pot + 1);
+      Serial.print("="); Serial.print(cvVolts[pot], 2); Serial.println("V");
     }
     return;
   }
@@ -2401,6 +2414,7 @@ void SimpleSequencer::drawDisplay(){
   if (activeMenu == 3){ drawStepVisualiser(); return; }
   if (activeMenu == 4){ drawTrigMachineView(); return; }
   if (activeMenu == 5){ drawPagesView();      return; }
+  if (activeMenu == 6){ drawAnalogView();     return; }
 
   display.clearDisplay();
 
@@ -2752,7 +2766,7 @@ void SimpleSequencer::updateLEDs(){
   uint8_t menuLed = 255;
   switch (activeMenu){
     case 1: menuLed = LED_MENU_BASE + 0; break; // Notes
-    case 3: menuLed = LED_MENU_BASE + 1; break; // Step Visualiser
+    case 6: menuLed = LED_MENU_BASE + 1; break; // Analog Outs (MENU2 button)
     case 2: menuLed = LED_MENU_BASE + 2; break; // Euclid
     case 4: menuLed = LED_MENU_BASE + 3; break; // Trigger Machines
     case 5: menuLed = LED_PAGE_INDEX;    break; // Pages
@@ -3093,6 +3107,60 @@ void SimpleSequencer::cvSelfTest(){
 
   for (uint8_t i = 0; i < NUM_CV_OUTS; i++) pixi.setVoltage0to10(CV_PORTS[i], 0.0f);
   Serial.println("CV self-test done (outputs at 0V)");
+}
+
+// Store + push a manual voltage to one CV output (0..10V). Safe to call when no
+// PIXI is attached — it just keeps the stored value for the display.
+void SimpleSequencer::setCvOut(uint8_t idx, float volts){
+  if (idx >= NUM_CV_OUTS) return;
+  if (volts < 0.0f) volts = 0.0f;
+  if (volts > 10.0f) volts = 10.0f;
+  cvVolts[idx] = volts;
+  if (pixiPresent) pixi.setVoltage0to10(CV_PORTS[idx], volts);
+}
+
+// Menu 2 (MENU2 button): analog CV outputs. First version is a manual control
+// surface — pots 1..NUM_CV_OUTS set each output's voltage (0..10V). Doubles as
+// a no-serial bring-up test. Assignment modes (follow pitch/gate/etc.) TBD.
+void SimpleSequencer::drawAnalogView(){
+  display.clearDisplay();
+  display.setTextColor(SH110X_WHITE);
+
+  // Header: title + PIXI presence chip.
+  display.setTextSize(1);
+  display.setCursor(2, 1);
+  display.print("ANALOG OUT");
+  if (pixiPresent){
+    display.fillRect(100, 0, 24, 9, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
+    display.setCursor(106, 1); display.print("OK");
+    display.setTextColor(SH110X_WHITE);
+  } else {
+    display.drawRect(100, 0, 24, 9, SH110X_WHITE);
+    display.setCursor(104, 1); display.print("--");
+  }
+  display.drawFastHLine(0, 12, 128, SH110X_WHITE);
+
+  // Up to 6 outs laid out in two rows of three to line up with the pots.
+  const int colX[3] = {2, 45, 88};
+  const int lblY1 = 16, valY1 = 26;
+  const int lblY2 = 42, valY2 = 52;
+  for (uint8_t i = 0; i < NUM_CV_OUTS && i < 6; i++){
+    int col = i % 3;
+    bool row2 = (i >= 3);
+    int x = colX[col];
+    int ly = row2 ? lblY2 : lblY1;
+    int vy = row2 ? valY2 : valY1;
+    // Label: CVn + the PIXI port it drives.
+    display.setCursor(x, ly);
+    display.print("CV"); display.print(i + 1);
+    display.print(" P"); display.print(CV_PORTS[i]);
+    // Value in volts (2 d.p.).
+    display.setCursor(x, vy);
+    display.print(cvVolts[i], 2); display.print("V");
+  }
+
+  display.display();
 }
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
@@ -3694,6 +3762,32 @@ void SimpleSequencer::drawOverview(){
   display2.setTextColor(SH110X_WHITE);
   uint32_t now = millis();
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
+
+  // ── Menu 2: Analog CV outputs — level bars (0..10V) ─────────────
+  if (activeMenu == 6){
+    display2.setTextSize(1);
+    display2.setCursor(2, 1);
+    display2.print("ANALOG OUT");
+    display2.setCursor(96, 1);
+    display2.print(pixiPresent ? "OK" : "--");
+    display2.drawFastHLine(0, 11, 128, SH110X_WHITE);
+
+    const int n = NUM_CV_OUTS;
+    const int top = 14, bot = 56, h = bot - top;
+    int slot = 128 / (n > 0 ? n : 1);
+    int bw = slot - 8; if (bw < 6) bw = 6;
+    for (int i = 0; i < n; i++){
+      int x = i * slot + (slot - bw) / 2;
+      display2.drawRect(x, top, bw, h, SH110X_WHITE);
+      int fh = (int)(cvVolts[i] / 10.0f * (h - 2) + 0.5f);
+      if (fh > h - 2) fh = h - 2;
+      if (fh > 0) display2.fillRect(x + 1, bot - 1 - fh, bw - 2, fh, SH110X_WHITE);
+      display2.setCursor(x, bot + 2);
+      display2.print(i + 1);
+    }
+    display2.display();
+    return;
+  }
 
   // ── Menu 4: Trigger Machines — stripped-down focus view ─────────
   if (activeMenu == 4){

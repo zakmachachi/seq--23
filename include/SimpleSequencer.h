@@ -208,6 +208,9 @@ class SimpleSequencer {
     Max11300 pixi{MAX_CS, MAX11300_SPI_HZ};
     bool pixiPresent = false;
     void cvSelfTest(); // serial 'v': step the CV outs through 0/2.5/5/10V
+    // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
+    float cvVolts[NUM_CV_OUTS];
+    void setCvOut(uint8_t idx, float volts); // clamp, store, write to the PIXI
 
     // --- HARDWARE LED GRID ---
     Adafruit_NeoPixel ledStrip;
@@ -222,6 +225,7 @@ class SimpleSequencer {
     // edit page drawn as blocks (height = pitch, width = note length).
     void drawNotesKeyboard();
     void drawEuclidView();
+    void drawAnalogView(); // Menu 2: analog CV outputs
     void drawStepVisualiser();
     void bootAnimation();
 
