@@ -207,6 +207,8 @@ class SimpleSequencer {
     // --- ANALOG CV OUTPUTS (MAX11300 PIXI over SPI) ---
     Max11300 pixi{MAX_CS, MAX11300_SPI_HZ};
     bool pixiPresent = false;
+    bool pixiInit = false;     // SPI/PIXI brought up lazily on first use
+    void ensurePixi();         // init the PIXI once (kept out of boot)
     void cvSelfTest(); // serial 'v': step the CV outs through 0/2.5/5/10V
     // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
     float cvVolts[NUM_CV_OUTS];

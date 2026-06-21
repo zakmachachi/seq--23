@@ -198,7 +198,21 @@ void SimpleSequencer::begin(){
   // attempt to auto-load saved state from EEPROM
   loadState();
 
-  // --- Analog CV outputs (MAX11300 PIXI) ---
+  // NOTE: the MAX11300 (PIXI) is brought up lazily on first use (see
+  // ensurePixi), not here — so a quiet/half-wired SPI bus can never stall boot.
+
+  // Boot straight into the Notes page so there's a real menu on screen instead
+  // of the placeholder default overview.
+  activeMenu = 1;
+}
+
+// Bring up the MAX11300 once, the first time CV is actually needed (entering the
+// Analog menu or running the 'v' self-test). Kept out of begin() so SPI never
+// blocks boot.
+void SimpleSequencer::ensurePixi(){
+  if (pixiInit) return;
+  pixiInit = true;
+  Serial.println("PIXI: init...");
   pixiPresent = pixi.begin();
   if (pixiPresent){
     uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
@@ -207,14 +221,10 @@ void SimpleSequencer::begin(){
       pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
     }
     Serial.print("Configured "); Serial.print(NUM_CV_OUTS);
-    Serial.println(" CV outs as 0-10V DACs (send 'v' to self-test)");
+    Serial.println(" CV out(s) as 0-10V DACs");
   } else {
     Serial.println("PIXI MAX11300 not detected on SPI");
   }
-
-  // Boot straight into the Notes page so there's a real menu on screen instead
-  // of the placeholder default overview.
-  activeMenu = 1;
 }
 
 // Removed helper setStepLED and refreshStepLEDs; using updateLEDs() below.
@@ -623,6 +633,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   if (i == MATRIX_BTN_MENU2_INDEX){
     activeMenu = 6;  // Analog CV outputs
     heldStep = -1; focusEncoder = 0;
+    ensurePixi();    // first entry brings up the MAX11300
     Serial.println("MENU2 -> activeMenu=6 (Analog Outs)");
     return;
   }
@@ -3089,6 +3100,7 @@ void SimpleSequencer::bootAnimation() {
 // which, then sweeps all outs together through those levels. Measure with a
 // multimeter; blocking is fine for a bench test.
 void SimpleSequencer::cvSelfTest(){
+  ensurePixi();
   if (!pixiPresent){ Serial.println("CV self-test: PIXI not present"); return; }
   Serial.println("--- CV SELF-TEST (0-10V DACs) ---");
   const float levels[4] = {0.0f, 2.5f, 5.0f, 10.0f};
