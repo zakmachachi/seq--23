@@ -462,6 +462,38 @@ void SimpleSequencer::loop(){
     if (c == 'z' || c == 'Z'){
       pixiStaged();
     }
+    if (c == 'j' || c == 'J'){
+      // Spare-port test: configure P5 (wired to NOTHING) as a DAC. Survives ->
+      // chip+supply fine, the jack-wired ports (P0/P19) are damaged/shorted.
+      // Dies -> global supply collapse on any driver enable.
+      Serial.println("--- PIXI SPARE-PORT (P5) TEST ---");
+      pixiInit = true; pixiPresent = false;
+      cvOutEnabled[0] = false; cvOutEnabled[1] = false; // quarantine both jacks
+      if (!pixi.begin()){ Serial.println("DEAD after reset -> power-cycle again"); }
+      else {
+        uint16_t irq = pixi.readReg(0x01);
+        Serial.print("VMON idle: "); Serial.println((irq & 0x8000) ? "FAULT" : "clear");
+        pixi.configDac(5, Max11300::RANGE_0_TO_10);
+        delay(10);
+        uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
+        Serial.print("after cfg P5: dev_id=0x"); Serial.println(id, HEX);
+        if (id == 0x424){
+          pixi.setVoltage0to10(5, 5.0f);
+          delay(10);
+          id = pixi.readReg(Max11300::REG_DEVICE_ID);
+          Serial.print("after 5V on P5: dev_id=0x"); Serial.println(id, HEX);
+          if (id == 0x424){
+            irq = pixi.readReg(0x01);
+            Serial.print("VMON loaded: "); Serial.println((irq & 0x8000) ? "FAULT" : "clear");
+            Serial.println("P5 OK -> chip+supply healthy; P0/P19 drivers/wiring are the fault");
+          } else {
+            Serial.println("-> died on DAC WRITE: supply collapses under output load");
+          }
+        } else {
+          Serial.println("-> died on ANY driver enable: supply/global fault, not the jacks");
+        }
+      }
+    }
     if (c == 'k' || c == 'K'){
       // P19-only bring-up: skip P0 entirely (its driver latches the chip) to
       // prove the rest of the chip is healthy. Power-cycle first.
@@ -3410,6 +3442,14 @@ void SimpleSequencer::pixiStaged(){
   if (!pixi.begin()){
     Serial.println("DEAD after reset -> chip already latched: power-cycle again");
     return;
+  }
+  // Supply check while the chip is alive and idle: the MAX11300 monitors its
+  // own high-voltage supply (AVDDIO/AVSSIO) — VMON is bit 15 of interrupt_flag.
+  {
+    uint16_t irq = pixi.readReg(0x01);
+    Serial.print("interrupt_flag (idle) = 0x"); Serial.println(irq, HEX);
+    Serial.print("  VMON (HV supply fault) = ");
+    Serial.println((irq & 0x8000) ? "SET -> AVDDIO/AVSSIO out of range!" : "clear");
   }
   struct { const char* name; uint8_t port; bool config; float volts; } steps[] = {
     {"cfg P0 as DAC",  CV_PORTS[0], true,  -1.0f},
