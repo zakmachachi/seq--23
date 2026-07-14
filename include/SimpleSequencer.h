@@ -211,6 +211,7 @@ class SimpleSequencer {
     void ensurePixi();         // init the PIXI once (kept out of boot)
     void cvSelfTest(); // serial 'v': step the CV outs through 0/2.5/5/10V
     void pixiDiag();   // serial 'x': dump PIXI regs + SPI write/readback test
+    void pixiDump();   // serial 'w': read-only register dump (no reset)
     void pixiPinTest(); // serial 'y': drive CS/SCK/MOSI as GPIO + read MISO (multimeter)
     // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
     // In GATE/TRIG modes this is the high level; in LFO mode the amplitude.

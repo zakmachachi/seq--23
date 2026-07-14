@@ -455,6 +455,9 @@ void SimpleSequencer::loop(){
     if (c == 'y' || c == 'Y'){
       pixiPinTest();
     }
+    if (c == 'w' || c == 'W'){
+      pixiDump();
+    }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
     }
@@ -3336,6 +3339,31 @@ void SimpleSequencer::resetPixiAll(){
   Serial.println("PIXI full reset, all CV outs reapplied");
 }
 
+// Serial 'w': READ-ONLY register dump — no reset, no writes — so a fault can be
+// inspected in place. If dac_data holds the expected code but the jack is at
+// 0V, the analog side (supplies/output driver/jack) is at fault. If port_cfg
+// no longer reads 0x5100, the chip lost its config (reset/brown-out).
+void SimpleSequencer::pixiDump(){
+  if (!pixiInit){ Serial.println("PIXI dump: not initialised yet (enter Menu 2 or run 'x')"); return; }
+  Serial.println("--- PIXI DUMP (read-only) ---");
+  Serial.print("dev_id         = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_ID), HEX);
+  Serial.print("device_control = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_CONTROL), HEX);
+  Serial.print("interrupt_flag = 0x"); Serial.println(pixi.readReg(0x01), HEX);
+  Serial.print("dac_oi_15_0    = 0x"); Serial.println(pixi.readReg(0x04), HEX);
+  Serial.print("dac_oi_19_16   = 0x"); Serial.println(pixi.readReg(0x05), HEX);
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    uint8_t p = CV_PORTS[i];
+    Serial.print("CV"); Serial.print(i + 1);
+    Serial.print(": mode="); Serial.print(CV_MODE_NAMES[cvMode[i]]);
+    Serial.print(" lvl="); Serial.print(cvVolts[i], 2);
+    Serial.print("V  port_cfg[");  Serial.print(p); Serial.print("]=0x");
+    Serial.print(pixi.readReg(Max11300::REG_PORT_CFG_BASE + p), HEX);
+    Serial.print(" dac_data=0x");
+    Serial.print(pixi.readReg(Max11300::REG_DAC_DATA_BASE + p), HEX);
+    Serial.print(" lastCode=0x"); Serial.println(cvLastCode[i], HEX);
+  }
+}
+
 // Effective LFO period in ms: quantised to the BPM grid when synced, otherwise
 // the free-run ms setting. Clamped so phase math never divides by ~0.
 float SimpleSequencer::lfoPeriodEff(uint8_t idx){
@@ -3356,6 +3384,25 @@ float SimpleSequencer::lfoPeriodEff(uint8_t idx){
 void SimpleSequencer::cvService(){
   if (!pixiInit || !pixiPresent) return;
   uint32_t nowMs = millis();
+
+  // Watchdog (every 500ms): jack insertion can short the tip to ground and
+  // brown-out / reset the chip, silently dropping every port back to HI-Z.
+  // Verify one port's config; if it changed, reconfigure everything. Either
+  // way force a rewrite of all codes so a glitched dac_data self-heals.
+  static uint32_t lastWdMs = 0;
+  if (nowMs - lastWdMs >= 500){
+    lastWdMs = nowMs;
+    uint16_t cfg = pixi.readReg((uint8_t)(Max11300::REG_PORT_CFG_BASE + CV_PORTS[0]));
+    if (cfg != 0x5100){
+      Serial.print("CV watchdog: port_cfg=0x"); Serial.print(cfg, HEX);
+      Serial.println(" -> chip lost config, reconfiguring");
+      for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+        pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
+      }
+    }
+    for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvLastCode[i] = 0xFFFF;
+  }
+
   for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
     uint8_t ch = cvChannel[i];
     float v = 0.0f;
