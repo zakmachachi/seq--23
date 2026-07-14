@@ -508,15 +508,15 @@ void SimpleSequencer::loop(){
         uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
         Serial.print("after cfg P19: dev_id=0x"); Serial.println(id, HEX);
         if (id == 0x424){
-          pixi.setVoltage0to10(CV_PORTS[1], 2.5f);
+          pixi.setVoltage0to10(CV_PORTS[1], 5.0f);
           delay(10);
           id = pixi.readReg(Max11300::REG_DEVICE_ID);
-          Serial.print("after 2.5V on P19: dev_id=0x"); Serial.println(id, HEX);
+          Serial.print("after 5V on P19: dev_id=0x"); Serial.println(id, HEX);
           if (id == 0x424){
             pixiPresent = true;
-            cvVolts[1] = 2.5f;
+            cvVolts[1] = 5.0f;
             cvLastCode[1] = 0xFFFF;
-            Serial.println("P19 OK at 2.50V (measure jack 2). P0 left untouched.");
+            Serial.println("P19 OK at 5.00V (measure jack 2). P0 left untouched.");
             Serial.println("-> P0 is the fault: check jack-1 tip-to-ground short, else port damaged.");
           }
         }
