@@ -213,12 +213,33 @@ class SimpleSequencer {
     void pixiDiag();   // serial 'x': dump PIXI regs + SPI write/readback test
     void pixiPinTest(); // serial 'y': drive CS/SCK/MOSI as GPIO + read MISO (multimeter)
     // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
+    // In GATE/TRIG modes this is the high level; in LFO mode the amplitude.
     float cvVolts[NUM_CV_OUTS];
     void setCvOut(uint8_t idx, float volts); // clamp, store, write to the PIXI
     // Recovery: a shorted jack (e.g. probe tip) can wedge a DAC port. Pot-button
     // N in Menu 2 resets just that output; pot 6 soft-resets the whole chip.
     void resetCvOut(uint8_t idx);
     void resetPixiAll();
+
+    // --- CV OUT MODES (Menu 2) ---
+    // Each jack out runs one of four functions, fed by an assignable source
+    // channel. FN + rotate pot N cycles the mode (opens the submenu while FN is
+    // held); FN + click pot N cycles the source channel 1..7.
+    enum CvMode : uint8_t { CV_FIX = 0, CV_GATE, CV_LFO, CV_TRIG, CV_MODE_COUNT };
+    uint8_t  cvMode[NUM_CV_OUTS];
+    uint8_t  cvChannel[NUM_CV_OUTS];    // source sequencer channel 0..6
+    uint8_t  lfoShape[NUM_CV_OUTS];     // 0 saw, 1 sine, 2 square
+    bool     lfoSyncBpm[NUM_CV_OUTS];   // true = rate quantised to BPM, false = ms
+    uint8_t  lfoDivIdx[NUM_CV_OUTS];    // index into the BPM division table
+    uint16_t lfoPeriodMs[NUM_CV_OUTS];  // free-run period when not synced
+    uint16_t trigLenMs[NUM_CV_OUTS];    // TRIG pulse length
+    uint16_t cvLastCode[NUM_CV_OUTS];   // last DAC code written (skip no-op SPI)
+    bool     cvSubmenu = false;         // FN-held submenu open on screen 1
+    uint8_t  cvFocus = 0;               // out being edited / shown on screen 2
+    volatile uint32_t chTrigMs[NUM_CHANNELS]; // last trigger time per channel (ms)
+    void  cvService();                  // per-loop engine: gate/lfo/trig -> DAC
+    float lfoPeriodEff(uint8_t idx);    // effective LFO period in ms
+    void  drawAnalogSubmenu();          // screen 1 while FN held
 
     // --- HARDWARE LED GRID ---
     Adafruit_NeoPixel ledStrip;

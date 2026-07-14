@@ -57,6 +57,14 @@ static const char* divisionNames[] = { "Whole", "Half", "Quarter", "Eighth", "Si
 // handlers above their definition can size density to each machine's pool.
 static uint8_t machinePoolMax(uint8_t machine);
 
+// --- CV out mode tables (Menu 2) ---
+static const char* CV_MODE_NAMES[4]   = {"FIX", "GATE", "LFO", "TRIG"};
+static const char* LFO_SHAPE_NAMES[3] = {"SAW", "SINE", "SQR"};
+// BPM-synced LFO divisions, expressed in beats per cycle (4/1 bar = 16 beats).
+static const uint8_t LFO_DIV_COUNT = 7;
+static const float LFO_DIV_BEATS[LFO_DIV_COUNT] = {16.f, 8.f, 4.f, 2.f, 1.f, 0.5f, 0.25f};
+static const char* LFO_DIV_NAMES[LFO_DIV_COUNT] = {"4/1","2/1","1/1","1/2","1/4","1/8","1/16"};
+
 static float getDivisionFactor(SimpleSequencer::Division d){
   switch(d){
     case SimpleSequencer::DIV_WHOLE: return 4.0f;
@@ -126,7 +134,18 @@ SimpleSequencer::SimpleSequencer()
     // Gate length default per channel
     noteLenIdx[c] = NOTE_LEN_DEFAULT_IDX;
   }
-  for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvVolts[i] = 0.0f;
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    cvVolts[i] = 0.0f;
+    cvMode[i] = CV_FIX;
+    cvChannel[i] = 0;
+    lfoShape[i] = 1;        // sine
+    lfoSyncBpm[i] = true;
+    lfoDivIdx[i] = 4;       // 1/4
+    lfoPeriodMs[i] = 500;
+    trigLenMs[i] = 10;
+    cvLastCode[i] = 0xFFFF; // force first DAC write
+  }
+  for (uint8_t c = 0; c < NUM_CHANNELS; c++) chTrigMs[c] = 0;
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
     matrixRawState[k] = 0;
     matrixState[k] = false;
@@ -314,6 +333,11 @@ void SimpleSequencer::loop(){
   fillModeActive = fillNow && !fnHeld;
   slideAllHold   = fillNow && fnHeld;
   accentAllHold  = pageHeld && fnHeld;
+  // CV mode submenu lives only while Function is held; releasing FN returns to
+  // the normal Analog view.
+  if (!fnHeld && cvSubmenu) cvSubmenu = false;
+  // Run the CV engine (gate/LFO/trig) every loop pass, in every menu.
+  cvService();
   if (fillModeActive != fillBtnLastState){
     Serial.print("FILL "); Serial.println(fillModeActive ? "ON" : "OFF");
     fillBtnLastState = fillModeActive;
@@ -639,9 +663,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   if (i == MATRIX_BTN_MENU2_INDEX){
     activeMenu = 6;  // Analog CV outputs
     heldStep = -1; focusEncoder = 0;
-    // NOTE: do NOT auto-init the PIXI here — SPI bring-up is currently hanging,
-    // and that would freeze the UI on menu entry. Run it on demand via serial
-    // 'x' (diag) or 'v' (self-test) until the SPI issue is resolved.
+    ensurePixi();    // SPI wiring fixed — safe to bring up on entry again
     Serial.println("MENU2 -> activeMenu=6 (Analog Outs)");
     return;
   }
@@ -850,8 +872,17 @@ void SimpleSequencer::readEncoders(){
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
   if (activeMenu == 6){
-    // Analog Outs: pot-button N resets that jack's DAC port (latch-up recovery
-    // after a short); pot 6 button soft-resets the whole PIXI + reapplies all.
+    // Analog Outs:
+    //   FN + pot-button N   -> cycle out N's source channel (1..7)
+    //   pot-button N        -> reset that jack's DAC port (latch-up recovery)
+    //   pot-button 6        -> soft-reset the whole PIXI + reapply all outs
+    if (isFunctionHeld() && pot < NUM_CV_OUTS){
+      cvChannel[pot] = (uint8_t)((cvChannel[pot] + 1) % NUM_CHANNELS);
+      cvFocus = pot;
+      Serial.print("CV"); Serial.print(pot + 1);
+      Serial.print(" src=CH"); Serial.println(cvChannel[pot] + 1);
+      return;
+    }
     if (pot < NUM_CV_OUTS){
       resetCvOut(pot);
     } else if (pot == 5){
@@ -985,8 +1016,9 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   lastTouchedPot  = (int8_t)pot;
   lastPotTouchMs  = millis();
 
-  // --- GLOBAL MODIFIER: Function + Pot 1 = BPM (anywhere, in 1-BPM steps) ---
-  if (pot == 0 && isFunctionHeld()){
+  // --- GLOBAL MODIFIER: Function + Pot 1 = BPM (anywhere except the Analog
+  // menu, where FN + pots is the CV mode/param editor) ---
+  if (pot == 0 && isFunctionHeld() && activeMenu != 6){
     int newBpm = (int)bpm + ticks;
     if (newBpm < 20) newBpm = 20;
     if (newBpm > 300) newBpm = 300;
@@ -1005,7 +1037,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // --- GLOBAL MODIFIER: Function + Pot 3 (encoder 3) = melody contour bias ---
   // Clockwise -> ascending bias, anti-clockwise -> descending. Applied on the
   // next pattern generation. Shown as an arrow on the Menu 1 screen 2.
-  if (pot == 2 && isFunctionHeld()){
+  if (pot == 2 && isFunctionHeld() && activeMenu != 6){
     int v = (int)contourBias[selectedChannel] + ticks * 8; // ~8% per detent
     if (v < -100) v = -100;
     if (v > 100)  v = 100;
@@ -1293,8 +1325,70 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     return;
   }
 
-  // --- Menu 2: Analog CV outputs — pots set each output's voltage (0..10V) ---
+  // --- Menu 2: Analog CV outputs ------------------------------------
+  // Plain rotate on pot N: set out N's level (fixed V / gate-trig high / LFO amp).
+  // FN + rotate pot N: cycle out N's mode (FIX/GATE/LFO/TRIG) + open its submenu.
+  // FN held with submenu open: pots 3-6 edit the focused out's mode parameters.
   if (activeMenu == 6){
+    if (isFunctionHeld()){
+      if (pot < NUM_CV_OUTS){
+        cvFocus = pot;
+        cvSubmenu = true;
+        int m = (int)cvMode[pot] + (ticks > 0 ? 1 : -1); // one mode per gesture
+        m = ((m % (int)CV_MODE_COUNT) + (int)CV_MODE_COUNT) % (int)CV_MODE_COUNT;
+        cvMode[pot] = (uint8_t)m;
+        cvLastCode[pot] = 0xFFFF; // force a DAC rewrite in the new mode
+        Serial.print("CV"); Serial.print(pot + 1);
+        Serial.print(" mode="); Serial.println(CV_MODE_NAMES[cvMode[pot]]);
+      } else if (cvSubmenu){
+        uint8_t o = cvFocus;
+        switch (pot){
+          case 2: // Pot 3: level (volts for FIX, high level for GATE/TRIG, LFO amplitude)
+            setCvOut(o, cvVolts[o] + (float)ticks * 0.1f);
+            Serial.print("CV"); Serial.print(o + 1);
+            Serial.print(" LVL="); Serial.print(cvVolts[o], 2); Serial.println("V");
+            break;
+          case 3: // Pot 4: LFO shape, or TRIG pulse length
+            if (cvMode[o] == CV_LFO){
+              int s = ((int)lfoShape[o] + (ticks > 0 ? 1 : -1) + 3) % 3;
+              lfoShape[o] = (uint8_t)s;
+              Serial.print("CV"); Serial.print(o + 1);
+              Serial.print(" SHAPE="); Serial.println(LFO_SHAPE_NAMES[lfoShape[o]]);
+            } else if (cvMode[o] == CV_TRIG){
+              int L = (int)trigLenMs[o] + ticks;
+              trigLenMs[o] = (uint16_t)constrain(L, 1, 200);
+              Serial.print("CV"); Serial.print(o + 1);
+              Serial.print(" TRIGLEN="); Serial.print(trigLenMs[o]); Serial.println("ms");
+            }
+            break;
+          case 4: // Pot 5: LFO rate (BPM division when synced, ms when free)
+            if (cvMode[o] == CV_LFO){
+              if (lfoSyncBpm[o]){
+                int d = (int)lfoDivIdx[o] + (ticks > 0 ? 1 : -1);
+                lfoDivIdx[o] = (uint8_t)constrain(d, 0, (int)LFO_DIV_COUNT - 1);
+                Serial.print("CV"); Serial.print(o + 1);
+                Serial.print(" RATE="); Serial.println(LFO_DIV_NAMES[lfoDivIdx[o]]);
+              } else {
+                int step = (lfoPeriodMs[o] >= 1000) ? 100 : 10;
+                int p = (int)lfoPeriodMs[o] + ticks * step;
+                lfoPeriodMs[o] = (uint16_t)constrain(p, 20, 5000);
+                Serial.print("CV"); Serial.print(o + 1);
+                Serial.print(" RATE="); Serial.print(lfoPeriodMs[o]); Serial.println("ms");
+              }
+            }
+            break;
+          case 5: // Pot 6: LFO rate mode (cw = BPM-synced, ccw = free ms)
+            if (cvMode[o] == CV_LFO){
+              lfoSyncBpm[o] = (ticks > 0);
+              Serial.print("CV"); Serial.print(o + 1);
+              Serial.print(" SYNC="); Serial.println(lfoSyncBpm[o] ? "BPM" : "MS");
+            }
+            break;
+          default: break;
+        }
+      }
+      return;
+    }
     if (pot < NUM_CV_OUTS){
       setCvOut(pot, cvVolts[pot] + (float)ticks * 0.1f);
       Serial.print("CV"); Serial.print(pot + 1);
@@ -2217,6 +2311,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   uint8_t fstate = fillState[ch][pIdx];
   if (fstate == 1 && !fillModeActive) return;
   if (fstate == 2 && fillModeActive) return;
+  chTrigMs[ch] = millis(); // CV TRIG mode + screen-2 flash follow real triggers
   uint8_t p = pitch[ch][pIdx];
   if (p == 255) p = channelPitch[ch];
   uint8_t note = constrain(p, 0, 127);
@@ -3241,6 +3336,61 @@ void SimpleSequencer::resetPixiAll(){
   Serial.println("PIXI full reset, all CV outs reapplied");
 }
 
+// Effective LFO period in ms: quantised to the BPM grid when synced, otherwise
+// the free-run ms setting. Clamped so phase math never divides by ~0.
+float SimpleSequencer::lfoPeriodEff(uint8_t idx){
+  float per;
+  if (lfoSyncBpm[idx]){
+    per = LFO_DIV_BEATS[lfoDivIdx[idx]] * 60000.0f / (float)(bpm > 0 ? bpm : 120);
+  } else {
+    per = (float)lfoPeriodMs[idx];
+  }
+  return per < 20.0f ? 20.0f : per;
+}
+
+// CV engine, run every loop() pass regardless of menu. Computes each out's
+// voltage from its mode + source channel and writes the DAC only when the
+// 12-bit code actually changes (keeps SPI traffic minimal). Trigger/gate
+// events are stamped in the 1ms engine ISR (chTrigMs / lastNotePlaying) and
+// consumed here, so no SPI ever runs in interrupt context.
+void SimpleSequencer::cvService(){
+  if (!pixiInit || !pixiPresent) return;
+  uint32_t nowMs = millis();
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    uint8_t ch = cvChannel[i];
+    float v = 0.0f;
+    switch (cvMode[i]){
+      case CV_FIX:
+        v = cvVolts[i];
+        break;
+      case CV_GATE: // high while the source channel has a note sounding
+        v = (lastNotePlaying[ch] < 128) ? cvVolts[i] : 0.0f;
+        break;
+      case CV_TRIG: // pulse for trigLenMs after each source-channel trigger
+        v = (nowMs - chTrigMs[ch] < trigLenMs[i]) ? cvVolts[i] : 0.0f;
+        break;
+      case CV_LFO: {
+        float per = lfoPeriodEff(i);
+        float ph = (float)(nowMs % (uint32_t)per) / per; // 0..1
+        float s;
+        if (lfoShape[i] == 0)      s = ph;                                  // saw
+        else if (lfoShape[i] == 1) s = 0.5f * (1.0f - cosf(TWO_PI * ph));   // sine
+        else                       s = (ph < 0.5f) ? 1.0f : 0.0f;           // square
+        v = s * cvVolts[i];
+        break;
+      }
+      default: break;
+    }
+    if (v < 0.0f) v = 0.0f;
+    if (v > 10.0f) v = 10.0f;
+    uint16_t code = (uint16_t)(v / 10.0f * 4095.0f + 0.5f);
+    if (code != cvLastCode[i]){
+      cvLastCode[i] = code;
+      pixi.writeDacCode(CV_PORTS[i], code);
+    }
+  }
+}
+
 // Store + push a manual voltage to one CV output (0..10V). Safe to call when no
 // PIXI is attached — it just keeps the stored value for the display.
 void SimpleSequencer::setCvOut(uint8_t idx, float volts){
@@ -3255,6 +3405,9 @@ void SimpleSequencer::setCvOut(uint8_t idx, float volts){
 // surface — pots 1..NUM_CV_OUTS set each output's voltage (0..10V). Doubles as
 // a no-serial bring-up test. Assignment modes (follow pitch/gate/etc.) TBD.
 void SimpleSequencer::drawAnalogView(){
+  // FN held with the mode submenu open takes over the whole screen.
+  if (cvSubmenu && isFunctionHeld()){ drawAnalogSubmenu(); return; }
+
   display.clearDisplay();
   display.setTextColor(SH110X_WHITE);
 
@@ -3273,30 +3426,85 @@ void SimpleSequencer::drawAnalogView(){
   }
   display.drawFastHLine(0, 12, 128, SH110X_WHITE);
 
-  // Up to 6 outs laid out in two rows of three to line up with the pots.
+  // Up to 6 outs in two rows of three, aligned to the pots. Three lines per
+  // out: name+port / mode+source channel / level.
   const int colX[3] = {2, 45, 88};
-  const int lblY1 = 16, valY1 = 26;
-  const int lblY2 = 42, valY2 = 52;
   for (uint8_t i = 0; i < NUM_CV_OUTS && i < 6; i++){
-    int col = i % 3;
-    bool row2 = (i >= 3);
-    int x = colX[col];
-    int ly = row2 ? lblY2 : lblY1;
-    int vy = row2 ? valY2 : valY1;
-    // Label: CVn + the PIXI port it drives.
-    display.setCursor(x, ly);
+    int x = colX[i % 3];
+    int y = (i >= 3) ? 40 : 16;
+    display.setCursor(x, y);
     display.print("CV"); display.print(i + 1);
     display.print(" P"); display.print(CV_PORTS[i]);
-    // Value in volts (2 d.p.).
-    display.setCursor(x, vy);
+    display.setCursor(x, y + 9);
+    display.print(CV_MODE_NAMES[cvMode[i]]);
+    display.print(" C"); display.print(cvChannel[i] + 1);
+    display.setCursor(x, y + 18);
     display.print(cvVolts[i], 2); display.print("V");
   }
 
-  // Footer hint: pot-button resets a stuck output (only when row 2 is free).
+  // Footer hint (only when row 2 is free).
   if (NUM_CV_OUTS <= 3){
     display.setCursor(2, 56);
-    display.print("PUSH POT=RST  P6=RST ALL");
+    display.print("FN+ROT MODE FN+PSH CH");
   }
+
+  display.display();
+}
+
+// FN-held submenu: mode selector for the focused out + the pot assignments for
+// the current mode. Shown on screen 1 while Function stays down; releasing FN
+// drops back to the normal Analog view.
+void SimpleSequencer::drawAnalogSubmenu(){
+  display.clearDisplay();
+  display.setTextColor(SH110X_WHITE);
+  uint8_t o = cvFocus;
+
+  // Header: which out + port + source channel.
+  display.setTextSize(1);
+  display.setCursor(2, 1);
+  display.print("CV"); display.print(o + 1);
+  display.print("  P"); display.print(CV_PORTS[o]);
+  display.print("  CH"); display.print(cvChannel[o] + 1);
+  display.drawFastHLine(0, 11, 128, SH110X_WHITE);
+
+  // Mode strip: 4 chips, current inverted. FN + pot N keeps cycling.
+  for (uint8_t m = 0; m < CV_MODE_COUNT; m++){
+    int bx = 2 + m * 32;
+    if (m == cvMode[o]){
+      display.fillRect(bx, 14, 30, 11, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.drawRect(bx, 14, 30, 11, SH110X_WHITE);
+    }
+    display.setCursor(bx + 4, 16);
+    display.print(CV_MODE_NAMES[m]);
+    display.setTextColor(SH110X_WHITE);
+  }
+
+  // Param lines with the pot that edits each.
+  int y = 30;
+  display.setCursor(2, y);
+  display.print("P3 LVL "); display.print(cvVolts[o], 2); display.print("V");
+  y += 10;
+  if (cvMode[o] == CV_TRIG){
+    display.setCursor(2, y);
+    display.print("P4 LEN "); display.print(trigLenMs[o]); display.print("ms");
+    y += 10;
+  } else if (cvMode[o] == CV_LFO){
+    display.setCursor(2, y);
+    display.print("P4 SHP "); display.print(LFO_SHAPE_NAMES[lfoShape[o]]);
+    y += 10;
+    display.setCursor(2, y);
+    display.print("P5 RATE ");
+    if (lfoSyncBpm[o]) display.print(LFO_DIV_NAMES[lfoDivIdx[o]]);
+    else { display.print(lfoPeriodMs[o]); display.print("ms"); }
+    y += 10;
+    display.setCursor(2, y);
+    display.print("P6 SYNC "); display.print(lfoSyncBpm[o] ? "BPM" : "MS");
+    y += 10;
+  }
+  display.setCursor(2, 56);
+  display.print("RELEASE FN TO EXIT");
 
   display.display();
 }
@@ -3901,27 +4109,92 @@ void SimpleSequencer::drawOverview(){
   uint32_t now = millis();
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
 
-  // ── Menu 2: Analog CV outputs — level bars (0..10V) ─────────────
+  // ── Menu 2: Analog CV outputs — focused out's mode view ─────────
+  // FIX: big voltage + bar. GATE: filled block while the source channel's note
+  // sounds. TRIG: flash on each trigger. LFO: one waveform cycle with a moving
+  // phase dot + rate readout.
   if (activeMenu == 6){
+    uint8_t o = cvFocus;
+    uint8_t sc = cvChannel[o];
     display2.setTextSize(1);
     display2.setCursor(2, 1);
-    display2.print("ANALOG OUT");
+    display2.print("CV"); display2.print(o + 1);
+    display2.print(" "); display2.print(CV_MODE_NAMES[cvMode[o]]);
+    display2.print(" CH"); display2.print(sc + 1);
     display2.setCursor(96, 1);
     display2.print(pixiPresent ? "OK" : "--");
     display2.drawFastHLine(0, 11, 128, SH110X_WHITE);
 
-    const int n = NUM_CV_OUTS;
-    const int top = 14, bot = 56, h = bot - top;
-    int slot = 128 / (n > 0 ? n : 1);
-    int bw = slot - 8; if (bw < 6) bw = 6;
-    for (int i = 0; i < n; i++){
-      int x = i * slot + (slot - bw) / 2;
-      display2.drawRect(x, top, bw, h, SH110X_WHITE);
-      int fh = (int)(cvVolts[i] / 10.0f * (h - 2) + 0.5f);
-      if (fh > h - 2) fh = h - 2;
-      if (fh > 0) display2.fillRect(x + 1, bot - 1 - fh, bw - 2, fh, SH110X_WHITE);
-      display2.setCursor(x, bot + 2);
-      display2.print(i + 1);
+    const int top = 16, bot = 60, h = bot - top;
+    switch (cvMode[o]){
+      case CV_FIX: {
+        display2.setTextSize(2);
+        display2.setCursor(8, 26);
+        display2.print(cvVolts[o], 2); display2.print("V");
+        display2.setTextSize(1);
+        display2.drawRect(8, 48, 112, 8, SH110X_WHITE);
+        int fw = (int)(cvVolts[o] / 10.0f * 110.0f);
+        if (fw > 0) display2.fillRect(9, 49, fw, 6, SH110X_WHITE);
+        break;
+      }
+      case CV_GATE: {
+        bool high = (lastNotePlaying[sc] < 128);
+        if (high) display2.fillRect(34, top, 60, h - 10, SH110X_WHITE);
+        else      display2.drawRect(34, top, 60, h - 10, SH110X_WHITE);
+        display2.setCursor(46, bot - 6);
+        display2.print(high ? "HIGH" : "LOW");
+        break;
+      }
+      case CV_TRIG: {
+        bool flash = (now - chTrigMs[sc] < 150);
+        if (flash) display2.fillCircle(64, top + (h - 12) / 2, 14, SH110X_WHITE);
+        else       display2.drawCircle(64, top + (h - 12) / 2, 14, SH110X_WHITE);
+        display2.setCursor(2, bot - 6);
+        display2.print("LEN "); display2.print(trigLenMs[o]); display2.print("ms");
+        display2.setCursor(80, bot - 6);
+        display2.print(cvVolts[o], 1); display2.print("V");
+        break;
+      }
+      case CV_LFO: {
+        // One cycle of the waveform across the plot, phase dot riding it.
+        const int px0 = 4, pw = 120, wTop = top, wBot = bot - 10, wH = wBot - wTop;
+        float per = lfoPeriodEff(o);
+        float ph = (float)(now % (uint32_t)per) / per;
+        int prevY = 0;
+        for (int x = 0; x < pw; x++){
+          float p = (float)x / (float)pw;
+          float s;
+          if (lfoShape[o] == 0)      s = p;
+          else if (lfoShape[o] == 1) s = 0.5f * (1.0f - cosf(TWO_PI * p));
+          else                       s = (p < 0.5f) ? 1.0f : 0.0f;
+          int y = wBot - (int)(s * (float)wH);
+          if (x > 0 && lfoShape[o] != 2 && abs(y - prevY) > 1){
+            display2.drawLine(px0 + x - 1, prevY, px0 + x, y, SH110X_WHITE);
+          } else {
+            display2.drawPixel(px0 + x, y, SH110X_WHITE);
+          }
+          prevY = y;
+        }
+        // Phase dot.
+        {
+          float s;
+          if (lfoShape[o] == 0)      s = ph;
+          else if (lfoShape[o] == 1) s = 0.5f * (1.0f - cosf(TWO_PI * ph));
+          else                       s = (ph < 0.5f) ? 1.0f : 0.0f;
+          int dx = px0 + (int)(ph * (float)pw);
+          int dy = wBot - (int)(s * (float)wH);
+          display2.fillCircle(dx, dy, 2, SH110X_WHITE);
+        }
+        display2.setCursor(2, bot - 6);
+        display2.print(LFO_SHAPE_NAMES[lfoShape[o]]);
+        display2.setCursor(40, bot - 6);
+        if (lfoSyncBpm[o]) display2.print(LFO_DIV_NAMES[lfoDivIdx[o]]);
+        else { display2.print(lfoPeriodMs[o]); display2.print("ms"); }
+        display2.setCursor(96, bot - 6);
+        display2.print(cvVolts[o], 1); display2.print("V");
+        break;
+      }
+      default: break;
     }
     display2.display();
     return;
