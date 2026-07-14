@@ -236,6 +236,7 @@ class SimpleSequencer {
     uint16_t lfoPeriodMs[NUM_CV_OUTS];  // free-run period when not synced
     uint16_t trigLenMs[NUM_CV_OUTS];    // TRIG pulse length
     uint16_t cvLastCode[NUM_CV_OUTS];   // last DAC code written (skip no-op SPI)
+    bool     cvOutEnabled[NUM_CV_OUTS]; // false = quarantined (driver latches the chip)
     bool     cvSubmenu = false;         // FN-held submenu open on screen 1
     uint8_t  cvFocus = 0;               // out being edited / shown on screen 2
     volatile uint32_t chTrigMs[NUM_CHANNELS]; // last trigger time per channel (ms)

@@ -144,6 +144,7 @@ SimpleSequencer::SimpleSequencer()
     lfoPeriodMs[i] = 500;
     trigLenMs[i] = 10;
     cvLastCode[i] = 0xFFFF; // force first DAC write
+    cvOutEnabled[i] = true;
   }
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) chTrigMs[c] = 0;
   for (uint8_t k=0;k<MATRIX_KEYS;k++){
@@ -237,10 +238,10 @@ void SimpleSequencer::ensurePixi(){
     uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
     Serial.print("PIXI MAX11300 detected, dev_id=0x"); Serial.println(id, HEX);
     for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
-      pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
+      if (cvOutEnabled[i]) pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
     }
     Serial.print("Configured "); Serial.print(NUM_CV_OUTS);
-    Serial.println(" CV out(s) as 0-10V DACs");
+    Serial.println(" CV out(s) as 0-10V DACs (quarantined outs skipped)");
   } else {
     Serial.println("PIXI MAX11300 not detected on SPI");
   }
@@ -460,6 +461,34 @@ void SimpleSequencer::loop(){
     }
     if (c == 'z' || c == 'Z'){
       pixiStaged();
+    }
+    if (c == 'k' || c == 'K'){
+      // P19-only bring-up: skip P0 entirely (its driver latches the chip) to
+      // prove the rest of the chip is healthy. Power-cycle first.
+      Serial.println("--- PIXI P19-ONLY BRING-UP ---");
+      pixiInit = true; pixiPresent = false;
+      cvOutEnabled[0] = false; // quarantine P0: engine + watchdog won't touch it
+      cvOutEnabled[1] = true;
+      if (!pixi.begin()){ Serial.println("DEAD after reset -> power-cycle again"); }
+      else {
+        pixi.configDac(CV_PORTS[1], Max11300::RANGE_0_TO_10);
+        delay(10);
+        uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
+        Serial.print("after cfg P19: dev_id=0x"); Serial.println(id, HEX);
+        if (id == 0x424){
+          pixi.setVoltage0to10(CV_PORTS[1], 2.5f);
+          delay(10);
+          id = pixi.readReg(Max11300::REG_DEVICE_ID);
+          Serial.print("after 2.5V on P19: dev_id=0x"); Serial.println(id, HEX);
+          if (id == 0x424){
+            pixiPresent = true;
+            cvVolts[1] = 2.5f;
+            cvLastCode[1] = 0xFFFF;
+            Serial.println("P19 OK at 2.50V (measure jack 2). P0 left untouched.");
+            Serial.println("-> P0 is the fault: check jack-1 tip-to-ground short, else port damaged.");
+          }
+        }
+      }
     }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
@@ -3377,6 +3406,7 @@ void SimpleSequencer::pixiStaged(){
   Serial.println("(run with ALL patch cables unplugged, freshly power-cycled)");
   pixiInit = true;      // take over bring-up; keep cvService quiet until success
   pixiPresent = false;
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvOutEnabled[i] = true; // full retest
   if (!pixi.begin()){
     Serial.println("DEAD after reset -> chip already latched: power-cycle again");
     return;
@@ -3433,11 +3463,19 @@ void SimpleSequencer::cvService(){
   // brown-out / reset the chip, silently dropping every port back to HI-Z.
   // Verify one port's config; if it changed, reconfigure everything. Either
   // way force a rewrite of all codes so a glitched dac_data self-heals.
+  // Only enabled outs are configured/driven — a quarantined port (its driver
+  // latches the chip) must never be touched, including by the watchdog.
+  int wdRef = -1;
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    if (cvOutEnabled[i]){ wdRef = CV_PORTS[i]; break; }
+  }
+  if (wdRef < 0) return; // nothing enabled
+
   static uint32_t lastWdMs = 0;
   static uint8_t wdFails = 0;
   if (nowMs - lastWdMs >= 500){
     lastWdMs = nowMs;
-    uint16_t cfg = pixi.readReg((uint8_t)(Max11300::REG_PORT_CFG_BASE + CV_PORTS[0]));
+    uint16_t cfg = pixi.readReg((uint8_t)(Max11300::REG_PORT_CFG_BASE + wdRef));
     if (cfg != 0x5100){
       wdFails++;
       Serial.print("CV watchdog: port_cfg=0x"); Serial.print(cfg, HEX);
@@ -3450,7 +3488,7 @@ void SimpleSequencer::cvService(){
         return;
       }
       for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
-        pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
+        if (cvOutEnabled[i]) pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
       }
     } else {
       wdFails = 0;
@@ -3459,6 +3497,7 @@ void SimpleSequencer::cvService(){
   }
 
   for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    if (!cvOutEnabled[i]) continue;
     uint8_t ch = cvChannel[i];
     float v = 0.0f;
     switch (cvMode[i]){
