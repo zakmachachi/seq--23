@@ -466,7 +466,7 @@ void SimpleSequencer::loop(){
       // Spare-port test: configure SPARE_PORT (assumed wired to nothing) as a
       // DAC at 5V. Survives -> chip+supply fine, the failing ports are
       // damaged/shorted/loaded. Dies -> global fault on any driver enable.
-      const uint8_t SPARE_PORT = 11;
+      const uint8_t SPARE_PORT = 10;
       Serial.print("--- PIXI SPARE-PORT (P"); Serial.print(SPARE_PORT); Serial.println(") TEST ---");
       pixiInit = true; pixiPresent = false;
       cvOutEnabled[0] = false; cvOutEnabled[1] = false; // quarantine both jacks
