@@ -458,6 +458,9 @@ void SimpleSequencer::loop(){
     if (c == 'w' || c == 'W'){
       pixiDump();
     }
+    if (c == 'z' || c == 'Z'){
+      pixiStaged();
+    }
     if (c == 'm' || c == 'M'){
       runMidiPinMonitor(2000);
     }
@@ -3364,6 +3367,47 @@ void SimpleSequencer::pixiDump(){
   }
 }
 
+// Serial 'z': staged bring-up to find WHICH step kills the chip. The failure
+// pattern seen on the bench: chip answers right after power-up, then goes deaf
+// the moment the DAC ports are configured -> an output pin is being dragged
+// down/up externally as soon as its driver turns on. This enables one thing at
+// a time and re-checks the chip is alive after each step.
+void SimpleSequencer::pixiStaged(){
+  Serial.println("--- PIXI STAGED BRING-UP ---");
+  Serial.println("(run with ALL patch cables unplugged, freshly power-cycled)");
+  pixiInit = true;      // take over bring-up; keep cvService quiet until success
+  pixiPresent = false;
+  if (!pixi.begin()){
+    Serial.println("DEAD after reset -> chip already latched: power-cycle again");
+    return;
+  }
+  struct { const char* name; uint8_t port; bool config; float volts; } steps[] = {
+    {"cfg P0 as DAC",  CV_PORTS[0], true,  -1.0f},
+    {"5.0V on P0",     CV_PORTS[0], false,  5.0f},
+    {"cfg P19 as DAC", CV_PORTS[1], true,  -1.0f},
+    {"2.5V on P19",    CV_PORTS[1], false,  2.5f},
+  };
+  for (auto &s : steps){
+    if (s.config) pixi.configDac(s.port, Max11300::RANGE_0_TO_10);
+    else          pixi.setVoltage0to10(s.port, s.volts);
+    delay(10);
+    uint16_t id = pixi.readReg(Max11300::REG_DEVICE_ID);
+    Serial.print("after "); Serial.print(s.name);
+    Serial.print(": dev_id=0x"); Serial.println(id, HEX);
+    if (id == 0x0000 || id == 0xFFFF){
+      Serial.print("-> CHIP DIED at this step. Port P");
+      Serial.print(s.port);
+      Serial.println(" is being shorted/back-driven at the jack (or is damaged).");
+      Serial.println("   Unplug that jack / check its wiring, power-cycle, re-run 'z'.");
+      return;
+    }
+  }
+  pixiPresent = true;
+  cvVolts[0] = 5.0f; cvVolts[1] = 2.5f;
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvLastCode[i] = 0xFFFF;
+  Serial.println("ALL STEPS OK — chip alive, out0=5.00V out1=2.50V (measure now)");
+}
+
 // Effective LFO period in ms: quantised to the BPM grid when synced, otherwise
 // the free-run ms setting. Clamped so phase math never divides by ~0.
 float SimpleSequencer::lfoPeriodEff(uint8_t idx){
@@ -3390,15 +3434,26 @@ void SimpleSequencer::cvService(){
   // Verify one port's config; if it changed, reconfigure everything. Either
   // way force a rewrite of all codes so a glitched dac_data self-heals.
   static uint32_t lastWdMs = 0;
+  static uint8_t wdFails = 0;
   if (nowMs - lastWdMs >= 500){
     lastWdMs = nowMs;
     uint16_t cfg = pixi.readReg((uint8_t)(Max11300::REG_PORT_CFG_BASE + CV_PORTS[0]));
     if (cfg != 0x5100){
+      wdFails++;
       Serial.print("CV watchdog: port_cfg=0x"); Serial.print(cfg, HEX);
       Serial.println(" -> chip lost config, reconfiguring");
+      // Three straight failures = the chip isn't taking writes at all (full
+      // latch-up). Stop hammering the bus; a power cycle + 'z' is needed.
+      if (wdFails >= 3){
+        pixiPresent = false;
+        Serial.println("CV watchdog: chip unresponsive, giving up (power-cycle + 'z' to recover)");
+        return;
+      }
       for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
         pixi.configDac(CV_PORTS[i], Max11300::RANGE_0_TO_10);
       }
+    } else {
+      wdFails = 0;
     }
     for (uint8_t i = 0; i < NUM_CV_OUTS; i++) cvLastCode[i] = 0xFFFF;
   }
