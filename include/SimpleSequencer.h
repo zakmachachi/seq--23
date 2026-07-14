@@ -215,6 +215,10 @@ class SimpleSequencer {
     // Manual per-output voltage (0..10V), set from the Analog Outs menu (Menu 2).
     float cvVolts[NUM_CV_OUTS];
     void setCvOut(uint8_t idx, float volts); // clamp, store, write to the PIXI
+    // Recovery: a shorted jack (e.g. probe tip) can wedge a DAC port. Pot-button
+    // N in Menu 2 resets just that output; pot 6 soft-resets the whole chip.
+    void resetCvOut(uint8_t idx);
+    void resetPixiAll();
 
     // --- HARDWARE LED GRID ---
     Adafruit_NeoPixel ledStrip;

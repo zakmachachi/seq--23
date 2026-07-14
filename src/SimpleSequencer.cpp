@@ -849,6 +849,16 @@ void SimpleSequencer::readEncoders(){
 
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
+  if (activeMenu == 6){
+    // Analog Outs: pot-button N resets that jack's DAC port (latch-up recovery
+    // after a short); pot 6 button soft-resets the whole PIXI + reapplies all.
+    if (pot < NUM_CV_OUTS){
+      resetCvOut(pot);
+    } else if (pot == 5){
+      resetPixiAll();
+    }
+    return;
+  }
   if (activeMenu == 5){
     if (pot == 0){
       // Pages mode: Pot 1 button toggles Global / Channel page-edit focus.
@@ -3135,25 +3145,37 @@ void SimpleSequencer::cvSelfTest(){
 // (e.g. AVDDIO/AVSSIO rails). If it mismatches or dev_id is 0x0000/0xFFFF, SPI
 // itself isn't talking to the chip (MOSI/MISO/SCK/CS wiring or chip power).
 void SimpleSequencer::pixiDiag(){
+  // Full re-init every time: soft reset + reference + port config. This also
+  // serves as a recovery path if a port latched up (e.g. after an output short).
+  pixiInit = false;
   ensurePixi();
-  uint8_t p = CV_PORTS[0];
   Serial.println("--- PIXI DIAG ---");
   Serial.print("dev_id         = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_ID), HEX);
   Serial.print("device_control = 0x"); Serial.println(pixi.readReg(Max11300::REG_DEVICE_CONTROL), HEX);
-  Serial.print("port_cfg[");  Serial.print(p); Serial.print("]   = 0x");
-  Serial.println(pixi.readReg(Max11300::REG_PORT_CFG_BASE + p), HEX);
-  Serial.print("dac_data[");  Serial.print(p); Serial.print("]   = 0x");
-  Serial.println(pixi.readReg(Max11300::REG_DAC_DATA_BASE + p), HEX);
-  // Write/readback test on the port config register.
-  pixi.writeReg(Max11300::REG_PORT_CFG_BASE + p, 0x5100); // DAC, 0-10V range
-  uint16_t rb = pixi.readReg(Max11300::REG_PORT_CFG_BASE + p);
+  // Fault status: interrupt flags (0x01) + DAC over-current status (0x04/0x05).
+  // interrupt_flag bit 0x0020 = DACOI (a DAC hit its current limit at some point).
+  Serial.print("interrupt_flag = 0x"); Serial.println(pixi.readReg(0x01), HEX);
+  Serial.print("dac_oi_15_0    = 0x"); Serial.println(pixi.readReg(0x04), HEX);
+  Serial.print("dac_oi_19_16   = 0x"); Serial.println(pixi.readReg(0x05), HEX);
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    uint8_t p = CV_PORTS[i];
+    Serial.print("port_cfg[");  Serial.print(p); Serial.print("] = 0x");
+    Serial.print(pixi.readReg(Max11300::REG_PORT_CFG_BASE + p), HEX);
+    Serial.print("  dac_data[");  Serial.print(p); Serial.print("] = 0x");
+    Serial.println(pixi.readReg(Max11300::REG_DAC_DATA_BASE + p), HEX);
+  }
+  // Write/readback test on the first port's config register.
+  uint8_t p0 = CV_PORTS[0];
+  pixi.writeReg(Max11300::REG_PORT_CFG_BASE + p0, 0x5100); // DAC, 0-10V range
+  uint16_t rb = pixi.readReg(Max11300::REG_PORT_CFG_BASE + p0);
   Serial.print("port_cfg writeback 0x5100 -> 0x"); Serial.println(rb, HEX);
-  Serial.println(rb == 0x5100 ? "SPI WRITE/READ OK -> check analog supplies (AVDDIO/AVSSIO)"
+  Serial.println(rb == 0x5100 ? "SPI WRITE/READ OK"
                               : "SPI MISMATCH -> check MOSI/MISO/SCK/CS wiring + chip power");
-  // Re-apply DAC config + mid voltage so the output should sit ~5V if powered.
-  pixi.configDac(p, Max11300::RANGE_0_TO_10);
-  pixi.setVoltage0to10(p, 5.0f);
-  Serial.println("set port to 5.00V (measure now)");
+  // Distinct voltages so each jack can be identified on a meter.
+  pixi.configDac(p0, Max11300::RANGE_0_TO_10);
+  setCvOut(0, 5.0f);
+  if (NUM_CV_OUTS > 1) setCvOut(1, 2.5f);
+  Serial.println("set out0=5.00V out1=2.50V (measure now)");
 }
 
 // Serial 'y': continuity/level test with just a multimeter. Drives CS/SCK/MOSI
@@ -3188,6 +3210,35 @@ void SimpleSequencer::pixiPinTest(){
   pixiInit = false;
   pixiPresent = false;
   Serial.println("PIN TEST done. Re-run 'x' to retry SPI.");
+}
+
+// Reset ONE CV output after a latch-up (e.g. the jack got shorted): drop the
+// port to high-impedance, reconfigure it as a 0-10V DAC, and rewrite its last
+// voltage. Leaves every other output untouched.
+void SimpleSequencer::resetCvOut(uint8_t idx){
+  if (idx >= NUM_CV_OUTS) return;
+  ensurePixi();
+  if (!pixiPresent){ Serial.println("CV reset: PIXI not present"); return; }
+  uint8_t p = CV_PORTS[idx];
+  pixi.writeReg((uint8_t)(Max11300::REG_PORT_CFG_BASE + p), 0x0000); // HI-Z
+  delay(2);
+  pixi.configDac(p, Max11300::RANGE_0_TO_10);
+  pixi.setVoltage0to10(p, cvVolts[idx]);
+  Serial.print("CV"); Serial.print(idx + 1);
+  Serial.print(" (P"); Serial.print(p); Serial.print(") reset, re-set to ");
+  Serial.print(cvVolts[idx], 2); Serial.println("V");
+}
+
+// Full-chip recovery: soft-reset the MAX11300, reconfigure every CV port, and
+// reapply the stored voltages. The big hammer when a single-port reset fails.
+void SimpleSequencer::resetPixiAll(){
+  pixiInit = false;
+  ensurePixi();
+  if (!pixiPresent){ Serial.println("PIXI reset: not present"); return; }
+  for (uint8_t i = 0; i < NUM_CV_OUTS; i++){
+    pixi.setVoltage0to10(CV_PORTS[i], cvVolts[i]);
+  }
+  Serial.println("PIXI full reset, all CV outs reapplied");
 }
 
 // Store + push a manual voltage to one CV output (0..10V). Safe to call when no
@@ -3239,6 +3290,12 @@ void SimpleSequencer::drawAnalogView(){
     // Value in volts (2 d.p.).
     display.setCursor(x, vy);
     display.print(cvVolts[i], 2); display.print("V");
+  }
+
+  // Footer hint: pot-button resets a stuck output (only when row 2 is free).
+  if (NUM_CV_OUTS <= 3){
+    display.setCursor(2, 56);
+    display.print("PUSH POT=RST  P6=RST ALL");
   }
 
   display.display();

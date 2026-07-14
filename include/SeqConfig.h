@@ -56,8 +56,8 @@ static const uint32_t MAX11300_SPI_HZ = 8000000; // 8 MHz (part supports up to 2
 // Assignable CV outputs. Each entry is a MAX11300 PIXI port (0..19) wired to a
 // physical CV jack, configured as a 0..10V DAC (1V/oct fits in this range).
 // Adjust the port list to match the PCB once the jack wiring is known.
-static const uint8_t NUM_CV_OUTS = 1;
-static const uint8_t CV_PORTS[NUM_CV_OUTS] = {0};
+static const uint8_t NUM_CV_OUTS = 2;
+static const uint8_t CV_PORTS[NUM_CV_OUTS] = {0, 19}; // jack out 1 = P0, jack out 2 = P19
 
 // --- Potentiometer mappings (each pot has two analog inputs + a push button) ---
 // Format per pot: PotX: PinA, PinB, Button
