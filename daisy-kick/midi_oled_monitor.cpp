@@ -252,6 +252,22 @@ static constexpr float SHERMAN_POST_LP_HZ    = 10000.0f;
 static constexpr float SHERMAN_FILTER_RESONANCE = 0.85f;
 static constexpr float SHERMAN_FEEDBACK      = 0.15f;
 static constexpr float SHERMAN_INPUT_DRIVE   = 3.05f;
+
+/*
+ * VCF-4 controls. On the hardware these are front-panel; here they are
+ * fixed until they are given CCs of their own.
+ *
+ * MODE       0 = LPF, 0.5 = BPF, 1 = HPF (one knob sweeps the three VCAs).
+ * BP_POLARITY  -1..+1, the -BP/0/+BP switch summed on top of the blend.
+ *              Fully negative nulls the bandpass instead of dulling it.
+ * CLOCK_RATIO  Core B's clock divider against core A: 1 = 24 dB cascade,
+ *              2 = octave, 3 = the "harmonics" setting.
+ * SERIAL       A into B, versus the two cores in parallel.
+ */
+static constexpr float SHERMAN_MODE        = 0.46f;
+static constexpr float SHERMAN_BP_POLARITY = 0.35f;
+static constexpr float SHERMAN_CLOCK_RATIO = 2.0f;
+static constexpr bool  SHERMAN_SERIAL_ROUTING = true;
 /* +7 dB: 0.70 * 10^(7/20). 4 dB to match Mackie, plus the shared 3 dB. */
 
 /*
@@ -8611,64 +8627,126 @@ struct MacroMackieProcessor
     }
 };
 
+/* ============================================================
+   SHERMAN — VCF-4 SWITCHED-CAPACITOR MODEL
+   ============================================================
+
+   Modelled on the VCF-4 dual switched capacitor audio filter by
+   Skull & Circuits (c)2023.
+   https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2
+
+   The hardware pairs two LTC1060 switched-capacitor filter cores. An
+   LTC1060 has no voltage or current cutoff control at all: cutoff is set
+   purely by a square-wave clock running at 100x the wanted frequency, so
+   a 10 Hz cutoff needs a 1 kHz clock and 10 kHz needs 1 MHz.
+
+   That constraint is the whole character. Because the ratio is fixed by
+   the topology, the integrator coefficient is a CONSTANT and the cutoff
+   moves entirely with the clock. And because the core only updates on a
+   clock edge, at low cutoffs the clock falls under the audio rate and the
+   output visibly steps between edges -- the write-up describes it as "a
+   bit crusher kind of effect on low filter settings".
+
+   That artefact lands exactly in a kick's range: at 48 kHz the clock drops
+   below the host rate once the cutoff is under ~480 Hz, so the crunch
+   appears on its own as the filter sweeps down into the body.
+
+   Resonance is BP fed back to the input through a VCA, which self
+   oscillates at the top of its range, as on the hardware.
+   ============================================================ */
+
 struct MacroShermanSVF
 {
     float ic1eq = 0.0f;
     float ic2eq = 0.0f;
-    float g = 0.1f;
     float k = 1.0f;
-    float target_g = 0.1f;
-    float target_k = 1.0f;
+
+    /* Clock phase, in cycles. One wrap = one capacitor switch. */
+    float clock_phase = 0.0f;
+    float clock_hz = 20000.0f;
+
+    /* Held outputs: the core only moves on a clock edge. */
+    float held_low = 0.0f;
+    float held_band = 0.0f;
+    float held_high = 0.0f;
+
+    /*
+     * Clock is always 100x cutoff, so g = tan(pi * fc / clock) is fixed.
+     * This is why the real chip needs no frequency-dependent trimming.
+     */
+    static constexpr float SC_CLOCK_RATIO = 100.0f;
+    static constexpr float SC_G = 0.031426266f; /* tanf(PI / 100) */
 
     void ResetState()
     {
         ic1eq = 0.0f;
         ic2eq = 0.0f;
+        clock_phase = 0.0f;
+        held_low = held_band = held_high = 0.0f;
     }
 
     void Set(float frequency, float resonance, bool immediate = false)
     {
         frequency = ClampAdded(frequency, 55.0f, 6000.0f);
-        resonance = ClampAdded(resonance, 0.0f, 0.92f);
+        resonance = ClampAdded(resonance, 0.0f, 0.98f);
 
-        /* k is 1/Q: the old 0.82 clamp and 0.48 floor capped Q near 1.4,
-         * too broad to read as a resonant filter at all. */
-        float new_k = 1.62f - resonance * 1.43f;
-        if(new_k < 0.33f)
-            new_k = 0.33f;
+        /* k is 1/Q. Reaching ~0.10 lets the core self-oscillate. */
+        float new_k = 1.62f - resonance * 1.55f;
+        if(new_k < 0.10f)
+            new_k = 0.10f;
 
-        float new_g = tanf(PI * frequency / SAMPLE_RATE);
-        if(new_g > 3.2f)
-            new_g = 3.2f;
+        k = immediate ? new_k : k + (new_k - k) * 0.25f;
+        clock_hz = frequency * SC_CLOCK_RATIO;
+    }
 
-        target_g = new_g;
-        target_k = new_k;
-        if(immediate)
-        {
-            g = target_g;
-            k = target_k;
-        }
+    /* One switched-capacitor core step, evaluated at the clock rate. */
+    void Tick(float input)
+    {
+        float denom = 1.0f + SC_G * (SC_G + k);
+
+        float v3 = input - ic2eq;
+        float v1 = (ic1eq + SC_G * v3) / denom;
+        float v2 = ic2eq + SC_G * v1;
+        ic1eq = 2.0f * v1 - ic1eq;
+        ic2eq = 2.0f * v2 - ic2eq;
+
+        held_low = v2;
+        held_band = v1;
+        held_high = input - k * held_band - held_low;
     }
 
     void Process(float input, float& low, float& band, float& high)
     {
-        constexpr float coeff_slew = 0.00415800f;
-        g += (target_g - g) * coeff_slew;
-        k += (target_k - k) * coeff_slew;
+        /*
+         * Advance the clock across this audio sample and run one core step
+         * per switch. Below ~480 Hz cutoff there is less than one switch
+         * per sample, so the previous output is HELD and the signal steps:
+         * the bit-crusher artefact, arising from the topology rather than
+         * being added on afterwards.
+         *
+         * Capped at 8 steps: above that the clock is far past the audio
+         * rate, nothing is audibly stepping, and the extra iterations only
+         * cost cycles.
+         */
+        clock_phase += clock_hz * (1.0f / SAMPLE_RATE);
 
-        float denom = 1.0f + g * (g + k);
-        if(denom < 0.001f)
-            denom = 0.001f;
+        int steps = static_cast<int>(clock_phase);
+        if(steps > 8)
+        {
+            steps = 8;
+            clock_phase = 0.0f;
+        }
+        else
+        {
+            clock_phase -= static_cast<float>(steps);
+        }
 
-        float v3 = input - ic2eq;
-        float v1 = (ic1eq + g * v3) / denom;
-        float v2 = ic2eq + g * v1;
-        ic1eq = 2.0f * v1 - ic1eq;
-        ic2eq = 2.0f * v2 - ic2eq;
+        for(int s = 0; s < steps; ++s)
+            Tick(input);
 
-        low = v2;
-        band = v1;
-        high = input - k * band - low;
+        low = held_low;
+        band = held_band;
+        high = held_high;
     }
 };
 
@@ -8689,14 +8767,41 @@ struct MacroShermanProcessor
     {
         fundamental = ClampAdded(fundamental, 25.0f, 130.0f);
 
+        /*
+         * Core A sits over the body. Core B follows it at the selected
+         * clock ratio, exactly as the hardware's frequency dividers lock
+         * the second LTC1060 to the first: 1:1 cascades to 24 dB, 2:1 and
+         * 3:1 give the octave spacing the write-up calls "incredibly
+         * useful" and acid-like.
+         */
         float f1_frequency =
             ClampAdded(fundamental * 5.5f, 220.0f, 760.0f);
         float f2_frequency =
-            ClampAdded(f1_frequency * 2.15f, 500.0f, 1850.0f);
+            ClampAdded(f1_frequency * SHERMAN_CLOCK_RATIO, 220.0f, 4800.0f);
 
         f1.Set(f1_frequency, SHERMAN_FILTER_RESONANCE, immediate);
         f2.Set(f2_frequency, SHERMAN_FILTER_RESONANCE * 0.94f, immediate);
         prepared_fundamental = fundamental;
+    }
+
+    /*
+     * One knob sweeping LPF -> BPF -> HPF, as the hardware does with three
+     * VCAs fed from a single pot. The bipolar -BP/0/+BP term is summed on
+     * top: the Nord Lead trick the write-up cites, where subtracting the
+     * bandpass from the blend nulls it out rather than just dulling it.
+     */
+    static float ModeMix(float low, float band, float high)
+    {
+        float mode = SHERMAN_MODE;
+
+        float low_gain = Clamp01Added(1.0f - mode * 2.0f);
+        float high_gain = Clamp01Added(mode * 2.0f - 1.0f);
+        float band_gain = 1.0f - fabsf(mode * 2.0f - 1.0f);
+
+        return low * low_gain +
+               band * band_gain +
+               high * high_gain +
+               band * SHERMAN_BP_POLARITY;
     }
 
     void Reset()
@@ -8739,6 +8844,12 @@ struct MacroShermanProcessor
         input_hp_state += hp_a * (pre_lp_2 - input_hp_state);
         float source = pre_lp_2 - input_hp_state;
 
+        /*
+         * Resonance is the BANDPASS fed back to the input through a VCA,
+         * not a filter coefficient -- the hardware replaces the resonance
+         * pot with an AS3360 VCA in that path, and self-oscillates when it
+         * is driven far enough.
+         */
         float feedback_signal = SoftClip(feedback_memory * 1.35f);
         float driven =
             SoftClip(
@@ -8748,18 +8859,34 @@ struct MacroShermanProcessor
 
         float l1, b1, h1;
         f1.Process(driven, l1, b1, h1);
-        float f1_mix = l1 * 0.12f + b1 * 0.78f + h1 * 0.10f;
+        float f1_mix = ModeMix(l1, b1, h1);
 
-        float f2_input = driven * 0.24f + f1_mix * 0.76f;
+        /*
+         * SERIAL routing: core A into core B. At a 1:1 ratio this is the
+         * 24 dB cascade; at 2:1 or 3:1 the second core tracks an octave or
+         * more above and the pair reads as a formant pair rather than one
+         * steeper filter.
+         */
+        float f2_input =
+            SHERMAN_SERIAL_ROUTING
+            ? SoftClip(f1_mix * 1.45f)
+            : SoftClip(driven * 1.45f);
+
         float l2, b2, h2;
-        f2.Process(SoftClip(f2_input * 1.45f), l2, b2, h2);
-        float f2_mix = l2 * 0.08f + b2 * 0.78f + h2 * 0.14f;
+        f2.Process(f2_input, l2, b2, h2);
+        float f2_mix = ModeMix(l2, b2, h2);
 
         float wet =
-            SoftClip((f1_mix * 0.42f + f2_mix * 0.82f) * 2.15f);
+            SHERMAN_SERIAL_ROUTING
+            ? SoftClip(f2_mix * 2.15f)
+            : SoftClip((f1_mix + f2_mix) * 1.30f);
+
+        /* Only the bandpass returns to the resonance VCA. */
+        float resonance_return =
+            SHERMAN_SERIAL_ROUTING ? b2 : (b1 + b2) * 0.5f;
 
         constexpr float fb_post_a = 0.32f;
-        feedback_memory += fb_post_a * (wet - feedback_memory);
+        feedback_memory += fb_post_a * (resonance_return - feedback_memory);
 
         constexpr float post_a = 0.72990000f; /* SHERMAN_POST_LP_HZ */
         post_lp_1 += post_a * (wet - post_lp_1);
