@@ -207,6 +207,7 @@ void SimpleSequencer::begin(){
 
   // Initialize hardware MIDI_SERIAL for MIDI at 31250 baud
   MIDI_SERIAL.begin(31250);
+  kickPerformance.begin(sendPerformanceCC, this);
   // initialize high-resolution clock reference for internal MIDI output
   lastMidiClockMicros = micros();
 
@@ -579,7 +580,15 @@ void SimpleSequencer::loop(){
   // Update display + LEDs together at the configured refresh interval.
   // Pushing WS2812 too often disables interrupts during the bit-bang and starves
   // the matrix scan; the original 60Hz-ish cadence was correct.
-  if (millis() - lastDisplayMillis > displayRefreshMs){
+  if (kickCCPage()){
+    // OLED1 stays a permanent grid; OLED2 keeps intentional focus.
+    // The component renders dirty frames at no more than 25 FPS.
+    kickPerformance.render(display, display2Present ? &display2 : nullptr, bpm, millis());
+    if (millis() - lastDisplayMillis > displayRefreshMs){
+      updateLEDs();
+      lastDisplayMillis = millis();
+    }
+  } else if (millis() - lastDisplayMillis > displayRefreshMs){
     updateLEDs();
     drawDisplay();
     if (display2Present) drawOverview();
@@ -732,10 +741,10 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU2_INDEX){
-    activeMenu = 6;  // Analog CV outputs
+    activeMenu = 6;  // Kick CC page for TM_KICK, otherwise Analog CV outputs
     heldStep = -1; focusEncoder = 0;
-    ensurePixi();    // SPI wiring fixed — safe to bring up on entry again
-    Serial.println("MENU2 -> activeMenu=6 (Analog Outs)");
+    if (!kickCCPage()) ensurePixi();
+    Serial.println(kickCCPage() ? "MENU2 -> Kick CC (CH15)" : "MENU2 -> Analog Outs");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -880,6 +889,8 @@ void SimpleSequencer::readEncoders(){
   static unsigned long lastPotBtnChange[6] = {0,0,0,0,0,0};
   const unsigned long POT_BTN_DEBOUNCE_MS = 10;
 
+  kickPerformance.setActive(kickCCPage());
+
   // Scan pot buttons (active LOW)
   for (uint8_t i=0;i<POT_COUNT;i++){
     bool pressed = (digitalRead(POT_BTN_PINS[i]) == LOW);
@@ -889,12 +900,16 @@ void SimpleSequencer::readEncoders(){
     } else if (pressed != potBtnState[i]) {
       if ((millis() - lastPotBtnChange[i]) >= POT_BTN_DEBOUNCE_MS){
         potBtnState[i] = pressed;
-        if (pressed) {
+        if (kickCCPage()){
+          kickPerformance.buttonEdge(i, pressed, millis());
+        } else if (pressed) {
           onPotButtonPress(i);
         }
       }
     }
   }
+
+  kickPerformance.service(millis());
 
   // Scan pots (infinite scroll algorithm)
   for (uint8_t i=0;i<POT_COUNT;i++){
@@ -904,6 +919,13 @@ void SimpleSequencer::readEncoders(){
     float a = (valA - 512.0f) / 512.0f;
     float b = (valB - 512.0f) / 512.0f;
     float angle = atan2f(b, a);
+    if (kickCCPage()){
+      kickPerformance.sampleAngle(i, angle);
+      potPrevAngle[i] = angle;
+      potFirstRun[i] = false;
+      potAccumulator[i] = 0;
+      continue;
+    }
 
     if (potFirstRun[i]){ potPrevAngle[i] = angle; potFirstRun[i] = false; }
 
@@ -942,6 +964,7 @@ void SimpleSequencer::readEncoders(){
 
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
+  if (kickCCPage()) return; // Debounced edges handled by KickPerformance.
   if (activeMenu == 6){
     // Analog Outs:
     //   FN + pot-button N   -> cycle out N's source channel (1..7)
@@ -1067,9 +1090,12 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   static const uint8_t divDefault[6]     = {3, 12, 3, 3, 3, 3};
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
-  if (lastMenu != activeMenu){
+  static bool lastKickPage = false;
+  bool kickPage = kickCCPage();
+  if (lastMenu != activeMenu || lastKickPage != kickPage){
     for (uint8_t i = 0; i < 6; i++) potAcc[i] = 0;
     lastMenu = activeMenu;
+    lastKickPage = kickPage;
   }
   const uint8_t* divTable = divDefault;
   if (activeMenu == 1) divTable = divNotes;
@@ -1082,6 +1108,8 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   potAcc[pot] -= forward * dv;
   if (forward == 0) return;
   ticks = forward;
+
+  if (kickPage) return; // Relative endless-pot input belongs to KickPerformance.
 
   // Track which pot was last actually rotated so screen 2 can focus on it.
   lastTouchedPot  = (int8_t)pot;
@@ -1558,6 +1586,7 @@ void SimpleSequencer::saveState() {
   }
   // Write to EEPROM
   EEPROM.put(0, data);
+  if (kickCCPage()) return; // Keep the performance overview permanent.
 
   // Flash the OLED
   display.clearDisplay();
@@ -2609,7 +2638,7 @@ void SimpleSequencer::drawDisplay(){
   if (activeMenu == 3){ drawStepVisualiser(); return; }
   if (activeMenu == 4){ drawTrigMachineView(); return; }
   if (activeMenu == 5){ drawPagesView();      return; }
-  if (activeMenu == 6){ drawAnalogView();     return; }
+  if (activeMenu == 6){ drawAnalogView(); return; }
 
   display.clearDisplay();
 
@@ -4780,4 +4809,24 @@ void SimpleSequencer::drawOverview(){
   display2.print("MENU ");
   display2.print((int)activeMenu);
   display2.display();
+}
+
+// Dedicated performance mode on Menu 2 of the KICK machine.
+bool SimpleSequencer::kickCCPage() const {
+  return activeMenu == 6 && trigMachine[selectedChannel] == TM_KICK;
+}
+
+bool SimpleSequencer::sendPerformanceCC(void* context, uint8_t cc, uint8_t value){
+  // Foreground only. Never wait for the UART: retry queued state next loop.
+  noInterrupts();
+  if (MIDI_SERIAL.availableForWrite() < 3){
+    interrupts();
+    return false;
+  }
+  auto* seq = static_cast<SimpleSequencer*>(context);
+  seq->midiSendByte(0xBE); // MIDI channel 15.
+  seq->midiSendByte(cc & 0x7F);
+  seq->midiSendByte(value & 0x7F);
+  interrupts();
+  return true;
 }

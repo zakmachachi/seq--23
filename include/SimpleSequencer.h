@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "SeqConfig.h"
 #include "Max11300.h"
+#include "KickPerformance.h"
 #include <EEPROM.h>
 // OLED
 #include <Wire.h>
@@ -38,6 +39,9 @@ class SimpleSequencer {
     void internalClockTick();
 
   private:
+    KickPerformance kickPerformance;
+    bool kickCCPage() const;
+    static bool sendPerformanceCC(void* context, uint8_t cc, uint8_t value);
     bool steps[NUM_CHANNELS][TOTAL_STEPS];
     bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)
     bool euclidPattern[NUM_CHANNELS][TOTAL_STEPS];
