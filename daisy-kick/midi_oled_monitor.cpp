@@ -176,13 +176,18 @@ static constexpr float KICK_CHARACTER_RETURN_GAIN = 0.78f;
 /*
  * Protect the kick-bin fundamental from character processing.
  *
- * Three HP poles at 105 Hz strongly attenuate a 45..70 Hz fundamental while
- * retaining the useful 2nd/3rd harmonics that give old Dutch hardcore its
- * chest/bark character. The CLEAN tail remains completely full-band.
+ * HP poles at 105 Hz attenuate a 45..70 Hz fundamental while retaining the
+ * useful 2nd/3rd harmonics that give old Dutch hardcore its chest/bark
+ * character. The CLEAN tail remains completely full-band.
+ *
+ * Three poles cost the wet return ~15 dB on its own: the character send only
+ * opens at PURE_SWEEP_ONLY_MS, by which point it is almost entirely the
+ * 50..60 Hz tail sine, so the model's output is dominated by that same
+ * fundamental and three poles removed nearly all of it.
  */
 static bool CHARACTER_PROTECT_CLEAN_SUB = true;
 static constexpr float CHARACTER_SUB_PROTECT_HZ = 105.0f;
-static constexpr int CHARACTER_SUB_PROTECT_POLES = 3;
+static constexpr int CHARACTER_SUB_PROTECT_POLES = 1;
 static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98634956f;
 
 /* ============================================================
