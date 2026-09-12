@@ -881,10 +881,24 @@ static constexpr float TAIL_SWEEP_DOWN_SEMITONES = -12.0f;
 static constexpr float TAIL_SWEEP_UP_SEMITONES   =  12.0f;
 
 /*
+ * Downward bias applied to the whole velocity bend.
+ *
+ * The curve was symmetric about velocity 64, so the deepest dive available
+ * was one octave and centre velocity sat exactly at the base pitch. Shifting
+ * the whole range down lets the sweep reach genuinely sub territory while
+ * keeping the same span and resolution per velocity step.
+ */
+static constexpr float TAIL_SWEEP_OFFSET_SEMITONES = -5.0f;
+
+/*
  * The clean tail may deliberately leave the strict sub-only region on
  * upward sweeps. It still bypasses Mackie/Sherman entirely.
+ *
+ * Floor lowered from 18 Hz: with the offset above, a ~50 Hz base diving 17
+ * semitones lands at 18.7 Hz and would have sat on the old clamp, so the
+ * bottom of the range was unreachable.
  */
-static constexpr float TAIL_SWEEP_MIN_FREQUENCY_HZ = 18.0f;
+static constexpr float TAIL_SWEEP_MIN_FREQUENCY_HZ = 12.0f;
 static constexpr float TAIL_SWEEP_MAX_FREQUENCY_HZ = 180.0f;
 
 /*
@@ -3652,7 +3666,9 @@ static float VelocityToTailSweepSemitones(
             (
                 1.0f -
                 t
-            );
+            )
+            +
+            TAIL_SWEEP_OFFSET_SEMITONES;
     }
 
 
@@ -3680,7 +3696,9 @@ static float VelocityToTailSweepSemitones(
 
     return
         TAIL_SWEEP_UP_SEMITONES *
-        t;
+        t
+        +
+        TAIL_SWEEP_OFFSET_SEMITONES;
 }
 
 
