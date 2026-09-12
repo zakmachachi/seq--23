@@ -13,21 +13,24 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ## What's new in v1.1.0
 
-This release is mostly about the **Daisy Seed kick voice** and the seq-23 pages that drive it. The Daisy firmware lives in [`daisy-kick/`](daisy-kick/) and is built with Make, not PlatformIO — see its README.
+**seq-23 now has a voice of its own.** Alongside sequencing external gear, it drives a dedicated kick synthesiser running on a Daisy Seed, played live from the sequencer's own knobs.
 
-**Kick engine (Daisy)**
-- **Laser sweep at full SHAPE.** The transient sweep start was pinned by a hard-coded 850 Hz ceiling, and the sweep got *faster* as the knob rose, cramming all the pitch movement inside the attack so it read as a brighter click. It now drops 30× over 110 ms with the tail handoff moved out past the sweep. The midpoint is unchanged.
-- **Mackie/Sherman are audible.** Four low-pass stages inside the models plus a 3-pole guard from 2400 Hz across the whole output were removing the harmonics the overload generated. The K5 amount now drives the models rather than only fading their output.
-- **Sherman rebuilt** as a switched-capacitor filter modelled on the VCF-4 by [Skull & Circuits](https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2) — see [`daisy-kick/SHERMAN_VCF4_NOTES.md`](daisy-kick/SHERMAN_VCF4_NOTES.md).
-- **Sidechain reverb** on its own FX page: send high-passed at 300 Hz, ducked from the kick trigger, tank fully cleared each hit so tails never overlap.
-- **Tail delay no longer cuts the punch**, and the tail decay blends toward linear instead of collapsing straight after the attack.
-- **Velocity pitch bend** biased 5 semitones down so the sweep can dive into sub territory.
+**The kick**
+- Two distortion characters — *Mackie* and *Sherman* — on a parallel send, so the low end stays clean however hard you drive them
+- **SHAPE** sweeps the whole voice from a round body, through a tight punch, to a long descending laser
+- A three-layer resonant filter bank you can sweep and stack
+- A **sidechain reverb** that ducks and re-triggers on every hit, so tails bloom in the gaps instead of washing into the next kick
+- Per-hit control of decay, tail delay, pitch sweep and note velocity
 
-**seq-23 (Teensy)**
-- **Kick mix page** on **FUNCTION + MENU2**: line, Mackie, Sherman, BPF, sub and punch volume.
-- **Kick fills get a random BPF layer**, rolled once when the extras are seeded and held — re-rolled only when density returns from zero, like the existing spread and ratchet.
-- **Patch save now persists the Daisy kick parameters** and re-sends them on load, since the Daisy has no storage of its own.
-- **Fixed:** per-step velocity was ignored with a scale active, because generative mode stamps a concrete value into every step and the channel-wide pot was updating a value nothing read.
+**Playing it**
+- **MENU2** on a KICK channel — six endless pots for the performance controls
+- **FUNCTION + MENU2** — the mix stage: levels for each distortion, the filter bank, sub and punch
+- Kick fills pick their own filter character and keep it until the pattern re-seeds, so builds stay varied without drifting
+- Patches now save and restore the kick settings along with everything else
+
+**Also fixed:** per-step velocity is respected again when a scale is active.
+
+> The kick firmware lives in [`daisy-kick/`](daisy-kick/) and builds with Make rather than PlatformIO — see its README. Its filter is modelled on the VCF-4 by [Skull & Circuits](https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2).
 
 ---
 
