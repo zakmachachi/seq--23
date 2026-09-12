@@ -100,13 +100,11 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
 /*
  * Protected kick-bin punch.
  *
- * This is deliberately an A/B-able addition.
+ * Off: enabling it also engages a sidechain that ducks the main signal by
+ * the punch envelope, which pumps. The low end is protected by keeping the
+ * sub out of the distortion in the first place, not by ducking.
+ *
  * Set false to hear byte-for-byte fixed2 kick behavior.
- */
-/*
- * ROLLBACK FIX:
- * K6's main sine pitch sweep is enough for the onset punch.
- * Disable the separate protected-punch oscillator completely.
  */
 static bool ENABLE_PROTECTED_PUNCH = false;
 
@@ -142,7 +140,28 @@ static bool ENABLE_PROTECTED_PUNCH = false;
  * Keep the kick at unity here; the analogue/output stage can provide
  * level downstream without forcing the DSP into limiters.
  */
-static constexpr float END_OF_CHAIN_GAIN = 1.00f;
+/*
+ * MIX PAGE PARAMETERS (Teensy FUNCTION + MENU2, CC53..59 on channel 15).
+ *
+ * These were compile-time constants. They are now live so the mix stage can
+ * be dialled on the hardware instead of rebuilt. Defaults reproduce the
+ * tuned values exactly, so behaviour is unchanged until a CC arrives.
+ *
+ * CC value 0..127 maps linearly to 0..MAX for each.
+ */
+static volatile float param_line_gain    = 2.8184f; /* CC53, max 4.0  */
+static volatile float param_mackie_gain  = 1.01703f;/* CC54, max 2.0  */
+static volatile float param_sherman_gain = 1.56710f;/* CC55, max 2.5  */
+static volatile float param_bpf_gain     = 4.0f;    /* CC56, max 8.0  */
+static volatile float param_sub_gain     = 0.95f;   /* CC57, max 1.6  */
+static volatile float param_comp_amount  = 0.0f;    /* CC58, max 1.0  */
+static volatile bool  param_limiter_on   = false;   /* CC59, 0/127    */
+
+static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
+static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
+static constexpr float PARAM_SHERMAN_GAIN_MAX = 2.5f;
+static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
+static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
 
 
 /*
@@ -159,36 +178,38 @@ static constexpr float KICK_KNOCK_GAIN     = 1.00f;
 /*
  * PARALLEL CHARACTER SEND.
  *
- * A COPY of the clean tail is deliberately allowed to drive the nonlinear
- * models. That is where the classic sustained gabber/industrial harmonic
- * body comes from. The actual clean tail itself never enters the dirty bus;
- * only the high-passed wet return is mixed back later.
+ * A COPY of the WHOLE kick — transient, body and tail at unity — drives the
+ * nonlinear models. That is where the classic sustained gabber/industrial
+ * harmonic body comes from. The originals never enter the dirty bus; the
+ * clean knock and clean sub stay on their own protected lanes and are mixed
+ * back in after all dirty-path dynamics, so fidelity survives the distortion.
  */
-static constexpr float KICK_PROCESSED_TAIL_FEED = 0.96f;
+static constexpr float KICK_PROCESSED_TAIL_FEED = 1.00f;
+static constexpr float KICK_PROCESSED_TRANSIENT_FEED = 1.00f;
 
 /*
  * Wet-return trim after Mackie/Sherman and before dirty-bus management.
- * This is deliberately below unity because the clean knock and clean sub are
- * already present on protected parallel lanes.
  */
-static constexpr float KICK_CHARACTER_RETURN_GAIN = 0.78f;
+static constexpr float KICK_CHARACTER_RETURN_GAIN = 1.00f;
 
 /*
- * Protect the kick-bin fundamental from character processing.
+ * High-pass on the DISTORTED RETURN ONLY.
  *
- * HP poles at 105 Hz attenuate a 45..70 Hz fundamental while retaining the
- * useful 2nd/3rd harmonics that give old Dutch hardcore its chest/bark
- * character. The CLEAN tail remains completely full-band.
+ * The models still SEE the entire waveform — the send is full-band and
+ * unity — so the fundamental is what drives them into overload. Only the
+ * return is filtered, so the distorted low end does not stack on top of the
+ * protected clean sub and bloat the kick bin.
  *
- * Three poles cost the wet return ~15 dB on its own: the character send only
- * opens at PURE_SWEEP_ONLY_MS, by which point it is almost entirely the
- * 50..60 Hz tail sine, so the model's output is dominated by that same
- * fundamental and three poles removed nearly all of it.
+ * Two poles at 120 Hz: firm enough to stop the low-end buildup, far less
+ * destructive than the original three at 105 Hz because the send now opens
+ * at 4 ms and carries the full transient rather than a bare tail sine.
+ *
+ * POLE_A = expf(-2*pi*120/48000). Keep it in step with _HZ if that changes.
  */
 static bool CHARACTER_PROTECT_CLEAN_SUB = true;
-static constexpr float CHARACTER_SUB_PROTECT_HZ = 105.0f;
-static constexpr int CHARACTER_SUB_PROTECT_POLES = 1;
-static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98634956f;
+static constexpr float CHARACTER_SUB_PROTECT_HZ = 120.0f;
+static constexpr int CHARACTER_SUB_PROTECT_POLES = 2;
+static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98441477f;
 
 /* ============================================================
    MUSICAL MACKIE / SHERMAN CHARACTER
@@ -211,20 +232,44 @@ static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98634956f;
    simply being pasted on after it.
    ============================================================ */
 
-static constexpr float MACKIE_PRE_LP_HZ      = 7000.0f;
-static constexpr float MACKIE_POST_LP_HZ     = 5600.0f;
+/*
+ * These _HZ values describe the hardcoded one-pole coefficients inside each
+ * model's Process(). They are documentation, not inputs — the coefficients
+ * are literals at the filter sites. Keep both in step.
+ *
+ * Raised from 7000/5600 and 6500/5000: four poles between 5 and 7 kHz across
+ * the two stages rolled off most of the harmonic content the overload was
+ * generating, so the distortion read as dull and filtered no matter how hard
+ * the models were driven.
+ */
+static constexpr float MACKIE_PRE_LP_HZ      = 12000.0f;
+static constexpr float MACKIE_POST_LP_HZ     = 10000.0f;
 static constexpr float MACKIE_INTERNAL_GAIN  = 7.40f;
-static constexpr float MACKIE_OUTPUT_TRIM    = 0.72f;
+/* +3 dB: 0.72 * 10^(3/20). Drive/character untouched, level only. */
 
-static constexpr float SHERMAN_PRE_LP_HZ     = 6500.0f;
-static constexpr float SHERMAN_POST_LP_HZ    = 5000.0f;
-static constexpr float SHERMAN_FILTER_RESONANCE = 0.64f;
+static constexpr float SHERMAN_PRE_LP_HZ     = 12000.0f;
+static constexpr float SHERMAN_POST_LP_HZ    = 10000.0f;
+static constexpr float SHERMAN_FILTER_RESONANCE = 0.85f;
 static constexpr float SHERMAN_FEEDBACK      = 0.15f;
 static constexpr float SHERMAN_INPUT_DRIVE   = 3.05f;
-static constexpr float SHERMAN_OUTPUT_TRIM   = 0.70f;
+/* +7 dB: 0.70 * 10^(7/20). 4 dB to match Mackie, plus the shared 3 dB. */
+
+/*
+ * How much the K5 amount drives the model, rather than only fading its
+ * output back in. Input gain spans 1x at zero to 1+RANGE at full.
+ *
+ * Without this the models always saturate by exactly the same fixed amount
+ * and K5 is a level fader on a parallel return, so turning it up makes the
+ * kick marginally louder instead of progressively dirtier. Every stage in
+ * both models is SoftClip-bounded, so extra drive adds harmonics rather
+ * than level and cannot run away.
+ */
+static constexpr float CHARACTER_AMOUNT_DRIVE_RANGE = 5.0f;
 
 /* Macro 4 is the only explicit user-controlled multi-BPF bank. */
 static constexpr bool CHARACTER_HIDDEN_BPF_STACK_DISABLED = true;
+
+/* Overall strength of the BPF bank's audible return. */
 
 /* Smooth wet changes so CC movement never creates a control-rate edge. */
 static constexpr float CHARACTER_AMOUNT_SMOOTH_MS = 18.0f;
@@ -260,10 +305,10 @@ static constexpr uint32_t DJ_FILTER_COEFF_UPDATE_SAMPLES = 8;
  * The clean sine tail bypasses the dirty/character compressor and
  * limiter completely.
  *
- * 0.82 approximately preserves the old fixed2 nominal tail scaling,
- * but character amount can no longer turn it down.
+ * Raised from 0.82 now that the models distort the full band including the
+ * fundamental: this protected sub is what keeps the low end tight and
+ * in-phase underneath a wet return that is no longer high-passed.
  */
-static constexpr float PROTECTED_CLEAN_TAIL_GAIN = 0.82f;
 
 
 /*
@@ -321,7 +366,7 @@ static constexpr float DIRTY_HF_MIN_GAIN = 0.10f;
  *     full character    -> ~0.72
  */
 static constexpr float DIRTY_POST_GAIN_DRY = 0.86f;
-static constexpr float DIRTY_POST_GAIN_WET = 0.62f;
+static constexpr float DIRTY_POST_GAIN_WET = 0.95f;
 
 
 /*
@@ -409,13 +454,27 @@ static constexpr float SHAPE_SNAP_ATTACK_MS  = 0.75f;
  * HIGH SHAPE: transient remains audible through the ~40 ms mid-drop,
  * then gives way to the fundamental/body.
  */
-static constexpr float SHAPE_ROUND_HANDOFF_START_MS = 2.0f;
-static constexpr float SHAPE_PUNCH_HANDOFF_START_MS = 7.0f;
-static constexpr float SHAPE_SNAP_HANDOFF_START_MS  = 18.0f;
+/*
+ * When the transient starts handing over to the tail.
+ *
+ * These were 2/7/18 ms, so the tail began fading the punch out almost as
+ * soon as it started — with a long decay the tail then dominated and the
+ * punch was audibly cut off. Moved past the punch's main body so the
+ * attack completes first and the tail takes over underneath it.
+ */
+static constexpr float SHAPE_ROUND_HANDOFF_START_MS = 12.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_START_MS = 22.0f;
+static constexpr float SHAPE_SNAP_HANDOFF_START_MS  = 34.0f;
 
-static constexpr float SHAPE_ROUND_HANDOFF_END_MS = 18.0f;
-static constexpr float SHAPE_PUNCH_HANDOFF_END_MS = 40.0f;
-static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 56.0f;
+static constexpr float SHAPE_ROUND_HANDOFF_END_MS = 38.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_END_MS = 62.0f;
+static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 84.0f;
+
+/*
+ * Tail decay shape: 0 = original pure exponential, 1 = linear ramp.
+ * The exponential dumped most of the level immediately after the attack.
+ */
+static constexpr float TAIL_DECAY_LINEARITY = 0.55f;
 
 
 /* ============================================================
@@ -423,19 +482,26 @@ static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 56.0f;
    ============================================================ */
 
 /*
- * First 20 ms:
+ * Opening milliseconds:
  *     main phase-locked SINE pitch sweep + clean low tail only.
  *
- * NO:
- *     transient saturation
- *     Mackie/Sherman contribution
- *     Macro-BPF contribution
- *     dirty-bus compressor/limiter contribution
- *     extra protected-punch oscillator
- *
- * Full body/character fades in smoothly over the following 10 ms.
+ * Governs TRANSIENT SATURATION and output headroom. The clean sine
+ * oscillator must stay unsaturated through the attack or the kick's own
+ * fundamental is what gets distorted, which reads as a mushy low end no
+ * amount of downstream filtering can recover.
  */
 static constexpr float PURE_SWEEP_ONLY_MS = 20.0f;
+
+/*
+ * The character/dirty bus opens on its OWN, much earlier schedule.
+ *
+ * These were one value. Opening it early to let Mackie/Sherman hear the
+ * attack also switched on transient saturation at the same moment, so the
+ * sine fundamental was being clipped from 4 ms. Separate gates: the models
+ * get the attack, the clean transient stays clean.
+ */
+static constexpr float CHARACTER_OPEN_MS = 4.0f;
+static constexpr float CHARACTER_OPEN_FADE_MS = 6.0f;
 static constexpr float PURE_SWEEP_BODY_FADE_MS = 10.0f;
 
 /*
@@ -619,8 +685,14 @@ static bool ENABLE_FINAL_KICK_HF_GUARD = true;
  * Even when fully open it is intentionally conservative because the
  * desired identity is 65..95 Hz punch/body, not an 8..15 kHz spike.
  */
-static constexpr float FINAL_KICK_HF_INITIAL_HZ = 2400.0f;
-static constexpr float FINAL_KICK_HF_SETTLED_HZ = 6500.0f;
+/*
+ * Three poles starting at 2400 Hz sat across the whole output, so every
+ * harmonic the character models generated during the attack was removed
+ * again before it reached the DAC. Opened up; it still tames the very first
+ * onset without dulling the distortion.
+ */
+static constexpr float FINAL_KICK_HF_INITIAL_HZ = 7000.0f;
+static constexpr float FINAL_KICK_HF_SETTLED_HZ = 16000.0f;
 static constexpr float FINAL_KICK_HF_OPEN_MS    = 22.0f;
 
 /*
@@ -964,6 +1036,15 @@ static constexpr uint8_t CC_CHARACTER_MODEL         = 50;
 static constexpr uint8_t CC_KICK_SHAPE_ABSOLUTE     = 51;
 static constexpr uint8_t CC_PUMP_STATE              = 52;
 
+/* Mix page: Teensy FUNCTION + MENU2. */
+static constexpr uint8_t CC_MIX_LINE_GAIN           = 53;
+static constexpr uint8_t CC_MIX_MACKIE_GAIN         = 54;
+static constexpr uint8_t CC_MIX_SHERMAN_GAIN        = 55;
+static constexpr uint8_t CC_MIX_BPF_GAIN            = 56;
+static constexpr uint8_t CC_MIX_SUB_GAIN            = 57;
+static constexpr uint8_t CC_MIX_COMPRESSOR          = 58;
+static constexpr uint8_t CC_MIX_LIMITER             = 59;
+
 static constexpr uint8_t CC_BUTTON_FX_NEXT          = 100;
 
 
@@ -1077,6 +1158,12 @@ static volatile bool master_decay_retime_pending = false;
 
 /* Macro 2: true tail length / release scale. */
 static volatile float macro_decay = 0.50f;
+/*
+ * CC40 writes the TARGET; macro_decay slews toward it in the audio loop.
+ * Writing the live value straight from MIDI stepped the decay coefficient
+ * once per CC message, which zippers audibly while the knob is turning.
+ */
+static volatile float macro_decay_target = 0.50f;
 static bool reverse_bass_enabled = false;
 
 
@@ -2055,6 +2142,13 @@ struct Envelope
     float attack = 0.001f;
     float decay = 0.5f;
 
+    /*
+     * 0 = pure exponential (unchanged), 1 = straight linear ramp to zero
+     * over `decay`. Only the one-shot decay is affected. Per-instance, so
+     * the transient envelope keeps its original exponential curve.
+     */
+    float decay_linearity = 0.0f;
+
     bool active = false;
     bool holding = false;
     bool releasing = false;
@@ -2256,12 +2350,31 @@ struct Envelope
 
 
         /*
-         * Normal one-shot exponential decay.
+         * Normal one-shot decay, blended between exponential and linear.
+         *
+         * A pure exponential drops most of its level in the first fraction
+         * of the decay time, which reads as the tail collapsing straight
+         * after the attack. Blending toward a linear ramp holds the body up
+         * and lets it fall away evenly.
          */
         float coefficient =
             expf(-6.9078f / (decay * sr));
 
-        value *= coefficient;
+        float exponential_value = value * coefficient;
+
+        if(decay_linearity > 0.0001f)
+        {
+            float linear_value =
+                value - (1.0f / (decay * sr));
+
+            value =
+                exponential_value +
+                (linear_value - exponential_value) * decay_linearity;
+        }
+        else
+        {
+            value = exponential_value;
+        }
 
 
         if(value < 0.0001f)
@@ -2423,6 +2536,7 @@ static uint32_t tail_velocity_sweep_age_samples = 0;
 static float character_delta_hp_state = 0.0f;
 static float character_delta_hp_state_2 = 0.0f;
 static float character_delta_hp_state_3 = 0.0f;
+
 
 
 /* ============================================================
@@ -4026,6 +4140,10 @@ static void StartTailAudio()
         );
 
 
+    tail_env.decay_linearity =
+        TAIL_DECAY_LINEARITY;
+
+
     /*
      * Tail pitch gesture restarts, but oscillator PHASE is preserved
      * during an overlapping ratchet.
@@ -4282,6 +4400,131 @@ static inline float SoftClip(float x)
      */
     return x /
            (1.0f + fabsf(x));
+}
+
+
+/*
+ * KICK COMPRESSOR — one dial (CC58).
+ *
+ * Tuned for kicks rather than general programme: fast enough to catch the
+ * attack, with a release in the 120 ms region so it recovers before the
+ * next hit at club tempo instead of pumping across the bar. One control
+ * moves threshold and ratio together, which is the only sane way to put a
+ * compressor on a single knob.
+ */
+struct KickCompressor
+{
+    float envelope = 0.0f;
+    float gain = 1.0f;
+
+    void Reset()
+    {
+        envelope = 0.0f;
+        gain = 1.0f;
+    }
+
+    float Process(float input, float amount)
+    {
+        if(amount <= 0.001f)
+        {
+            envelope = 0.0f;
+            gain = 1.0f;
+            return input;
+        }
+
+        /* Harder as the dial rises: 0.85 down to 0.18, 1:1 up to 8:1. */
+        float threshold = 0.85f - amount * 0.67f;
+        float ratio = 1.0f + amount * 7.0f;
+
+        float detector = fabsf(input);
+
+        /* 2 ms attack, ~120 ms release at 48 kHz. */
+        float alpha = detector > envelope ? 0.010362f : 0.000173f;
+        envelope += (detector - envelope) * alpha;
+
+        float target = 1.0f;
+        if(envelope > threshold && envelope > 0.0001f)
+        {
+            float compressed =
+                threshold + (envelope - threshold) / ratio;
+            target = compressed / envelope;
+        }
+
+        /* Smooth the gain itself so fast material cannot modulate it. */
+        gain += (target - gain) * (target < gain ? 0.010362f : 0.000173f);
+
+        /* Make-up keeps the dial from simply turning the kick down. */
+        float makeup = 1.0f + amount * 0.85f;
+
+        return input * gain * makeup;
+    }
+};
+
+static KickCompressor kick_compressor;
+
+
+/*
+ * Brickwall-ish limiter (CC59). Deliberately simple: a fast-attack gain
+ * reduction onto a fixed 0.95 ceiling, sitting before the output ceiling
+ * so it catches peaks rather than letting them saturate.
+ */
+struct KickLimiter
+{
+    float gain = 1.0f;
+
+    void Reset() { gain = 1.0f; }
+
+    float Process(float input, bool enabled)
+    {
+        if(!enabled)
+        {
+            gain = 1.0f;
+            return input;
+        }
+
+        constexpr float ceiling = 0.95f;
+
+        float magnitude = fabsf(input) * gain;
+        float target = 1.0f;
+        if(magnitude > ceiling)
+            target = gain * (ceiling / magnitude);
+
+        /* Instant clamp down, 50 ms recovery. */
+        gain += (target - gain) * (target < gain ? 1.0f : 0.000416f);
+
+        if(gain > 1.0f)
+            gain = 1.0f;
+
+        return input * gain;
+    }
+};
+
+static KickLimiter kick_limiter;
+
+
+/*
+ * Final output ceiling.
+ *
+ * Unity below the knee, then saturates smoothly and is hard-bounded by
+ * OUTPUT_CEILING_LIMIT, so it can never exceed the DAC range. Replaces a bare
+ * clamp: with END_OF_CHAIN_GAIN raised the peaks now reach the ceiling, and a
+ * clamp would shatter a bass-heavy kick into hard digital clipping. Gain is
+ * untouched below the knee, so this is not a compressor on the whole signal.
+ */
+static inline float OutputCeiling(float x)
+{
+    constexpr float knee  = 0.80f;
+    constexpr float limit = 0.995f;
+    constexpr float range = limit - knee;
+
+    float magnitude = fabsf(x);
+    if(magnitude <= knee)
+        return x;
+
+    float over = magnitude - knee;
+    float shaped = knee + range * (over / (over + range));
+
+    return x < 0.0f ? -shaped : shaped;
 }
 
 
@@ -8149,6 +8392,8 @@ struct MacroBpfBank
 
     float current_hz[3] = {330.0f, 700.0f, 1450.0f};
     float layer_gain[3] = {0.0f, 0.0f, 0.0f};
+    /* Per-layer weighting by FREQUENCY, not by layer index. */
+    float layer_tilt[3] = {1.0f, 1.0f, 1.0f};
 
     void Reset()
     {
@@ -8183,11 +8428,18 @@ struct MacroBpfBank
 
             /* More vocal post-drive return, bounded to musical territory. */
             float return_q =
-                1.18f + normalized * 1.55f + static_cast<float>(i) * 0.18f;
+                1.70f + normalized * 2.60f + static_cast<float>(i) * 0.30f;
             float mid_tame = MacroBpfMidTameAmount(current_hz[i]);
             return_q *= 1.0f - mid_tame * 0.10f;
-            if(return_q > 3.35f)
-                return_q = 3.35f;
+            if(return_q > 5.20f)
+                return_q = 5.20f;
+
+            /*
+             * Tilt toward the top of the band. A layer parked low sits on
+             * the protected punch/sub and muddies it, so it is held back;
+             * a layer up near 3.2 kHz is where the bank should bite.
+             */
+            layer_tilt[i] = 0.40f + normalized * 1.45f;
 
             drive_filters[i].SetBandpass(current_hz[i], drive_q);
             return_filters[i].SetBandpass(current_hz[i], return_q);
@@ -8203,7 +8455,7 @@ struct MacroBpfBank
         {
             float band = drive_filters[i].Process(source);
             float gain = 0.20f + static_cast<float>(i) * 0.035f;
-            added += band * layer_gain[i] * gain;
+            added += band * layer_gain[i] * gain * layer_tilt[i];
         }
 
         return added;
@@ -8233,10 +8485,14 @@ struct MacroBpfBank
 
             float mid_tame =
                 1.0f - MacroBpfMidTameAmount(current_hz[i]) * 0.10f;
-            float gain = 0.31f + static_cast<float>(i) * 0.055f;
+            /* 4x: the bank's audible return only. ProcessDriveFeed is left
+             * alone so what the distortion models are fed is unchanged. */
+            float gain =
+                (0.31f + static_cast<float>(i) * 0.055f) * param_bpf_gain;
 
             added +=
-                band * layer_gain[i] * gain * count_compensation * mid_tame;
+                band * layer_gain[i] * gain * count_compensation * mid_tame *
+                layer_tilt[i];
         }
 
         return added;
@@ -8319,7 +8575,7 @@ struct MacroMackieProcessor
             return 0.0f;
         }
 
-        constexpr float pre_a = 0.60000000f;
+        constexpr float pre_a = 0.79210000f; /* MACKIE_PRE_LP_HZ */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
@@ -8347,11 +8603,11 @@ struct MacroMackieProcessor
 
         float stage2 = Core(eq_driven * 1.65f);
 
-        constexpr float post_a = 0.52000000f;
+        constexpr float post_a = 0.72990000f; /* MACKIE_POST_LP_HZ */
         post_lp_1 += post_a * (stage2 - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
-        return post_lp_2 * MACKIE_OUTPUT_TRIM;
+        return post_lp_2 * param_mackie_gain;
     }
 };
 
@@ -8373,11 +8629,13 @@ struct MacroShermanSVF
     void Set(float frequency, float resonance, bool immediate = false)
     {
         frequency = ClampAdded(frequency, 55.0f, 6000.0f);
-        resonance = ClampAdded(resonance, 0.0f, 0.82f);
+        resonance = ClampAdded(resonance, 0.0f, 0.92f);
 
+        /* k is 1/Q: the old 0.82 clamp and 0.48 floor capped Q near 1.4,
+         * too broad to read as a resonant filter at all. */
         float new_k = 1.62f - resonance * 1.43f;
-        if(new_k < 0.48f)
-            new_k = 0.48f;
+        if(new_k < 0.33f)
+            new_k = 0.33f;
 
         float new_g = tanf(PI * frequency / SAMPLE_RATE);
         if(new_g > 3.2f)
@@ -8473,7 +8731,7 @@ struct MacroShermanProcessor
         if(prepared_fundamental < 0.0f)
             PrepareForPitch(kick_frequency, false);
 
-        constexpr float pre_a = 0.57500000f;
+        constexpr float pre_a = 0.79210000f; /* SHERMAN_PRE_LP_HZ */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
@@ -8503,11 +8761,11 @@ struct MacroShermanProcessor
         constexpr float fb_post_a = 0.32f;
         feedback_memory += fb_post_a * (wet - feedback_memory);
 
-        constexpr float post_a = 0.475f;
+        constexpr float post_a = 0.72990000f; /* SHERMAN_POST_LP_HZ */
         post_lp_1 += post_a * (wet - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
-        return post_lp_2 * SHERMAN_OUTPUT_TRIM;
+        return post_lp_2 * param_sherman_gain;
     }
 };
 
@@ -8589,7 +8847,9 @@ struct MacroCharacterProcessor
         {
             float target = Clamp01Added(macro_sherman_amount);
             sherman_amount_smoothed = SmoothAmount(sherman_amount_smoothed, target);
-            float wet = sherman.Process(input, sherman_amount_smoothed);
+            float drive =
+                1.0f + sherman_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+            float wet = sherman.Process(input * drive, sherman_amount_smoothed);
             if(!AudioValueSafe(wet))
             {
                 PrepareSherman();
@@ -8600,7 +8860,9 @@ struct MacroCharacterProcessor
 
         float target = Clamp01Added(macro_mackie_amount);
         mackie_amount_smoothed = SmoothAmount(mackie_amount_smoothed, target);
-        float wet = mackie.Process(input, mackie_amount_smoothed);
+        float drive =
+            1.0f + mackie_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+        float wet = mackie.Process(input * drive, mackie_amount_smoothed);
         if(!AudioValueSafe(wet))
         {
             PrepareMackie();
@@ -12701,7 +12963,7 @@ static bool HandleSixMacroCC(
 
         case CC_DECAY_ABSOLUTE:
         {
-            macro_decay = v;
+            macro_decay_target = v;
 
             /*
              * K2 is the single source of truth for kick length.
@@ -12894,6 +13156,39 @@ static bool HandleSixMacroCC(
             macro_kick_shape = v;
             return true;
         }
+
+
+        /* ====================================================
+           MIX PAGE — FUNCTION + MENU2 on the Teensy
+           ==================================================== */
+
+        case CC_MIX_LINE_GAIN:
+            param_line_gain = v * PARAM_LINE_GAIN_MAX;
+            return true;
+
+        case CC_MIX_MACKIE_GAIN:
+            param_mackie_gain = v * PARAM_MACKIE_GAIN_MAX;
+            return true;
+
+        case CC_MIX_SHERMAN_GAIN:
+            param_sherman_gain = v * PARAM_SHERMAN_GAIN_MAX;
+            return true;
+
+        case CC_MIX_BPF_GAIN:
+            param_bpf_gain = v * PARAM_BPF_GAIN_MAX;
+            return true;
+
+        case CC_MIX_SUB_GAIN:
+            param_sub_gain = v * PARAM_SUB_GAIN_MAX;
+            return true;
+
+        case CC_MIX_COMPRESSOR:
+            param_comp_amount = v;
+            return true;
+
+        case CC_MIX_LIMITER:
+            param_limiter_on = value >= 64;
+            return true;
 
         case CC_PUMP_STATE:
         {
@@ -13798,6 +14093,27 @@ static void AudioCallback(
     macro_bpf_bank.Update();
 
 
+    /*
+     * Slew DECAY toward its CC target once per block. Stepping the decay
+     * coefficient straight from each MIDI message zippers while K2 turns.
+     */
+    {
+        float decay_error =
+            macro_decay_target - macro_decay;
+
+        if(fabsf(decay_error) > 0.00005f)
+        {
+            macro_decay += decay_error * 0.06f;
+            master_decay_retime_pending = true;
+        }
+        else if(macro_decay != macro_decay_target)
+        {
+            macro_decay = macro_decay_target;
+            master_decay_retime_pending = true;
+        }
+    }
+
+
     for(size_t i = 0;
         i < size;
         ++i)
@@ -13918,6 +14234,19 @@ static void AudioCallback(
                     )
                     /
                     PURE_SWEEP_BODY_FADE_MS
+                )
+            );
+
+        /* Character/dirty bus only — see CHARACTER_OPEN_MS. */
+        float character_open_mix =
+            SmoothstepAdded(
+                Clamp01Added(
+                    (
+                        current_kick_age_ms -
+                        CHARACTER_OPEN_MS
+                    )
+                    /
+                    CHARACTER_OPEN_FADE_MS
                 )
             );
 
@@ -14320,9 +14649,23 @@ static void AudioCallback(
          * its protected lane; only the high-passed WET RETURN comes back.
          */
         float character_send =
-            transient * 0.88f +
+            transient * KICK_PROCESSED_TRANSIENT_FEED +
             clean_tail * KICK_PROCESSED_TAIL_FEED +
             character * 0.65f;
+
+        /*
+         * The send stays FULL-BAND on purpose.
+         *
+         * High-passing here removed the tail before the models ever saw it:
+         * the tail is a 45..70 Hz sine, so a 120 Hz corner gutted it while
+         * the broadband punch passed, and the distortion ended up acting
+         * almost entirely on the attack. The models need the tail to
+         * generate sustained harmonics from it.
+         *
+         * The fundamental is kept out of the MIX by high-passing the return
+         * instead, so the harmonics come back but the distorted sub does
+         * not stack on the protected clean one.
+         */
 
         /* Macro-4 broad BPF EQ is pushed INTO the distortion model. */
         character_send +=
@@ -14330,7 +14673,7 @@ static void AudioCallback(
 
         /* Keep the exact kick edge clean; wake character under body fade. */
         float character_return = 0.0f;
-        if(onset_processed_mix > 0.000001f)
+        if(character_open_mix > 0.000001f)
         {
             character_return =
                 macro_character_processor.ProcessWet(character_send) *
@@ -14526,7 +14869,7 @@ static void AudioCallback(
          */
         float protected_clean_tail =
             clean_tail *
-            PROTECTED_CLEAN_TAIL_GAIN;
+            param_sub_gain;
 
 
         /*
@@ -14557,7 +14900,7 @@ static void AudioCallback(
                 clean_sweep_signal
             )
             *
-            onset_processed_mix;
+            character_open_mix;
 
 
         /* ====================================================
@@ -14840,7 +15183,7 @@ static void AudioCallback(
          * should not suddenly enter a different transfer curve at 0.92.
          */
         kick_output *=
-            END_OF_CHAIN_GAIN *
+            param_line_gain *
             onset_output_headroom;
 
 
@@ -14878,11 +15221,25 @@ static void AudioCallback(
             KICK_OUTPUT_LINEAR_GAIN;
 
 
+        /* Mix-page dynamics, ahead of the ceiling so they catch peaks
+         * rather than leaving them to saturate. */
         kick_output =
-            ClampAdded(
+            kick_compressor.Process(
                 kick_output,
-                -0.995f,
-                 0.995f
+                param_comp_amount
+            );
+
+
+        kick_output =
+            kick_limiter.Process(
+                kick_output,
+                param_limiter_on
+            );
+
+
+        kick_output =
+            OutputCeiling(
+                kick_output
             );
 
 
@@ -15073,6 +15430,8 @@ int main(void)
     macro_bpf_bank.Reset();
     macro_character_processor.Reset();
     character_dirty_bus_manager.Reset();
+    kick_compressor.Reset();
+    kick_limiter.Reset();
     character_delta_hp_state = 0.0f;
     character_delta_hp_state_2 = 0.0f;
     character_delta_hp_state_3 = 0.0f;
