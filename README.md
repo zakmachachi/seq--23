@@ -16,7 +16,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 This release is mostly about the **Daisy Seed kick voice** and the seq-23 pages that drive it. The Daisy firmware lives in [`daisy-kick/`](daisy-kick/) and is built with Make, not PlatformIO — see its README.
 
 **Kick engine (Daisy)**
-- **Psytrance laser at full SHAPE.** The transient sweep start was pinned by a hard-coded 850 Hz ceiling, and the sweep got *faster* as the knob rose, cramming all the pitch movement inside the attack so it read as a brighter click. It now drops 30× over 110 ms with the tail handoff moved out past the sweep. The midpoint is unchanged.
+- **Laser sweep at full SHAPE.** The transient sweep start was pinned by a hard-coded 850 Hz ceiling, and the sweep got *faster* as the knob rose, cramming all the pitch movement inside the attack so it read as a brighter click. It now drops 30× over 110 ms with the tail handoff moved out past the sweep. The midpoint is unchanged.
 - **Mackie/Sherman are audible.** Four low-pass stages inside the models plus a 3-pole guard from 2400 Hz across the whole output were removing the harmonics the overload generated. The K5 amount now drives the models rather than only fading their output.
 - **Sherman rebuilt** as a switched-capacitor filter modelled on the VCF-4 by [Skull & Circuits](https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2) — see [`daisy-kick/SHERMAN_VCF4_NOTES.md`](daisy-kick/SHERMAN_VCF4_NOTES.md).
 - **Sidechain reverb** on its own FX page: send high-passed at 300 Hz, ducked from the kick trigger, tank fully cleared each hit so tails never overlap.
