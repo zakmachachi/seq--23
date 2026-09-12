@@ -34,10 +34,10 @@ int main(int argc, char** argv){
  (void)argv;
  // Initialization, backpressure and no repeated sync on page entry/render.
  {Harness h;h.k=K{};h.ready=false;h.k.begin(Harness::send,&h);assert(h.midi.empty());h.ready=true;h.k.service(1);
- const int cc[]={30,31,32,33,34,35,40,41,42,43,44,45,46,47,48,49,50,51,52};
- const int val[]={0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0};assert(h.midi.size()==19);
- for(int i=0;i<19;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
- h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==19);}
+ const int cc[]={30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
+ const int val[]={0,0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0};assert(h.midi.size()==20);
+ for(int i=0;i<20;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
+ h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==20);}
  // Relative FX edits resume stored values immediately; page selection sends no amount.
  {Harness h;h.page(K::DELAY);h.set(0,114);h.midi.clear();h.page(K::HPF);
  assert(h.k.state_.hpf==0&&h.midi.empty());h.k.adjust(0,3);assert(h.k.state_.hpf==3&&h.sent(33,3));
@@ -102,21 +102,22 @@ int main(int argc, char** argv){
  h.k.sampleAngle(0,Harness::angle(h.anglePosition[0]));assert(h.midi.empty());}
  // Every virtual parameter clamps, emits no duplicate at the limit, and reverses.
  {Harness h;for(int p=0;p<K::PARAM_COUNT;++p){
- int knob=p<=K::PUMP?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;
- h.k.state_.selectedFx=p<=K::PUMP?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;
+ int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;
+ h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;
  for(int i=0;i<50;++i)h.k.adjust(knob,20);assert(h.k.position((K::Parameter)p)==127);
  h.midi.clear();h.k.adjust(knob,20);assert(h.midi.empty());h.k.adjust(knob,-3);assert(h.k.position((K::Parameter)p)==124);
  for(int i=0;i<50;++i)h.k.adjust(knob,-20);assert(h.k.position((K::Parameter)p)==0);
  h.midi.clear();h.k.adjust(knob,-20);assert(h.midi.empty());h.k.adjust(knob,3);assert(h.k.position((K::Parameter)p)==3);
  }}
- // I: single reset at threshold, correct five CCs, page/pump/every other value preserved.
- {Harness h;h.page(K::PUMP);h.set(0,89);h.set(1,83);h.click(1);h.click(2);h.click(3);h.click(4);h.click(5);h.k.state_.delay=55;h.k.state_.hpf=66;h.k.state_.lpf=77;h.midi.clear();h.k.buttonEdge(0,true,1000);h.k.service(1499);assert(h.midi.empty());h.k.service(1500);assert(h.midi.size()==5);h.k.service(1900);h.k.buttonEdge(0,false,2000);assert(h.midi.size()==5&&h.k.state_.selectedFx==K::PUMP&&h.k.state_.pumpAmount==89&&h.k.state_.decay==83&&h.k.state_.reverseEnabled&&h.k.state_.tailDelayEnabled&&h.k.state_.bpfLayerCount==1&&h.k.state_.selectedCharacterModel&&h.k.state_.pumpEnabled);for(int i=0;i<5;++i)assert(h.midi[i]==std::make_pair(30+i,0));assert(h.k.focus_.resetOverlay);h.k.service(2200);assert(!h.k.focus_.resetOverlay&&h.k.focus_.knob==0);
+ // I: single reset at threshold, correct six CCs, page/pump/every other value preserved.
+ {const int resetCC[]={30,31,32,33,34,36};
+ Harness h;h.page(K::PUMP);h.set(0,89);h.set(1,83);h.click(1);h.click(2);h.click(3);h.click(4);h.click(5);h.k.state_.delay=55;h.k.state_.hpf=66;h.k.state_.lpf=77;h.k.state_.reverb=99;h.midi.clear();h.k.buttonEdge(0,true,1000);h.k.service(1499);assert(h.midi.empty());h.k.service(1500);assert(h.midi.size()==6);h.k.service(1900);h.k.buttonEdge(0,false,2000);assert(h.midi.size()==6&&h.k.state_.selectedFx==K::PUMP&&h.k.state_.pumpAmount==89&&h.k.state_.reverb==0&&h.k.state_.decay==83&&h.k.state_.reverseEnabled&&h.k.state_.tailDelayEnabled&&h.k.state_.bpfLayerCount==1&&h.k.state_.selectedCharacterModel&&h.k.state_.pumpEnabled);for(int i=0;i<6;++i)assert(h.midi[i]==std::make_pair(resetCC[i],0));assert(h.k.focus_.resetOverlay);h.k.service(2200);assert(!h.k.focus_.resetOverlay&&h.k.focus_.knob==0);
  // The release itself may be first service past threshold.
- h.midi.clear();h.k.buttonEdge(0,true,3000);h.k.buttonEdge(0,false,3500);assert(h.midi.size()==5&&h.k.state_.selectedFx==K::PUMP);}
+ h.midi.clear();h.k.buttonEdge(0,true,3000);h.k.buttonEdge(0,false,3500);assert(h.midi.size()==6&&h.k.state_.selectedFx==K::PUMP);}
  // J: enable/disable preserves amount.
  {Harness h;h.page(K::PUMP);h.set(0,89);h.midi.clear();for(int i=0;i<3;++i)h.click(5);assert(h.k.state_.pumpAmount==89&&h.k.state_.pumpEnabled&&h.midi.size()==3);for(auto&m:h.midi)assert(m.first==52);}
  // Every parameter at every possible value fits on the panels; draws never send MIDI.
- {Harness h;Adafruit_SH1106G a,b;for(int p=0;p<K::PARAM_COUNT;++p)for(int v=0;v<128;++v){int knob=p<=K::PUMP?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;h.k.state_.selectedFx=p<=K::PUMP?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;h.k.position((K::Parameter)p)=v;h.k.focus_.knob=knob;h.k.drawOverview(a);h.k.drawFocus(b,300);assert(!b.has("PICK"));}assert(h.midi.empty());
+ {Harness h;Adafruit_SH1106G a,b;for(int p=0;p<K::PARAM_COUNT;++p)for(int v=0;v<128;++v){int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;h.k.position((K::Parameter)p)=v;h.k.focus_.knob=knob;h.k.drawOverview(a);h.k.drawFocus(b,300);assert(!b.has("PICK"));}assert(h.midi.empty());
  h.k.state_.selectedFx=K::STUT;h.k.state_.stutter.on=true;h.k.state_.stutter.division=6;h.k.state_.stutter.randomStart=6;h.k.state_.stutter.direction=-1;h.k.focus_.knob=0;h.k.drawOverview(a);h.k.drawFocus(b,120);if(argc>1){a.save("overview.svg");b.save("stutter.svg");}
  h.k.focus_.knob=3;h.k.state_.bpfLayerCount=2;h.k.state_.editedBpfLayer=1;h.k.drawFocus(b,120);if(argc>1)b.save("bpf.svg");
  h.k.focus_.knob=5;h.k.drawFocus(b,120);if(argc>1)b.save("shape.svg");}

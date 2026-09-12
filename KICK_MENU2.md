@@ -8,16 +8,16 @@ All performance CCs use MIDI **channel 15** (status `0xBE`).
 
 | Control | Turn | Press |
 | --- | --- | --- |
-| K1 / B1 | Selected FX: STUT 30, LOOP 31, DLY 32, HPF 33, LPF 34, PUMP 35 | Short release cycles FX locally. Hold 500 ms resets only CC30–34 to zero, once; no page advance. |
+| K1 / B1 | Selected FX: STUT 30, LOOP 31, DLY 32, HPF 33, LPF 34, PUMP 35, REV 36 | Short release cycles FX locally. Hold 500 ms resets only CC30–34 and CC36 to zero, once; no page advance. |
 | K2 / B2 | DECAY 40 | REVERSE 41: 0 / 127 |
 | K3 / B3 | TAIL DELAY 42 | TAIL ENABLE 43: 0 / 127 |
 | K4 / B4 | BPF1 44, BPF2 45, BPF3 46 | Layer count 47: 0 / 42 / 85 / 127 |
 | K5 / B5 | MACKIE 48 or SHERMAN 49, independently remembered | MODEL 50: 0 / 127 |
 | K6 / B6 | SHAPE 51 | PUMP ENABLE 52: 0 / 127 |
 
-BPF count 0 stages L1; counts 1, 2, 3 edit L1, L2, L3 respectively. Changing count sends no frequency. Changing character model sends no amount. Pump and tail enable buttons retain their amounts. B1's reset preserves pump amount/enable and all K2–K6 state. Its OLED2 overlay lasts 700 ms.
+BPF count 0 stages L1; counts 1, 2, 3 edit L1, L2, L3 respectively. Changing count sends no frequency. Changing character model sends no amount. Pump and tail enable buttons retain their amounts. REV is a plain 0..127 amount displayed as a percentage, OFF at zero. B1's reset preserves pump amount/enable and all K2–K6 state. Its OLED2 overlay lasts 700 ms.
 
-One snapshot is sent after MIDI initialization: CC30–35=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Values are session state; reboot restores these deterministic defaults. There are no CC100/101–105 commands or shared CC20–25 controls.
+One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Saving the patch stores all performance and mix values in EEPROM; boot restores them and re-sends every CC through the same pending mechanism, since the Daisy has no persistence. Without a saved patch these deterministic defaults stand. There are no CC100/101–105 commands or shared CC20–25 controls.
 
 ## Repeat sessions
 

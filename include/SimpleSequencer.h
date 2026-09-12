@@ -46,6 +46,18 @@ class SimpleSequencer {
     bool kickCCPage() const;
     bool kickMixPage() const;
     static bool sendPerformanceCC(void* context, uint8_t cc, uint8_t value);
+    // Kick fill steps emit CC47 from triggerChannel(), which runs in the 1 ms
+    // engine ISR. A latest-value slot drained in the foreground like
+    // KickPerformance's pending array, so a full UART is never spun on.
+    static const uint8_t FILL_CC_COUNT = 1;
+    volatile bool fillCCPending[FILL_CC_COUNT] = {};
+    volatile uint8_t fillCCValue[FILL_CC_COUNT] = {};
+    // Last value actually pushed, so unchanged steps send nothing. 255 is not
+    // a legal CC47 value, so the first kick always transmits.
+    uint8_t fillCCLastSent[FILL_CC_COUNT] = {255};
+    void queueFillCC(uint8_t slot, uint8_t value);
+    void updateKickFillCC(uint8_t ch, uint8_t step);
+    void flushFillCC();
     bool steps[NUM_CHANNELS][TOTAL_STEPS];
     bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)
     bool euclidPattern[NUM_CHANNELS][TOTAL_STEPS];
@@ -141,6 +153,10 @@ class SimpleSequencer {
     uint8_t machineOverlay[NUM_CHANNELS][TOTAL_STEPS]; // 0=auto, 1=force-on, 2=force-off (per-page)
     bool machinePattern[NUM_CHANNELS][NUM_STEPS];      // cached pattern for the current play page
     uint8_t machineRatchet[NUM_CHANNELS][NUM_STEPS];   // cached ratchet for the current play page
+    // Per-KICK-fill-step sound, rolled once with the extras and then held so a
+    // repeated fill step keeps its own character instead of shimmering.
+    // 255 = not a kick fill step, so no CC is sent when it fires.
+    uint8_t machineKickBpf[NUM_CHANNELS][NUM_STEPS];   // 0..3 BPF layer count
     // Kick-specific live-performance params (per channel)
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
@@ -353,7 +369,12 @@ class SimpleSequencer {
       uint8_t savedNumPages[NUM_CHANNELS];
       // Per-channel pattern length (v11)
       uint8_t savedNumSteps[NUM_CHANNELS];
+      // Daisy kick pages (v12). Appended last so every v11 offset is unchanged
+      // and a v11 image can still be read field by field.
+      KickPerformance::ControllerState savedKickPerformance;
+      KickMixer::SavedState savedKickMixer;
     };
+    static_assert(sizeof(SaveData) <= E2END + 1, "SaveData exceeds EEPROM");
     void saveState();
     void loadState();
 };

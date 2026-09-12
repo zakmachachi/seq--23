@@ -3,10 +3,9 @@
 #include <stdio.h>
 
 namespace {
-constexpr uint8_t CC[] = {53,54,55,56,57,58,59}; // Six mix controls then LIMITER.
-constexpr uint8_t LIMITER_SLOT = 6;
-const char* const SHORT_NAMES[] = {"LINE","MACK","SHRM","BPF","SUB","COMP"};
-const char* const LONG_NAMES[] = {"LINE OUT","MACKIE","SHERMAN","BPF MIX","SUB","COMP"};
+constexpr uint8_t CC[] = {53,54,55,56,57,58};
+const char* const SHORT_NAMES[] = {"LINE","MACK","SHRM","BPF","SUB","PUNCH"};
+const char* const LONG_NAMES[] = {"LINE OUT","MACKIE","SHERMAN","BPF MIX","SUB","PUNCH VOL"};
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr int LEFT = 4, RIGHT = 123;
 void label(Adafruit_SH1106G& d, int x, int y, const char* text, uint8_t size = 1){
@@ -22,7 +21,7 @@ void KickMixer::begin(SendCC send, void* context){
   flushMidi();
 }
 void KickMixer::queue(uint8_t cc, uint8_t value){
-  for (uint8_t i = 0; i <= LIMITER_SLOT; ++i){
+  for (uint8_t i = 0; i < CONTROL_COUNT; ++i){
     if (CC[i] != cc) continue;
     midi_.value[i] = value;
     midi_.pending[i] = true;
@@ -31,7 +30,7 @@ void KickMixer::queue(uint8_t cc, uint8_t value){
 }
 void KickMixer::flushMidi(){
   if (!midi_.send) return;
-  for (uint8_t i = 0; i <= LIMITER_SLOT; ++i){
+  for (uint8_t i = 0; i < CONTROL_COUNT; ++i){
     if (!midi_.pending[i]) continue;
     if (!midi_.send(midi_.context, CC[i], midi_.value[i])) return;
     midi_.pending[i] = false;
@@ -39,7 +38,18 @@ void KickMixer::flushMidi(){
 }
 void KickMixer::snapshot(){
   for (uint8_t c = 0; c < CONTROL_COUNT; ++c) queue(CC[c], value_[c]);
-  queue(CC[LIMITER_SLOT], limiter_ ? 127 : 0);
+}
+void KickMixer::saveTo(SavedState& out) const {
+  for (uint8_t c = 0; c < CONTROL_COUNT; ++c) out.value[c] = value_[c];
+}
+void KickMixer::restoreFrom(const SavedState& in){
+  for (uint8_t c = 0; c < CONTROL_COUNT; ++c)
+    value_[c] = in.value[c] <= 127 ? in.value[c] : value_[c];
+  // The Daisy keeps no state of its own, so a restore re-sends the whole page
+  // through the pending array; service() retries whatever the UART refused.
+  snapshot();
+  flushMidi();
+  dirty_ = true;
 }
 void KickMixer::setActive(bool active){
   if (active_ == active) return;
@@ -52,9 +62,8 @@ void KickMixer::setActive(bool active){
     rendered_ = false;
   }
 }
-void KickMixer::focusControl(uint8_t knob, bool limiter){
+void KickMixer::focusControl(uint8_t knob){
   focusKnob_ = knob;
-  focusLimiter_ = limiter;
   dirty_ = true;
 }
 void KickMixer::buttonEdge(uint8_t button, bool pressed, uint32_t now){
@@ -63,12 +72,8 @@ void KickMixer::buttonEdge(uint8_t button, bool pressed, uint32_t now){
   if (pressed == buttonDown_[button]) return;
   buttonDown_[button] = pressed;
   if (!pressed) return;
-  focusControl(button, button == 5);
-  if (button == 5){
-    limiter_ = !limiter_;
-    queue(CC[LIMITER_SLOT], limiter_ ? 127 : 0);
-    flushMidi();
-  }
+  // No pot button carries a mix function; they only move the sticky focus.
+  focusControl(button);
 }
 void KickMixer::service(uint32_t now){
   (void)now;
@@ -108,7 +113,7 @@ void KickMixer::sampleAngle(uint8_t knob, float angle){
 }
 void KickMixer::adjust(uint8_t knob, int delta){
   if (!active_ || knob >= 6 || delta == 0) return;
-  focusControl(knob,false);
+  focusControl(knob);
   uint8_t current = value_[knob];
   uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
   if (next == current) return; // No wrap and no repeated MIDI at the limits.
@@ -123,25 +128,17 @@ void KickMixer::drawOverview(Adafruit_SH1106G& d){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
   for (uint8_t k = 0; k < 6; ++k){
     int x = (k % 3) * 43, y = (k / 3) * 32;
-    char value[12], secondary[12] = {};
+    char value[12];
     snprintf(value,sizeof(value),"%u%%",percent(value_[k]));
-    if (k == 5) snprintf(secondary,sizeof(secondary),"LIM %s",limiter_ ? "ON" : "OFF");
     if (focusKnob_ == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
-    label(d,x+3,y+3,SHORT_NAMES[k]); label(d,x+3,y+13,value); label(d,x+3,y+23,secondary);
+    label(d,x+3,y+3,SHORT_NAMES[k]); label(d,x+3,y+13,value);
   }
   d.setTextWrap(true); d.display();
 }
 
 void KickMixer::drawFocus(Adafruit_SH1106G& d){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
-  char header[22];
-  snprintf(header,sizeof(header),"MIX      LIM %s",limiter_ ? "ON" : "OFF");
-  label(d,0,0,header);
-  if (focusLimiter_){
-    label(d,0,13,"LIMITER");
-    label(d,0,28,limiter_ ? "ON" : "OFF",3);
-    d.setTextWrap(true); d.display(); return;
-  }
+  label(d,0,0,"MIX");
   uint8_t v = value_[focusKnob_];
   char value[16];
   snprintf(value,sizeof(value),"%u%%",percent(v));

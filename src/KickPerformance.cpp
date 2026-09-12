@@ -4,12 +4,14 @@
 #include <string.h>
 
 namespace {
-constexpr uint8_t CC[] = {30,31,32,33,34,35,40,41,42,43,44,45,46,47,48,49,50,51,52};
-constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,40,42,44,45,46,48,49,51};
+constexpr uint8_t CC[] = {30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
+constexpr uint8_t CC_SLOTS = sizeof(CC);
+constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51};
 constexpr uint8_t STUT_VALUES[] = {10,28,46,64,82,100,118};
 constexpr uint8_t LOOP_VALUES[] = {13,38,63,88,114};
 constexpr uint8_t COUNT_VALUES[] = {0,42,85,127};
-const char* const FX_NAMES[] = {"STUT","LOOP","DLY","HPF","LPF","PUMP"};
+const char* const FX_NAMES[] = {"STUT","LOOP","DLY","HPF","LPF","PUMP","REV"};
+constexpr uint8_t FX_PAGES = sizeof(FX_NAMES)/sizeof(FX_NAMES[0]);
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr int LEFT = 4, RIGHT = 123, GRAPH_TOP = 36, GRAPH_BOTTOM = 48;
 int marker(uint8_t value){ return LEFT + (int)value * (RIGHT - LEFT) / 127; }
@@ -44,6 +46,7 @@ uint8_t& KickPerformance::position(Parameter p){
     case HPF: return state_.hpf;
     case LPF: return state_.lpf;
     case PUMP: return state_.pumpAmount;
+    case REVERB: return state_.reverb;
     case DECAY: return state_.decay;
     case TAIL: return state_.tailDelayAmount;
     case BPF1: case BPF2: case BPF3: return state_.bpfFrequencyValue[p - BPF1];
@@ -61,7 +64,7 @@ uint8_t KickPerformance::outputValue(Parameter p) const {
   return position(p);
 }
 void KickPerformance::queue(uint8_t cc, uint8_t value){
-  for (uint8_t i = 0; i < 19; ++i){
+  for (uint8_t i = 0; i < CC_SLOTS; ++i){
     if (CC[i] != cc) continue;
     midi_.value[i] = value;
     midi_.pending[i] = true;
@@ -70,7 +73,7 @@ void KickPerformance::queue(uint8_t cc, uint8_t value){
 }
 void KickPerformance::flushMidi(){
   if (!midi_.send) return;
-  for (uint8_t i = 0; i < 19; ++i){
+  for (uint8_t i = 0; i < CC_SLOTS; ++i){
     if (!midi_.pending[i]) continue;
     if (!midi_.send(midi_.context, CC[i], midi_.value[i])) return;
     midi_.pending[i] = false;
@@ -83,6 +86,35 @@ void KickPerformance::snapshot(){
   queue(47, COUNT_VALUES[state_.bpfLayerCount]);
   queue(50, state_.selectedCharacterModel ? 127 : 0);
   queue(52, state_.pumpEnabled ? 127 : 0);
+}
+void KickPerformance::saveTo(ControllerState& out) const { out = state_; }
+void KickPerformance::restoreFrom(const ControllerState& in){
+  state_ = in;
+  // A corrupted or partially written image must not index the canonical rate
+  // tables out of bounds, so every restored field is re-bounded here.
+  clampRepeat(state_.stutter,7);
+  clampRepeat(state_.looper,5);
+  if (state_.selectedFx > REVERB) state_.selectedFx = STUT;
+  if (state_.bpfLayerCount > 3) state_.bpfLayerCount = 0;
+  if (state_.editedBpfLayer > 2) state_.editedBpfLayer = 0;
+  for (uint8_t p = 0; p < PARAM_COUNT; ++p){
+    uint8_t& v = position((Parameter)p);
+    if (v > 127) v = 0;
+  }
+  // The Daisy keeps no state of its own, so a restore re-sends every CC
+  // through the pending array; service() retries whatever the UART refused.
+  snapshot();
+  flushMidi();
+  dirty_ = true;
+}
+void KickPerformance::clampRepeat(RepeatState& r, uint8_t divisions){
+  if (r.division >= divisions) r.division = 0;
+  if (r.randomStart >= divisions) r.randomStart = 0;
+  if (r.previousStart >= (int8_t)divisions) r.previousStart = -1;
+  r.direction = r.direction < 0 ? -1 : 1;
+  if (r.position > 127) r.position = 0;
+  if (r.activationPosition > 127) r.activationPosition = 0;
+  if (r.position <= 3) r.on = false;
 }
 void KickPerformance::setActive(bool active){
   if (active_ == active) return;
@@ -142,7 +174,7 @@ void KickPerformance::buttonEdge(uint8_t button, bool pressed, uint32_t now){
       if ((uint32_t)(now - b.pressedMs) >= 500){
         b.longFired = true; resetFx(now);
       } else {
-        state_.selectedFx = (state_.selectedFx + 1) % 6;
+        state_.selectedFx = (state_.selectedFx + 1) % FX_PAGES;
         reassign(0);
       }
     }
@@ -156,10 +188,12 @@ void KickPerformance::resetFx(uint32_t now){
   state_.stutter = RepeatState{}; state_.looper = RepeatState{};
   state_.stutter.previousStart = stutPrevious;
   state_.looper.previousStart = loopPrevious;
-  state_.delay = state_.hpf = state_.lpf = 0;
+  state_.delay = state_.hpf = state_.lpf = state_.reverb = 0;
   for (uint8_t p = STUT; p <= LPF; ++p){
     queue(PARAM_CC[p], 0);
   }
+  // PUMP sits between LPF and REVERB in page order but keeps its amount/enable.
+  queue(PARAM_CC[REVERB], 0);
   physical_[0] = PhysicalPot{};
   focus_.knob = 0;
   focus_.resetOverlay = true; focus_.resetMs = now;
@@ -331,7 +365,7 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     }
   } else if (p == TAIL) snprintf(out,size,compact ? "%.1fS" : "%.2f STEP",2.f*v/127.f);
   else if (p >= BPF1 && p <= BPF3) frequencyText(out,size,frequency(p,v),compact);
-  else if (p == DELAY && v == 0) snprintf(out,size,"OFF");
+  else if ((p == DELAY || p == REVERB) && v == 0) snprintf(out,size,"OFF");
   else snprintf(out,size,"%u%%",percent(v));
 }
 
@@ -411,11 +445,11 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
     d.fillTriangle(cutoff-2,GRAPH_TOP,cutoff+2,GRAPH_TOP,cutoff,GRAPH_TOP+3,SH110X_WHITE);
     return;
   }
-  if (p == DELAY || p == MACKIE || p == SHERMAN){
+  if (p == DELAY || p == REVERB || p == MACKIE || p == SHERMAN){
     d.drawRect(LEFT,GRAPH_TOP+4,RIGHT-LEFT+1,10,SH110X_WHITE);
     int w = (RIGHT-LEFT-2)*v/127;
     if (w) d.fillRect(LEFT+1,GRAPH_TOP+5,w,8,SH110X_WHITE);
-    if (p != DELAY){
+    if (p == MACKIE || p == SHERMAN){
       const uint8_t marks[] = {25,48,73};
       for (uint8_t m : marks){
         int px = LEFT+(RIGHT-LEFT)*m/100;
@@ -452,13 +486,13 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
 void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
   if (focus_.resetOverlay){
-    label(d,16,19,"FX RESET",2); label(d,13,45,"STUT..LPF OFF");
+    label(d,16,19,"FX RESET",2); label(d,7,45,"STUT..LPF REV OFF");
     d.setTextWrap(true); d.display(); return;
   }
   Parameter p = assignment(focus_.knob);
   uint8_t v = position(p); float x = v/127.f;
   char title[22], value[22], footer[22] = {}, extra[22] = {};
-  if (p <= PUMP) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
+  if (p <= REVERB) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
   else if (p == DECAY) snprintf(title,sizeof(title),"DECAY");
   else if (p == TAIL) snprintf(title,sizeof(title),"TAIL DELAY");
   else if (p <= BPF3) snprintf(title,sizeof(title),"BPF %u EDIT L%u",state_.bpfLayerCount,state_.editedBpfLayer+1);
@@ -478,6 +512,8 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   } else if (p == PUMP){
     unsigned depth = v ? (unsigned)(22.f+74.f*powf(x,.82f)+.5f) : 0;
     snprintf(footer,sizeof(footer),"DEPTH %u%%  %s",depth,state_.pumpEnabled ? "ON" : "OFF");
+  } else if (p == REVERB){
+    snprintf(footer,sizeof(footer),"WET %u%%",percent(v));
   } else if (p == DECAY) snprintf(footer,sizeof(footer),"REV %s",state_.reverseEnabled ? "ON" : "OFF");
   else if (p == TAIL){
     unsigned ms = (unsigned)(60000.f/(bpm ? bpm : 120)*.5f*x+.5f);

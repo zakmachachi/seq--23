@@ -124,6 +124,7 @@ SimpleSequencer::SimpleSequencer()
     for (uint8_t s = 0; s < NUM_STEPS; s++){
       machinePattern[c][s] = false;
       machineRatchet[c][s] = 0;
+      machineKickBpf[c][s] = 255;
     }
     // Kick-specific defaults
     kickNoteSpread[c] = 0;
@@ -920,6 +921,7 @@ void SimpleSequencer::readEncoders(){
 
   kickPerformance.service(millis());
   kickMixer.service(millis());
+  flushFillCC();
 
   // Scan pots (infinite scroll algorithm)
   for (uint8_t i=0;i<POT_COUNT;i++){
@@ -1272,17 +1274,38 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
       case 4: { // Pot 5: Gate length (per-channel)
         int prev = noteLenIdx[ch];
         noteLenIdx[ch] = (uint8_t)constrain(prev + ticks, 0, (int)NOTE_LEN_COUNT - 1);
-        if (noteLenIdx[ch] != prev && euclidScaleMode[ch] != 0){
+        // Generative mode gives every step a concrete gate, so the channel
+        // value is never consulted at play time. Nudge the steps by the same
+        // delta rather than flattening them, which used to wipe p-locks.
+        int applied = (int)noteLenIdx[ch] - prev;
+        if (applied != 0 && euclidScaleMode[ch] != 0){
           uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
-          for (uint8_t s = 0; s < NUM_STEPS; s++) noteLen[ch][base + s] = noteLenIdx[ch];
+          for (uint8_t s = 0; s < NUM_STEPS; s++){
+            if (noteLen[ch][base + s] == 255) continue;
+            noteLen[ch][base + s] = (uint8_t)constrain(
+              (int)noteLen[ch][base + s] + applied, 0, (int)NOTE_LEN_COUNT - 1);
+          }
         }
         Serial.print("GATE CH"); Serial.print(ch+1);
         Serial.print("="); Serial.println(noteLenIdx[ch]);
         break;
       }
       case 5: { // Pot 6: Base velocity 0..127
-        channelVelocity[ch] = (uint8_t)constrain(
-          (int)channelVelocity[ch] + ticks, 0, 127);
+        int prev = (int)channelVelocity[ch];
+        channelVelocity[ch] = (uint8_t)constrain(prev + ticks, 0, 127);
+        // Same problem as gate: randomizeEuclidMelody() stamps a concrete
+        // velocity on every step, so triggerChannel() never falls back to the
+        // channel value and this pot did nothing at all with a scale active.
+        // Offsetting keeps the generated spread and any deliberate p-locks.
+        int applied = (int)channelVelocity[ch] - prev;
+        if (applied != 0 && euclidScaleMode[ch] != 0){
+          uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+          for (uint8_t s = 0; s < NUM_STEPS; s++){
+            if (stepVelocity[ch][base + s] == 255) continue;
+            stepVelocity[ch][base + s] = (uint8_t)constrain(
+              (int)stepVelocity[ch][base + s] + applied, 0, 127);
+          }
+        }
         Serial.print("VEL="); Serial.println(channelVelocity[ch]);
         break;
       }
@@ -1558,10 +1581,21 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   }
 }
 
+// v11 images end at savedNumSteps; everything before it keeps its offsets in
+// every version, so v11/v12/v13 all load the sequencer block field by field.
+// The appended kick block changed shape in v13 (performance gained REVERB, the
+// mix page lost its reverb flag), so it is only trusted under the v13
+// signature — exactly how v12 already refused to read a v11 tail.
+static const uint32_t SAVE_MAGIC_V11 = 13572477;
+static const uint32_t SAVE_MAGIC_V12 = 13572478;
+static const uint32_t SAVE_MAGIC_V13 = 13572479;
+
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = 13572477; // Unique signature (v11 — per-channel numSteps)
+  data.magicNumber = SAVE_MAGIC_V13;
   data.savedBpm = bpm;
+  kickPerformance.saveTo(data.savedKickPerformance);
+  kickMixer.saveTo(data.savedKickMixer);
 
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
     data.savedNoteLenIdx[c] = noteLenIdx[c];
@@ -1613,7 +1647,8 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == 13572477) {
+  if (data.magicNumber == SAVE_MAGIC_V13 || data.magicNumber == SAVE_MAGIC_V12 ||
+      data.magicNumber == SAVE_MAGIC_V11) {
     bpm = data.savedBpm;
 
     for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -1658,6 +1693,11 @@ void SimpleSequencer::loadState() {
       if (euclidScaleMode[c] > 0 && euclidScaleMode[c] <= 6) lastScaleMode[c] = euclidScaleMode[c];
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
+    }
+    if (data.magicNumber == SAVE_MAGIC_V13) {
+      // Restoring re-sends both pages; the Daisy boots to its own defaults.
+      kickPerformance.restoreFrom(data.savedKickPerformance);
+      kickMixer.restoreFrom(data.savedKickMixer);
     }
     Serial.println("State loaded from EEPROM (v10).");
   } else {
@@ -1727,6 +1767,10 @@ static uint8_t machinePoolMax(uint8_t machine){
   return n;
 }
 
+// Per-step kick fill CCs: slot 0 = BPF layer count. Shape is not randomised.
+static const uint8_t FILL_CC[] = {47};
+static const uint8_t KICK_COUNT_VALUES[] = {0, 42, 85, 127};
+
 void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
   uint8_t m = trigMachine[ch];
   uint8_t shift = trigShift[ch] % NUM_STEPS;
@@ -1760,6 +1804,7 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
     uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
     machinePattern[ch][s] = (w[src] == 100);
     machineRatchet[ch][s] = 0;
+    machineKickBpf[ch][s] = 255;
   }
 
   uint8_t poolMax = machinePoolMax(m);
@@ -1816,6 +1861,7 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
       if (isBase){
         pitch[ch][pI] = 255;
         machineRatchet[ch][s] = 0;
+        machineKickBpf[ch][s] = 255;
         continue;
       }
       if (spread > 0){
@@ -1830,6 +1876,9 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
       } else {
         machineRatchet[ch][s] = 0;
       }
+      // Rolled here alongside spread/ratchet, so a fill step keeps one sound
+      // until the extras re-seed. triggerChannel() only replays these.
+      machineKickBpf[ch][s] = (uint8_t)random(0, 4);
     }
   }
 }
@@ -2407,6 +2456,16 @@ void SimpleSequencer::runEngine(){
           bool isActive = isStepActive(ch, playIdx(ch, localStep(ch)));
           if (isActive) triggerChannel(ch);
         }
+        // Pre-send the NEXT step's kick BPF. The Daisy smooths the layer gain
+        // over roughly 7 ms, so sending it just before the note-on left the
+        // filter mid-transition across the transient and a fill's setting bled
+        // into the following hit. A whole step of lead time settles it.
+        {
+          uint8_t nextStep = (uint8_t)((currentStep + 1) % NUM_STEPS);
+          for (uint8_t ch=0; ch<NUM_CHANNELS; ch++){
+            if (trigMachine[ch] == TM_KICK) updateKickFillCC(ch, nextStep);
+          }
+        }
     }
   }
 
@@ -2445,6 +2504,10 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   // Slide-all (Function + Fill) forces slide on the active channel.
   bool slideNow = stepSlide[ch][pIdx] || encoderSlideHold ||
                   (slideAllHold && ch == selectedChannel);
+
+  // Safety net only: the value for this step was already pre-sent a step
+  // early (see the step-advance), so this normally dedupes to nothing.
+  if (trigMachine[ch] == TM_KICK) updateKickFillCC(ch, currentStep);
 
   // 2. THE MONOSYNTH LEGATO MAGIC — route to per-channel MIDI Out
   static bool prevSlide[NUM_CHANNELS] = {false};
@@ -3292,9 +3355,9 @@ void SimpleSequencer::bootAnimation() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(46, 20); display.print("seq-23");
   display.setCursor(7,  34); display.print("made by Bob and Zak");
-  // Size-2 (12px per char): "v1.0.0" is 72px, so x=28 centres it on the card.
+  // Size-2 (12px per char): "v1.1.0" is 72px, so x=28 centres it on the card.
   display.setTextSize(2);
-  display.setCursor(28, 48); display.print("v1.0.0");
+  display.setCursor(28, 48); display.print("v1.1.0");
   display.setTextSize(1);
   display.display();
 
@@ -3305,7 +3368,7 @@ void SimpleSequencer::bootAnimation() {
     display2.setCursor(46, 20); display2.print("seq-23");
     display2.setCursor(7,  34); display2.print("made by Bob and Zak");
     display2.setTextSize(2);
-    display2.setCursor(28, 48); display2.print("v1.0.0");
+    display2.setCursor(28, 48); display2.print("v1.1.0");
     display2.setTextSize(1);
     display2.display();
   }
@@ -3755,6 +3818,7 @@ void SimpleSequencer::clearTrack(uint8_t ch) {
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     machinePattern[ch][s] = false;
     machineRatchet[ch][s] = 0;
+    machineKickBpf[ch][s] = 255;
   }
   numPages[ch] = 1;
   editPage[ch] = 0;
@@ -4835,6 +4899,50 @@ bool SimpleSequencer::kickCCPage() const {
 // Function + MENU2 on the same KICK machine: the Daisy's output/mix stage.
 bool SimpleSequencer::kickMixPage() const {
   return activeMenu == 6 && trigMachine[selectedChannel] == TM_KICK && kickMixMode;
+}
+
+// Called from triggerChannel(), i.e. from the 1 ms engine ISR as well as the
+// foreground. Never waits for the UART: the latest value stays in its slot for
+// flushFillCC() to retry, so a refused CC is late rather than blocking.
+// Resolve the BPF layer count for one kick step and queue it if it changed.
+// Fill steps use their baked random value; every other step reasserts the
+// dialled-in count, because CC47 is global on the Daisy and would otherwise
+// keep whatever the last fill left behind.
+void SimpleSequencer::updateKickFillCC(uint8_t ch, uint8_t step){
+  if (step >= NUM_STEPS) return;
+  uint8_t bpf = machineKickBpf[ch][step];
+  uint8_t wantCount =
+    (bpf < 4) ? KICK_COUNT_VALUES[bpf]
+              : KICK_COUNT_VALUES[kickPerformance.state().bpfLayerCount & 3];
+  if (wantCount == fillCCLastSent[0]) return;
+  fillCCLastSent[0] = wantCount;
+  queueFillCC(0, wantCount);
+}
+
+void SimpleSequencer::queueFillCC(uint8_t slot, uint8_t value){
+  if (slot >= FILL_CC_COUNT) return;
+  fillCCValue[slot] = value;
+  fillCCPending[slot] = true;
+  // PRIMASK is saved and restored rather than blindly re-enabled, because an
+  // ISR caller must not leave interrupts enabled behind it.
+  uint32_t primask;
+  __asm__ volatile ("mrs %0, primask" : "=r" (primask) :: "memory");
+  __disable_irq();
+  if (MIDI_SERIAL.availableForWrite() >= 3){
+    midiSendByte(0xBE); // MIDI channel 15.
+    midiSendByte(FILL_CC[slot]);
+    midiSendByte(value & 0x7F);
+    fillCCPending[slot] = false;
+  }
+  __asm__ volatile ("msr primask, %0" :: "r" (primask) : "memory");
+}
+
+void SimpleSequencer::flushFillCC(){
+  for (uint8_t i = 0; i < FILL_CC_COUNT; ++i){
+    if (!fillCCPending[i]) continue;
+    if (!sendPerformanceCC(this, FILL_CC[i], fillCCValue[i])) return;
+    fillCCPending[i] = false;
+  }
 }
 
 bool SimpleSequencer::sendPerformanceCC(void* context, uint8_t cc, uint8_t value){

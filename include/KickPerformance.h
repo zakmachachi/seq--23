@@ -7,7 +7,7 @@
 class KickPerformance {
 public:
   enum Parameter : uint8_t {
-    STUT, LOOP, DELAY, HPF, LPF, PUMP, DECAY, TAIL,
+    STUT, LOOP, DELAY, HPF, LPF, PUMP, REVERB, DECAY, TAIL,
     BPF1, BPF2, BPF3, MACKIE, SHERMAN, SHAPE, PARAM_COUNT
   };
   struct RepeatState {
@@ -19,7 +19,7 @@ public:
   struct ControllerState {
     uint8_t selectedFx = STUT;
     RepeatState stutter, looper;
-    uint8_t delay = 0, hpf = 0, lpf = 0, pumpAmount = 0;
+    uint8_t delay = 0, hpf = 0, lpf = 0, pumpAmount = 0, reverb = 0;
     uint8_t decay = 64;
     bool reverseEnabled = false;
     uint8_t tailDelayAmount = 0;
@@ -40,6 +40,10 @@ public:
   void render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus,
               uint32_t bpm, uint32_t now);
   const ControllerState& state() const { return state_; }
+  // ControllerState is a flat POD, so the patch persists it as-is instead of
+  // reaching into the controller.
+  void saveTo(ControllerState& out) const;
+  void restoreFrom(const ControllerState& in);
 private:
   struct PhysicalPot {
     bool initialized = false;
@@ -56,8 +60,8 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[19] = {};
-    uint8_t value[19] = {};
+    bool pending[20] = {};
+    uint8_t value[20] = {};
   };
   ControllerState state_;
   PhysicalPot physical_[6];
@@ -78,6 +82,7 @@ private:
   void reassign(uint8_t knob);
   void adjust(uint8_t knob, int delta);
   void updateRepeat(RepeatState& repeat, bool loop, uint8_t value);
+  static void clampRepeat(RepeatState& repeat, uint8_t divisions);
   void resetFx(uint32_t now);
   static uint8_t randomStart(bool loop, int8_t previous);
   static uint8_t percent(uint8_t value);
