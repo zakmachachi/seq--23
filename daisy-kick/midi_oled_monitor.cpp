@@ -471,7 +471,7 @@ static constexpr float TRANSIENT_TO_TAIL_END_MS   = 44.0f;
  * Ceiling on where the transient sweep may START.
  *
  * Was a bare 850 Hz literal, which capped the top of the SHAPE range: a
- * psytrance laser needs to begin a kilohertz or more above the body, and
+ * laser sweep needs to begin a kilohertz or more above the body, and
  * at 850 Hz every high ratio collapsed to the same pitch. The resonant
  * BODY LP is what contains the harmonics at extreme sweep, not this clamp.
  */
@@ -480,7 +480,7 @@ static constexpr float TRANSIENT_START_CEILING_HZ = 3000.0f;
 /*
  * SHAPE: ROUND -> PUNCH -> SNAP.
  *
- * SNAP is the psytrance laser end. It needs BOTH a much higher start and a
+ * SNAP is the laser end. It needs BOTH a much higher start and a
  * LONGER sweep: the old 9.1x over 42 ms put all the pitch movement inside
  * the attack, so it read as a brighter click rather than a descent, which
  * is why everything above the midpoint sounded dull. Dropping ~30x over
@@ -815,7 +815,7 @@ static constexpr float RATCHET_RETRIGGER_LEVEL_THRESHOLD = 0.0005f;
 
 
 /* ============================================================
-   PSYTRANCE-STYLE PHASE LOCK
+   DETERMINISTIC PHASE LOCK
    ============================================================ */
 
 /*
@@ -3562,7 +3562,7 @@ static void ResetKickPhases()
     if(!preserve_phase)
     {
         /*
-         * Psytrance-style deterministic phase:
+         * Deterministic phase:
          * every new kick starts from the same point.
          */
         transient_phase = 0.0f;
