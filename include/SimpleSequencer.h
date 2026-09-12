@@ -6,6 +6,7 @@
 #include "SeqConfig.h"
 #include "Max11300.h"
 #include "KickPerformance.h"
+#include "KickMixer.h"
 #include <EEPROM.h>
 // OLED
 #include <Wire.h>
@@ -40,7 +41,10 @@ class SimpleSequencer {
 
   private:
     KickPerformance kickPerformance;
+    KickMixer kickMixer;
+    bool kickMixMode = false; // Function + MENU2 selects the mix stage instead.
     bool kickCCPage() const;
+    bool kickMixPage() const;
     static bool sendPerformanceCC(void* context, uint8_t cc, uint8_t value);
     bool steps[NUM_CHANNELS][TOTAL_STEPS];
     bool pendingToggle[NUM_STEPS]; // tracks pending toggle state for each step (p-lock override)

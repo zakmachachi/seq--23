@@ -208,6 +208,7 @@ void SimpleSequencer::begin(){
   // Initialize hardware MIDI_SERIAL for MIDI at 31250 baud
   MIDI_SERIAL.begin(31250);
   kickPerformance.begin(sendPerformanceCC, this);
+  kickMixer.begin(sendPerformanceCC, this);
   // initialize high-resolution clock reference for internal MIDI output
   lastMidiClockMicros = micros();
 
@@ -580,10 +581,11 @@ void SimpleSequencer::loop(){
   // Update display + LEDs together at the configured refresh interval.
   // Pushing WS2812 too often disables interrupts during the bit-bang and starves
   // the matrix scan; the original 60Hz-ish cadence was correct.
-  if (kickCCPage()){
+  if (kickCCPage() || kickMixPage()){
     // OLED1 stays a permanent grid; OLED2 keeps intentional focus.
     // The component renders dirty frames at no more than 25 FPS.
-    kickPerformance.render(display, display2Present ? &display2 : nullptr, bpm, millis());
+    if (kickMixPage()) kickMixer.render(display, display2Present ? &display2 : nullptr, millis());
+    else kickPerformance.render(display, display2Present ? &display2 : nullptr, bpm, millis());
     if (millis() - lastDisplayMillis > displayRefreshMs){
       updateLEDs();
       lastDisplayMillis = millis();
@@ -743,8 +745,12 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   if (i == MATRIX_BTN_MENU2_INDEX){
     activeMenu = 6;  // Kick CC page for TM_KICK, otherwise Analog CV outputs
     heldStep = -1; focusEncoder = 0;
-    if (!kickCCPage()) ensurePixi();
-    Serial.println(kickCCPage() ? "MENU2 -> Kick CC (CH15)" : "MENU2 -> Analog Outs");
+    // Function selects the kick's mix stage; a plain tap always returns to the
+    // performance page so the modifier can never strand you on the wrong one.
+    kickMixMode = isFunctionHeld() && trigMachine[selectedChannel] == TM_KICK;
+    if (!kickCCPage() && !kickMixPage()) ensurePixi();
+    Serial.println(kickMixPage() ? "MENU2 -> Kick MIX (CH15)"
+                 : kickCCPage()  ? "MENU2 -> Kick CC (CH15)" : "MENU2 -> Analog Outs");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -890,6 +896,7 @@ void SimpleSequencer::readEncoders(){
   const unsigned long POT_BTN_DEBOUNCE_MS = 10;
 
   kickPerformance.setActive(kickCCPage());
+  kickMixer.setActive(kickMixPage());
 
   // Scan pot buttons (active LOW)
   for (uint8_t i=0;i<POT_COUNT;i++){
@@ -902,6 +909,8 @@ void SimpleSequencer::readEncoders(){
         potBtnState[i] = pressed;
         if (kickCCPage()){
           kickPerformance.buttonEdge(i, pressed, millis());
+        } else if (kickMixPage()){
+          kickMixer.buttonEdge(i, pressed, millis());
         } else if (pressed) {
           onPotButtonPress(i);
         }
@@ -910,6 +919,7 @@ void SimpleSequencer::readEncoders(){
   }
 
   kickPerformance.service(millis());
+  kickMixer.service(millis());
 
   // Scan pots (infinite scroll algorithm)
   for (uint8_t i=0;i<POT_COUNT;i++){
@@ -919,8 +929,9 @@ void SimpleSequencer::readEncoders(){
     float a = (valA - 512.0f) / 512.0f;
     float b = (valB - 512.0f) / 512.0f;
     float angle = atan2f(b, a);
-    if (kickCCPage()){
-      kickPerformance.sampleAngle(i, angle);
+    if (kickCCPage() || kickMixPage()){
+      if (kickMixPage()) kickMixer.sampleAngle(i, angle);
+      else kickPerformance.sampleAngle(i, angle);
       potPrevAngle[i] = angle;
       potFirstRun[i] = false;
       potAccumulator[i] = 0;
@@ -964,7 +975,7 @@ void SimpleSequencer::readEncoders(){
 
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
-  if (kickCCPage()) return; // Debounced edges handled by KickPerformance.
+  if (kickCCPage() || kickMixPage()) return; // Debounced edges handled by the kick components.
   if (activeMenu == 6){
     // Analog Outs:
     //   FN + pot-button N   -> cycle out N's source channel (1..7)
@@ -1091,7 +1102,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
   static bool lastKickPage = false;
-  bool kickPage = kickCCPage();
+  bool kickPage = kickCCPage() || kickMixPage();
   if (lastMenu != activeMenu || lastKickPage != kickPage){
     for (uint8_t i = 0; i < 6; i++) potAcc[i] = 0;
     lastMenu = activeMenu;
@@ -1109,7 +1120,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (forward == 0) return;
   ticks = forward;
 
-  if (kickPage) return; // Relative endless-pot input belongs to KickPerformance.
+  if (kickPage) return; // Relative endless-pot input belongs to the kick components.
 
   // Track which pot was last actually rotated so screen 2 can focus on it.
   lastTouchedPot  = (int8_t)pot;
@@ -1586,7 +1597,7 @@ void SimpleSequencer::saveState() {
   }
   // Write to EEPROM
   EEPROM.put(0, data);
-  if (kickCCPage()) return; // Keep the performance overview permanent.
+  if (kickCCPage() || kickMixPage()) return; // Keep the performance overview permanent.
 
   // Flash the OLED
   display.clearDisplay();
@@ -3281,7 +3292,10 @@ void SimpleSequencer::bootAnimation() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(46, 20); display.print("seq-23");
   display.setCursor(7,  34); display.print("made by Bob and Zak");
-  display.setCursor(28, 48); display.print("v. prototype");
+  // Size-2 (12px per char): "v1.0.0" is 72px, so x=28 centres it on the card.
+  display.setTextSize(2);
+  display.setCursor(28, 48); display.print("v1.0.0");
+  display.setTextSize(1);
   display.display();
 
   if (display2Present){
@@ -3290,7 +3304,9 @@ void SimpleSequencer::bootAnimation() {
     display2.setTextSize(1);
     display2.setCursor(46, 20); display2.print("seq-23");
     display2.setCursor(7,  34); display2.print("made by Bob and Zak");
-    display2.setCursor(28, 48); display2.print("v. prototype");
+    display2.setTextSize(2);
+    display2.setCursor(28, 48); display2.print("v1.0.0");
+    display2.setTextSize(1);
     display2.display();
   }
   delay(3000); // hold the boot card up for 3 seconds
@@ -4813,7 +4829,12 @@ void SimpleSequencer::drawOverview(){
 
 // Dedicated performance mode on Menu 2 of the KICK machine.
 bool SimpleSequencer::kickCCPage() const {
-  return activeMenu == 6 && trigMachine[selectedChannel] == TM_KICK;
+  return activeMenu == 6 && trigMachine[selectedChannel] == TM_KICK && !kickMixMode;
+}
+
+// Function + MENU2 on the same KICK machine: the Daisy's output/mix stage.
+bool SimpleSequencer::kickMixPage() const {
+  return activeMenu == 6 && trigMachine[selectedChannel] == TM_KICK && kickMixMode;
 }
 
 bool SimpleSequencer::sendPerformanceCC(void* context, uint8_t cc, uint8_t value){
