@@ -154,14 +154,41 @@ static volatile float param_mackie_gain  = 1.01703f;/* CC54, max 2.0  */
 static volatile float param_sherman_gain = 1.56710f;/* CC55, max 2.5  */
 static volatile float param_bpf_gain     = 4.0f;    /* CC56, max 8.0  */
 static volatile float param_sub_gain     = 0.95f;   /* CC57, max 1.6  */
-static volatile float param_comp_amount  = 0.0f;    /* CC58, max 1.0  */
-static volatile bool  param_limiter_on   = false;   /* CC59, 0/127    */
+static volatile float param_punch_gain   = 1.0f;    /* CC58, max 2.0  */
+static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
 static constexpr float PARAM_SHERMAN_GAIN_MAX = 2.5f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
+static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
+
+/* How much of the punch is held out of the tail-delay duck. 1 = immune. */
+static constexpr float TAIL_DELAY_PUNCH_PROTECT = 0.90f;
+
+/* Sidechain reverb tuning. HP pole = expf(-2*pi*250/48000). */
+/* 300 Hz: expf(-2*pi*300/48000). Keeps the tank off the punch. */
+static constexpr float REVERB_SEND_HP_POLE_A = 0.96149f;
+static constexpr float REVERB_SEND_LEVEL     = 0.90f;
+static constexpr float REVERB_RETURN_LEVEL   = 0.70f;
+/* Shorter decay so a hit's tail is spent before the next one lands. */
+static constexpr float REVERB_FEEDBACK       = 0.72f;
+/* Full knob travel reaches only this much wet: 40% was the usable top. */
+static constexpr float REVERB_AMOUNT_MAX     = 0.40f;
+/* Light damping so it still reads through distortion, without shimmering. */
+static constexpr float REVERB_DAMPING        = 0.26f;
+/*
+ * Sidechain duck, KEYED OFF THE KICK TRIGGER rather than an envelope
+ * follower on the audio. A follower gives a soft, level-dependent dip whose
+ * shape changes with how loud the hit was; keying off the note gives the same
+ * clean pump every time, which is what makes it read as sidechained.
+ *
+ * DEPTH is how far it drops on the hit, RECOVER_A the climb back to unity
+ * (~70 ms, so it is most of the way back within one 16th at club tempo).
+ */
+static constexpr float REVERB_DUCK_DEPTH     = 0.95f;
+static constexpr float REVERB_DUCK_RECOVER_A = 0.000298f;
 
 
 /*
@@ -440,13 +467,41 @@ static constexpr float TRANSIENT_TO_TAIL_END_MS   = 44.0f;
  * This keeps the effect note-relative while landing in the requested
  * ~500 Hz area for normal kick fundamentals.
  */
+/*
+ * Ceiling on where the transient sweep may START.
+ *
+ * Was a bare 850 Hz literal, which capped the top of the SHAPE range: a
+ * psytrance laser needs to begin a kilohertz or more above the body, and
+ * at 850 Hz every high ratio collapsed to the same pitch. The resonant
+ * BODY LP is what contains the harmonics at extreme sweep, not this clamp.
+ */
+static constexpr float TRANSIENT_START_CEILING_HZ = 3000.0f;
+
+/*
+ * SHAPE: ROUND -> PUNCH -> SNAP.
+ *
+ * SNAP is the psytrance laser end. It needs BOTH a much higher start and a
+ * LONGER sweep: the old 9.1x over 42 ms put all the pitch movement inside
+ * the attack, so it read as a brighter click rather than a descent, which
+ * is why everything above the midpoint sounded dull. Dropping ~30x over
+ * ~110 ms is slow enough to hear as a laser tone.
+ *
+ * The midpoint is deliberately unchanged -- PUNCH is the good spot.
+ */
 static constexpr float SHAPE_ROUND_START_RATIO = 1.18f;
 static constexpr float SHAPE_PUNCH_START_RATIO = 3.80f;
-static constexpr float SHAPE_SNAP_START_RATIO  = 9.10f;
+static constexpr float SHAPE_SNAP_START_RATIO  = 30.0f;
 
 static constexpr float SHAPE_ROUND_SWEEP_MS = 180.0f;
 static constexpr float SHAPE_PUNCH_SWEEP_MS = 88.0f;
-static constexpr float SHAPE_SNAP_SWEEP_MS  = 42.0f;
+static constexpr float SHAPE_SNAP_SWEEP_MS  = 110.0f;
+
+/*
+ * Volume taper over the last stretch of SHAPE. TAPER_DEPTH is how much
+ * level is removed by the time the knob reaches full: 0.10 = down 10%.
+ */
+static constexpr float SHAPE_TAPER_START = 0.90f;
+static constexpr float SHAPE_TAPER_DEPTH = 0.10f;
 
 static constexpr float SHAPE_ROUND_TRANSIENT_GAIN = 0.16f;
 static constexpr float SHAPE_PUNCH_TRANSIENT_GAIN = 0.62f;
@@ -458,7 +513,8 @@ static constexpr float SHAPE_SNAP_DRIVE  = 1.82f;
 
 static constexpr float SHAPE_ROUND_CUTOFF_HZ = 1100.0f;
 static constexpr float SHAPE_PUNCH_CUTOFF_HZ = 3600.0f;
-static constexpr float SHAPE_SNAP_CUTOFF_HZ  = 7200.0f;
+/* Raised so the top of the laser sweep is not filtered off as it starts. */
+static constexpr float SHAPE_SNAP_CUTOFF_HZ  = 9500.0f;
 
 static constexpr float SHAPE_ROUND_ATTACK_MS = 2.50f;
 static constexpr float SHAPE_PUNCH_ATTACK_MS = 1.35f;
@@ -478,13 +534,15 @@ static constexpr float SHAPE_SNAP_ATTACK_MS  = 0.75f;
  * punch was audibly cut off. Moved past the punch's main body so the
  * attack completes first and the tail takes over underneath it.
  */
-static constexpr float SHAPE_ROUND_HANDOFF_START_MS = 12.0f;
-static constexpr float SHAPE_PUNCH_HANDOFF_START_MS = 22.0f;
-static constexpr float SHAPE_SNAP_HANDOFF_START_MS  = 34.0f;
+static constexpr float SHAPE_ROUND_HANDOFF_START_MS = 20.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_START_MS = 36.0f;
+/* Past SHAPE_SNAP_SWEEP_MS, so the laser finishes its descent before the
+ * tail starts fading it out. */
+static constexpr float SHAPE_SNAP_HANDOFF_START_MS  = 115.0f;
 
-static constexpr float SHAPE_ROUND_HANDOFF_END_MS = 38.0f;
-static constexpr float SHAPE_PUNCH_HANDOFF_END_MS = 62.0f;
-static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 84.0f;
+static constexpr float SHAPE_ROUND_HANDOFF_END_MS = 52.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_END_MS = 82.0f;
+static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 165.0f;
 
 /*
  * Tail decay shape: 0 = original pure exponential, 1 = linear ramp.
@@ -1051,6 +1109,8 @@ static constexpr uint8_t CC_MACRO_FX_DELAY         = 32;
 static constexpr uint8_t CC_MACRO_FX_HPF           = 33;
 static constexpr uint8_t CC_MACRO_FX_LPF           = 34;
 static constexpr uint8_t CC_MACRO_FX_PUMP          = 35;
+/* Seventh K1 FX page: sidechain reverb amount. */
+static constexpr uint8_t CC_MACRO_FX_REVERB        = 36;
 
 static constexpr uint8_t CC_DECAY_ABSOLUTE          = 40;
 static constexpr uint8_t CC_REVERSE_STATE           = 41;
@@ -1072,8 +1132,8 @@ static constexpr uint8_t CC_MIX_MACKIE_GAIN         = 54;
 static constexpr uint8_t CC_MIX_SHERMAN_GAIN        = 55;
 static constexpr uint8_t CC_MIX_BPF_GAIN            = 56;
 static constexpr uint8_t CC_MIX_SUB_GAIN            = 57;
-static constexpr uint8_t CC_MIX_COMPRESSOR          = 58;
-static constexpr uint8_t CC_MIX_LIMITER             = 59;
+static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
+
 
 static constexpr uint8_t CC_BUTTON_FX_NEXT          = 100;
 
@@ -1219,6 +1279,16 @@ static bool tail_delay_enabled = false;
 
 /* Macro 4: additive BPF layer bank. */
 static volatile uint8_t macro_bpf_layer_count = 0;
+/*
+ * Layer count LATCHED at Note-On, exactly as K6 SHAPE already is.
+ *
+ * CC47 is a global continuously-applied parameter, but a kick sustains for
+ * hundreds of ms. Per-step layer changes from the sequencer's fill
+ * randomisation therefore landed while the PREVIOUS kick was still sounding
+ * and re-filtered its body and tail. Latching means a CC only takes effect
+ * from the next Note-On, so each hit keeps the count it was triggered with.
+ */
+static volatile uint8_t macro_bpf_layer_count_latched = 0;
 static volatile float macro_bpf_target_hz[3] =
 {
     330.0f,
@@ -1844,13 +1914,31 @@ static float ShapeThreePoint(
 
 static float MacroKickShapeTransientGain(float x)
 {
-    return
+    float gain =
         ShapeThreePoint(
             x,
             SHAPE_ROUND_TRANSIENT_GAIN,
             SHAPE_PUNCH_TRANSIENT_GAIN,
             SHAPE_SNAP_TRANSIENT_GAIN
         );
+
+    /*
+     * Linear taper across the top of the SHAPE range. The full laser is a
+     * long, bright, high-amplitude descent and sits louder than the rest of
+     * the range; trimming it back over the last stretch keeps the knob from
+     * stepping up in level as it reaches the extreme.
+     */
+    x = Clamp01Added(x);
+    if(x > SHAPE_TAPER_START)
+    {
+        float t =
+            (x - SHAPE_TAPER_START) /
+            (1.0f - SHAPE_TAPER_START);
+
+        gain *= 1.0f - t * SHAPE_TAPER_DEPTH;
+    }
+
+    return gain;
 }
 
 
@@ -3989,8 +4077,8 @@ static void TriggerKickAudio(uint8_t velocity)
      * The new resonant BODY LP is the musical way to contain the
      * extra harmonics when using extreme sweep.
      */
-    if(transient_start_frequency > 850.0f)
-        transient_start_frequency = 850.0f;
+    if(transient_start_frequency > TRANSIENT_START_CEILING_HZ)
+        transient_start_frequency = TRANSIENT_START_CEILING_HZ;
 
 
     /*
@@ -4438,102 +4526,131 @@ static inline float SoftClip(float x)
 
 
 /*
- * KICK COMPRESSOR — one dial (CC58).
+ * SIDECHAIN REVERB (CC59) — post-mixer, last thing before the ceiling.
  *
- * Tuned for kicks rather than general programme: fast enough to catch the
- * attack, with a release in the 120 ms region so it recovers before the
- * next hit at club tempo instead of pumping across the bar. One control
- * moves threshold and ratio together, which is the only sane way to put a
- * compressor on a single knob.
+ * Schroeder topology: four parallel combs into two series allpasses. The
+ * SEND is high-passed at 250 Hz so only the punch and upper body excite the
+ * tank; letting the sub in turns a kick reverb to mud immediately.
+ *
+ * The return is then ducked by the dry kick's own envelope, so the tail
+ * blooms in the gaps rather than smearing over the attack. That is the
+ * sidechain: no external key input, the kick keys itself.
  */
-struct KickCompressor
+struct KickSidechainReverb
 {
-    float envelope = 0.0f;
-    float gain = 1.0f;
+    static constexpr int C0 = 1116, C1 = 1188, C2 = 1277, C3 = 1356;
+    static constexpr int A0 = 556, A1 = 441;
+
+    float comb0[C0] = {}, comb1[C1] = {}, comb2[C2] = {}, comb3[C3] = {};
+    float ap0[A0] = {}, ap1[A1] = {};
+    int ci0 = 0, ci1 = 0, ci2 = 0, ci3 = 0, ai0 = 0, ai1 = 0;
+    float lp0 = 0.0f, lp1 = 0.0f, lp2 = 0.0f, lp3 = 0.0f;
+
+    float send_hp_state = 0.0f;
+    /* MUST default to zero: any non-zero member initialiser moves this whole
+     * object (32 KB of comb buffers) out of .bss into .data, i.e. into FLASH.
+     * Reset() sets the real starting value. */
+    float duck_gain = 0.0f;
+
+    void ClearTank()
+    {
+        for(int i = 0; i < C0; ++i) comb0[i] = 0.0f;
+        for(int i = 0; i < C1; ++i) comb1[i] = 0.0f;
+        for(int i = 0; i < C2; ++i) comb2[i] = 0.0f;
+        for(int i = 0; i < C3; ++i) comb3[i] = 0.0f;
+        for(int i = 0; i < A0; ++i) ap0[i] = 0.0f;
+        for(int i = 0; i < A1; ++i) ap1[i] = 0.0f;
+        ci0 = ci1 = ci2 = ci3 = ai0 = ai1 = 0;
+        lp0 = lp1 = lp2 = lp3 = 0.0f;
+    }
 
     void Reset()
     {
-        envelope = 0.0f;
-        gain = 1.0f;
+        ClearTank();
+        send_hp_state = 0.0f;
+        duck_gain = 1.0f;
     }
 
-    float Process(float input, float amount)
+    /*
+     * Called from the kick Note-On. The tail must not run into the next hit,
+     * so the tank is genuinely emptied rather than just turned down. Zeroing
+     * the buffers is inaudible here precisely because the gain goes to zero
+     * in the same instant; it then blooms back up as the new kick feeds it.
+     *
+     * send_hp_state is deliberately left alone - resetting it would step the
+     * high-pass and inject a transient into the fresh send.
+     */
+    void Trigger()
+    {
+        ClearTank();
+        duck_gain = 0.0f;
+    }
+
+    static float Comb(float in, float* buf, int size, int& idx, float& store)
+    {
+        float out = buf[idx];
+        /* Damped feedback: a bare comb rings metallic on a percussive send. */
+        store = out * (1.0f - REVERB_DAMPING) + store * REVERB_DAMPING;
+        buf[idx] = in + store * REVERB_FEEDBACK;
+        if(++idx >= size)
+            idx = 0;
+        return out;
+    }
+
+    static float Allpass(float in, float* buf, int size, int& idx)
+    {
+        float buffered = buf[idx];
+        float out = -in + buffered;
+        buf[idx] = in + buffered * 0.5f;
+        if(++idx >= size)
+            idx = 0;
+        return out;
+    }
+
+    float Process(float dry, float amount)
     {
         if(amount <= 0.001f)
         {
-            envelope = 0.0f;
-            gain = 1.0f;
-            return input;
+            /* Track the input so re-enabling does not thump. */
+            send_hp_state = dry;
+            duck_gain = 1.0f;
+            return dry;
         }
 
-        /* Harder as the dial rises: 0.85 down to 0.18, 1:1 up to 8:1. */
-        float threshold = 0.85f - amount * 0.67f;
-        float ratio = 1.0f + amount * 7.0f;
+        /* 250 Hz high-pass on the send only. */
+        send_hp_state =
+            (1.0f - REVERB_SEND_HP_POLE_A) * dry +
+            REVERB_SEND_HP_POLE_A * send_hp_state;
 
-        float detector = fabsf(input);
+        float send = (dry - send_hp_state) * REVERB_SEND_LEVEL;
 
-        /* 2 ms attack, ~120 ms release at 48 kHz. */
-        float alpha = detector > envelope ? 0.010362f : 0.000173f;
-        envelope += (detector - envelope) * alpha;
+        float wet =
+            Comb(send, comb0, C0, ci0, lp0) +
+            Comb(send, comb1, C1, ci1, lp1) +
+            Comb(send, comb2, C2, ci2, lp2) +
+            Comb(send, comb3, C3, ci3, lp3);
 
-        float target = 1.0f;
-        if(envelope > threshold && envelope > 0.0001f)
+        wet *= 0.25f;
+
+        wet = Allpass(wet, ap0, A0, ai0);
+        wet = Allpass(wet, ap1, A1, ai1);
+
+        /* Duck is set by Trigger() on each kick and recovers from there. */
+        duck_gain += (1.0f - duck_gain) * REVERB_DUCK_RECOVER_A;
+        if(duck_gain > 1.0f)
+            duck_gain = 1.0f;
+
+        if(!(wet == wet))
         {
-            float compressed =
-                threshold + (envelope - threshold) / ratio;
-            target = compressed / envelope;
+            Reset();
+            return dry;
         }
 
-        /* Smooth the gain itself so fast material cannot modulate it. */
-        gain += (target - gain) * (target < gain ? 0.010362f : 0.000173f);
-
-        /* Make-up keeps the dial from simply turning the kick down. */
-        float makeup = 1.0f + amount * 0.85f;
-
-        return input * gain * makeup;
+        return dry + wet * REVERB_RETURN_LEVEL * duck_gain * amount;
     }
 };
 
-static KickCompressor kick_compressor;
-
-
-/*
- * Brickwall-ish limiter (CC59). Deliberately simple: a fast-attack gain
- * reduction onto a fixed 0.95 ceiling, sitting before the output ceiling
- * so it catches peaks rather than letting them saturate.
- */
-struct KickLimiter
-{
-    float gain = 1.0f;
-
-    void Reset() { gain = 1.0f; }
-
-    float Process(float input, bool enabled)
-    {
-        if(!enabled)
-        {
-            gain = 1.0f;
-            return input;
-        }
-
-        constexpr float ceiling = 0.95f;
-
-        float magnitude = fabsf(input) * gain;
-        float target = 1.0f;
-        if(magnitude > ceiling)
-            target = gain * (ceiling / magnitude);
-
-        /* Instant clamp down, 50 ms recovery. */
-        gain += (target - gain) * (target < gain ? 1.0f : 0.000416f);
-
-        if(gain > 1.0f)
-            gain = 1.0f;
-
-        return input * gain;
-    }
-};
-
-static KickLimiter kick_limiter;
+static KickSidechainReverb kick_reverb;
 
 
 /*
@@ -8499,7 +8616,7 @@ struct MacroBpfBank
     {
         float added = 0.0f;
         constexpr float layer_smooth_a = 0.99135701f;
-        uint8_t count = macro_bpf_layer_count;
+        uint8_t count = macro_bpf_layer_count_latched;
 
         float count_compensation =
             count >= 3 ? 0.80f : (count == 2 ? 0.89f : 1.0f);
@@ -13101,6 +13218,10 @@ static bool HandleSixMacroCC(
             SetMacroPump(v);
             return true;
 
+        case CC_MACRO_FX_REVERB:
+            param_reverb_amount = v * REVERB_AMOUNT_MAX;
+            return true;
+
 
         /* ====================================================
            K2 — ABSOLUTE DECAY + ABSOLUTE REVERSE STATE
@@ -13327,13 +13448,11 @@ static bool HandleSixMacroCC(
             param_sub_gain = v * PARAM_SUB_GAIN_MAX;
             return true;
 
-        case CC_MIX_COMPRESSOR:
-            param_comp_amount = v;
+        case CC_MIX_PUNCH_GAIN:
+            param_punch_gain = v * PARAM_PUNCH_GAIN_MAX;
             return true;
 
-        case CC_MIX_LIMITER:
-            param_limiter_on = value >= 64;
-            return true;
+
 
         case CC_PUMP_STATE:
         {
@@ -14054,6 +14173,11 @@ static void AudioCallback(
         /*
          * ADDED layers only.
          */
+        /* Latch the BPF layer count for this hit; see the declaration. */
+        macro_bpf_layer_count_latched = macro_bpf_layer_count;
+
+        kick_reverb.Trigger();
+
         macro_tail_delay_envelope.Trigger();
         macro_whole_kick_reverse.Trigger();
         macro_character_processor.Trigger();
@@ -14984,7 +15108,7 @@ static void AudioCallback(
          */
         dirty_post_gain -=
             static_cast<float>(
-                macro_bpf_layer_count
+                macro_bpf_layer_count_latched
             )
             *
             0.035f;
@@ -15022,7 +15146,7 @@ static void AudioCallback(
          * under control.
          */
         float full_processed_signal =
-            clean_knock +
+            clean_knock * param_punch_gain +
             dirty_signal +
             protected_clean_tail;
 
@@ -15034,7 +15158,7 @@ static void AudioCallback(
          * No character/BPF/dirty dynamics are audible yet.
          */
         float clean_sweep_signal =
-            transient +
+            transient * param_punch_gain +
             protected_clean_tail;
 
 
@@ -15060,16 +15184,29 @@ static void AudioCallback(
                - level-managed dirty/character return
                - protected clean sine tail lane
 
-           The dedicated protected 65..95 Hz punch is still added AFTER
-           this gain and remains the immediate first segment.
+           The separate 65..95 Hz punch oscillator would be added after this
+           gain, but ENABLE_PROTECTED_PUNCH is false, so the only punch there
+           is lives INSIDE signal. Ducking signal wholesale therefore cut the
+           attack off as K3 rose, which is the opposite of what the delay is
+           for: it should displace the BODY and leave the punch alone.
+
+           So hold the punch lane out of the duck, apply the gain to the
+           rest, and add it back.
          */
 
         float delayed_kick_bus_gain =
             macro_tail_delay_envelope.Process();
 
 
-        signal *=
-            delayed_kick_bus_gain;
+        float punch_protected =
+            transient *
+            param_punch_gain *
+            TAIL_DELAY_PUNCH_PROTECT;
+
+
+        signal =
+            (signal - punch_protected) * delayed_kick_bus_gain +
+            punch_protected;
 
 
         /* ====================================================
@@ -15366,19 +15503,12 @@ static void AudioCallback(
             KICK_OUTPUT_LINEAR_GAIN;
 
 
-        /* Mix-page dynamics, ahead of the ceiling so they catch peaks
-         * rather than leaving them to saturate. */
+        /* Sidechain reverb: last thing before the ceiling, so the tank
+         * hears the finished kick and the ceiling still bounds the sum. */
         kick_output =
-            kick_compressor.Process(
+            kick_reverb.Process(
                 kick_output,
-                param_comp_amount
-            );
-
-
-        kick_output =
-            kick_limiter.Process(
-                kick_output,
-                param_limiter_on
+                param_reverb_amount
             );
 
 
@@ -15575,8 +15705,7 @@ int main(void)
     macro_bpf_bank.Reset();
     macro_character_processor.Reset();
     character_dirty_bus_manager.Reset();
-    kick_compressor.Reset();
-    kick_limiter.Reset();
+    kick_reverb.Reset();
     character_delta_hp_state = 0.0f;
     character_delta_hp_state_2 = 0.0f;
     character_delta_hp_state_3 = 0.0f;
