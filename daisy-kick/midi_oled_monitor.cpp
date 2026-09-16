@@ -167,7 +167,6 @@ static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
 /* How much of the punch is held out of the tail-delay duck. 1 = immune. */
 static constexpr float TAIL_DELAY_PUNCH_PROTECT = 0.90f;
 
-/* Sidechain reverb tuning. HP pole = expf(-2*pi*250/48000). */
 /* 300 Hz: expf(-2*pi*300/48000). Keeps the tank off the punch. */
 static constexpr float REVERB_SEND_HP_POLE_A = 0.96149f;
 static constexpr float REVERB_SEND_LEVEL     = 0.90f;
@@ -4618,13 +4617,13 @@ static inline float SoftClip(float x)
 
 
 /*
- * SIDECHAIN REVERB (CC59) — post-mixer, last thing before the ceiling.
+ * SIDECHAIN REVERB (CC36) — post-mixer, last thing before the ceiling.
  *
  * Schroeder topology: four parallel combs into two series allpasses. The
- * SEND is high-passed at 250 Hz so only the punch and upper body excite the
+ * SEND is high-passed at 300 Hz so only the punch and upper body excite the
  * tank; letting the sub in turns a kick reverb to mud immediately.
  *
- * The return is then ducked by the dry kick's own envelope, so the tail
+ * The return is then ducked smoothly by each kick trigger, so the tail
  * blooms in the gaps rather than smearing over the attack. That is the
  * sidechain: no external key input, the kick keys itself.
  */
@@ -4639,8 +4638,9 @@ struct KickSidechainReverb
     float lp0 = 0.0f, lp1 = 0.0f, lp2 = 0.0f, lp3 = 0.0f;
 
     float send_hp_state = 0.0f;
-    /* Set by Trigger(); the tank is emptied once the gain has ramped out. */
-    bool clear_pending = false;
+    /* Triggered duck; delay memory keeps advancing through every hit. */
+    bool duck_pending = false;
+    float amount_smoothed = 0.0f;
     /* MUST default to zero: any non-zero member initialiser moves this whole
      * object (32 KB of comb buffers) out of .bss into .data, i.e. into FLASH.
      * Reset() sets the real starting value. */
@@ -4663,29 +4663,16 @@ struct KickSidechainReverb
         ClearTank();
         send_hp_state = 0.0f;
         duck_gain = 1.0f;
-        clear_pending = false;
+        duck_pending = false;
+        amount_smoothed = 0.0f;
     }
 
-    /*
-     * Called from the kick Note-On. The tail must not run into the next hit,
-     * so the tank is genuinely emptied rather than just turned down. Zeroing
-     * the buffers is inaudible here precisely because the gain goes to zero
-     * in the same instant; it then blooms back up as the new kick feeds it.
-     *
-     * send_hp_state is deliberately left alone - resetting it would step the
-     * high-pass and inject a transient into the fresh send.
-     */
+    /* A new hit ducks the continuous return. Never clear thousands of
+     * delay samples inside an 8-sample audio callback, or restart the tank
+     * at each kick. Reset() is reserved for startup and fault recovery. */
     void Trigger()
     {
-        /*
-         * Do NOT cut here. Stepping duck_gain to zero in one sample is an
-         * amplitude discontinuity in the output - an audible click, and a
-         * louder one the longer the decay, because a longer tail leaves more
-         * energy standing in the tank. Ramp out over REVERB_DUCK_CUT_MS and
-         * empty the tank only once the gain is actually at zero, where the
-         * discontinuity really is inaudible.
-         */
-        clear_pending = true;
+        duck_pending = true;
     }
 
     static float Comb(float in, float* buf, int size, int& idx, float& store)
@@ -4711,16 +4698,16 @@ struct KickSidechainReverb
 
     float Process(float dry, float amount)
     {
-        if(amount <= 0.001f)
-        {
-            /* Track the input so re-enabling does not thump. */
-            send_hp_state = dry;
-            duck_gain = 1.0f;
-            clear_pending = false;
-            return dry;
-        }
+        // Apply the existing gain to this sample, then slew toward the CC
+        // target for the next. A control edge cannot step the wet return.
+        const float return_gain = amount_smoothed * duck_gain;
+        constexpr float amount_slew = 0.001041124f; // 20 ms at 48 kHz.
+        amount_smoothed += (ClampAdded(amount, 0.0f, REVERB_AMOUNT_MAX)
+                            - amount_smoothed) * amount_slew;
+        // Run the send and delay memory even when muted: no stale tail or
+        // frozen high-pass state can reappear when the amount leaves zero.
 
-        /* 250 Hz high-pass on the send only. */
+        /* 300 Hz high-pass on the send only. */
         send_hp_state =
             (1.0f - REVERB_SEND_HP_POLE_A) * dry +
             REVERB_SEND_HP_POLE_A * send_hp_state;
@@ -4738,23 +4725,19 @@ struct KickSidechainReverb
         wet = Allpass(wet, ap0, A0, ai0);
         wet = Allpass(wet, ap1, A1, ai1);
 
-        if(clear_pending)
+        if(duck_pending)
         {
-            /* Fast but finite ramp out, then empty the tank at silence. */
             duck_gain -= REVERB_DUCK_CUT_STEP;
-
-            if(duck_gain <= 0.0f)
+            const float floor = 1.0f - REVERB_DUCK_DEPTH;
+            if(duck_gain <= floor)
             {
-                duck_gain = 0.0f;
-                ClearTank();
-                clear_pending = false;
+                duck_gain = floor;
+                duck_pending = false;
             }
         }
         else
         {
             duck_gain += (1.0f - duck_gain) * REVERB_DUCK_RECOVER_A;
-            if(duck_gain > 1.0f)
-                duck_gain = 1.0f;
         }
 
         if(!(wet == wet))
@@ -4763,7 +4746,7 @@ struct KickSidechainReverb
             return dry;
         }
 
-        return dry + wet * REVERB_RETURN_LEVEL * duck_gain * amount;
+        return dry + wet * REVERB_RETURN_LEVEL * return_gain;
     }
 };
 
@@ -5494,8 +5477,8 @@ static AddedKickMasterEnvelope added_kick_master_envelope;
 static bool PerformanceMasterFilterActive()
 {
     /*
-     * Generated-kick policy: HPF is the only kick-side DJ filter.
-     * LPF remains on the external-input bus only.
+     * Both performance filters have independent kick/external state.
+     * The HPF headroom trim remains tied to HPF activity only.
      */
     return
         PERF_DJ_HPF_ENABLED &&
@@ -7856,6 +7839,7 @@ struct AddedDjHighpass
     bool was_requested = false;
 
     AddedSmoothWet wet;
+    float onset_mix = 0.0f;
 
 
     void Reset()
@@ -7874,6 +7858,7 @@ struct AddedDjHighpass
         was_requested = false;
 
         wet.Reset();
+        onset_mix = 0.0f;
     }
 
 
@@ -7956,6 +7941,7 @@ struct AddedDjHighpass
             ic2eq = input;
 
             position_smoothed = 0.0f;
+            onset_mix = 0.0f;
 
             return input;
         }
@@ -8080,8 +8066,9 @@ struct AddedDjHighpass
          */
         if(protect_kick_onset)
         {
-            float onset_mix =
-                PerformanceFilterKickOnsetBlend();
+            float audible_mix = onset_mix;
+            onset_mix = CloseGateWithoutStepping(
+                PerformanceFilterKickOnsetBlend(), onset_mix);
 
 
             filtered =
@@ -8091,7 +8078,7 @@ struct AddedDjHighpass
                     input
                 )
                 *
-                onset_mix;
+                audible_mix;
         }
 
 
@@ -11248,7 +11235,7 @@ struct AddedPerformanceFx
 
     /*
      * Kick-side:
-     * STUTTER + LOOPER + HPF ONLY
+     * STUTTER + HPF + LPF (looper remains external-only)
      */
     AddedStutter stutter;
     AddedQuantizedLooper looper;
@@ -11612,13 +11599,9 @@ struct AddedPerformanceFx
             );
 
 
-        /*
-         * Kick performance chain deliberately ends here:
-         *
-         *     STUTTER -> HPF
-         *
-         * LOOPER, LPF, pump and delay are external-input effects only.
-         */
+        // CC34 controls the kick LPF as well as the external LPF. Their
+        // integrator state is separate, so neither output feeds the other.
+        x = macro_dj_lowpass.Process(x);
         return x;
     }
 };
@@ -15745,7 +15728,7 @@ static void AudioCallback(
 
 
         /*
-         * STUTTER / LOOPER / DJ HPF are the ONLY performance FX on the kick lane.
+         * STUTTER / DJ HPF / DJ LPF process the kick lane before reverb.
          */
         kick_output =
             added_performance_fx.ProcessMaster(
