@@ -579,6 +579,50 @@ static constexpr float CHARACTER_OPEN_FADE_MS = 6.0f;
 static constexpr float PURE_SWEEP_BODY_FADE_MS = 10.0f;
 
 /*
+ * Every gate above is a function of kick_age_samples, which resets to zero
+ * on each note-on, so all of them snap straight back down at the next hit.
+ * They multiply a live bus that can still be carrying the previous hit's
+ * tail, and truncating that tail in a single sample is a click. It is
+ * inaudible only while the clean punch/sub lanes are up to mask it, and it
+ * grows with DECAY because a longer tail is still loud when the next hit
+ * cuts it off.
+ *
+ * Rising edges keep their own smoothstep shape. Falling edges are held to
+ * this fade, which completes before CHARACTER_OPEN_MS so it never eats into
+ * the window the gate exists to protect.
+ */
+static constexpr float PER_HIT_GATE_CLOSE_MS = 3.0f;
+static constexpr float PER_HIT_GATE_CLOSE_STEP =
+    1.0f /
+    (
+        PER_HIT_GATE_CLOSE_MS *
+        0.001f *
+        SAMPLE_RATE
+    );
+
+static inline float CloseGateWithoutStepping(
+    float target,
+    float& state)
+{
+    if(target >= state)
+    {
+        state = target;
+
+        return state;
+    }
+
+
+    state -= PER_HIT_GATE_CLOSE_STEP;
+
+
+    if(state < target)
+        state = target;
+
+
+    return state;
+}
+
+/*
  * END_OF_CHAIN_GAIN = 1.28.
  * 0.68 * 1.28 ~= 0.87, deliberately below the final limiter knee
  * during the pure onset so the limiter cannot manufacture a crispy
@@ -14593,16 +14637,21 @@ static void AudioCallback(
             );
 
         /* Character/dirty bus only — see CHARACTER_OPEN_MS. */
+        static float character_open_mix_state = 0.0f;
+
         float character_open_mix =
-            SmoothstepAdded(
-                Clamp01Added(
-                    (
-                        current_kick_age_ms -
-                        CHARACTER_OPEN_MS
+            CloseGateWithoutStepping(
+                SmoothstepAdded(
+                    Clamp01Added(
+                        (
+                            current_kick_age_ms -
+                            CHARACTER_OPEN_MS
+                        )
+                        /
+                        CHARACTER_OPEN_FADE_MS
                     )
-                    /
-                    CHARACTER_OPEN_FADE_MS
-                )
+                ),
+                character_open_mix_state
             );
 
 
@@ -15534,14 +15583,20 @@ static void AudioCallback(
          * Keep the pure sine onset below the limiter knee.
          * Normal output level returns with the same 20..30 ms body fade.
          */
+        static float onset_output_headroom_state =
+            PURE_SWEEP_OUTPUT_HEADROOM;
+
         float onset_output_headroom =
-            PURE_SWEEP_OUTPUT_HEADROOM +
-            (
-                1.0f -
-                PURE_SWEEP_OUTPUT_HEADROOM
-            )
-            *
-            onset_processed_mix;
+            CloseGateWithoutStepping(
+                PURE_SWEEP_OUTPUT_HEADROOM +
+                (
+                    1.0f -
+                    PURE_SWEEP_OUTPUT_HEADROOM
+                )
+                *
+                onset_processed_mix,
+                onset_output_headroom_state
+            );
 
 
         /*
