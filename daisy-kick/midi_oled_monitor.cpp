@@ -1237,6 +1237,21 @@ static constexpr uint32_t QUANT_FX_RATE_CHANGE = 4u;
 static volatile uint32_t stutter_quantized_command = QUANT_FX_NONE;
 static volatile uint32_t looper_quantized_command = QUANT_FX_NONE;
 
+/*
+ * The two stutter instances take the same command but consume it at
+ * different points: the kick's on its next kick boundary, the external
+ * one on the next sixteenth, because the external lane must still chop
+ * when no kick is playing. Separate mailboxes keep one from swallowing
+ * the other's command; PostStutterCommand keeps them in step.
+ */
+static volatile uint32_t external_stutter_quantized_command = QUANT_FX_NONE;
+
+static inline void PostStutterCommand(uint32_t command)
+{
+    stutter_quantized_command = command;
+    external_stutter_quantized_command = command;
+}
+
 
 
 /*
@@ -7013,7 +7028,7 @@ struct AddedQuantizedLooper
 
 
         /*
-         * MASTER_HISTORY_SAMPLES = 43200.
+         * LOOP_HISTORY_SAMPLES = 43200.
          */
         if(period + seam >= 43200u)
         {
@@ -11125,15 +11140,15 @@ struct AddedPerformanceFx
      */
 
     /*
-     * Shared rolling pre-FX master history.
+     * Rolling pre-FX capture for the looper, which lives on the external
+     * lane, so this holds the Digitakt return rather than the kick.
      *
-     * 43200 samples = 900 ms at 48 kHz. This replaces the old separate
-     * stutter + looper buffers (14400 + 28800 = exactly 43200 floats),
-     * so SRAM usage does not grow.
+     * 43200 samples = 900 ms at 48 kHz. The chop is a live processor and
+     * needs no capture, so the looper is the only reader.
      */
-    static constexpr uint32_t MASTER_HISTORY_SAMPLES = 43200;
-    float master_history[MASTER_HISTORY_SAMPLES];
-    uint32_t master_history_write = 0;
+    static constexpr uint32_t LOOP_HISTORY_SAMPLES = 43200;
+    float loop_history[LOOP_HISTORY_SAMPLES];
+    uint32_t loop_history_write = 0;
 
 
     void Reset()
@@ -11150,13 +11165,13 @@ struct AddedPerformanceFx
         external_macro_dj_lowpass.Reset();
 
         for(uint32_t i = 0;
-            i < MASTER_HISTORY_SAMPLES;
+            i < LOOP_HISTORY_SAMPLES;
             ++i)
         {
-            master_history[i] = 0.0f;
+            loop_history[i] = 0.0f;
         }
 
-        master_history_write = 0;
+        loop_history_write = 0;
     }
 
 
@@ -11176,9 +11191,10 @@ struct AddedPerformanceFx
     void OnSixteenth()
     {
         /*
-         * CHOP rate is clock-derived, but state changes are now tied
-         * to kick boundaries.
+         * The kick's own chop still waits for a kick boundary; everything
+         * on the external lane lands here instead.
          */
+        ServiceExternalQuantizedCommands();
     }
 
 
@@ -11243,9 +11259,30 @@ struct AddedPerformanceFx
             stutter.ApplyKickQuantizedCommand(
                 stutter_command,
                 perf_quarter_note_ms,
-                master_history_write
+                0
             );
+        }
+    }
 
+
+    /*
+     * External-lane quantization point.
+     *
+     * The external stutter and the looper both live on the Digitakt
+     * return, which has to keep working when the kick channel is silent,
+     * so they land on the clock instead of on a kick boundary.
+     */
+    void ServiceExternalQuantizedCommands()
+    {
+        uint32_t stutter_command =
+            external_stutter_quantized_command;
+
+
+        if(stutter_command !=
+           QUANT_FX_NONE)
+        {
+            external_stutter_quantized_command =
+                QUANT_FX_NONE;
 
             external_stutter.ApplyKickQuantizedCommand(
                 stutter_command,
@@ -11268,8 +11305,8 @@ struct AddedPerformanceFx
             looper.ApplyKickQuantizedCommand(
                 looper_command,
                 perf_quarter_note_ms,
-                master_history_write,
-                master_history
+                loop_history_write,
+                loop_history
             );
         }
     }
@@ -11300,40 +11337,49 @@ struct AddedPerformanceFx
             stutter.ApplyKickQuantizedCommand(
                 stutter_command,
                 perf_quarter_note_ms,
-                master_history_write
-            );
-
-
-            external_stutter.ApplyKickQuantizedCommand(
-                stutter_command,
-                perf_quarter_note_ms,
                 0
             );
         }
 
 
-        uint32_t looper_command =
-            looper_quantized_command;
+        /*
+         * With no running transport no sixteenth pulse will ever arrive,
+         * so the external lane consumes its commands here instead. That
+         * is what keeps the Digitakt chop responsive with the sequencer
+         * stopped.
+         */
+        if(!midi_running)
+        {
+            ServiceExternalQuantizedCommands();
+
+            return;
+        }
 
 
+        /*
+         * A force-disable still has to land even while the clock runs.
+         */
         if(
             (
-                looper_command &
-                0xFFu
+                (
+                    external_stutter_quantized_command &
+                    0xFFu
+                )
+                ==
+                QUANT_FX_FORCE_DISABLE
             )
-            ==
-            QUANT_FX_FORCE_DISABLE
+            ||
+            (
+                (
+                    looper_quantized_command &
+                    0xFFu
+                )
+                ==
+                QUANT_FX_FORCE_DISABLE
+            )
         )
         {
-            looper_quantized_command =
-                QUANT_FX_NONE;
-
-            looper.ApplyKickQuantizedCommand(
-                looper_command,
-                perf_quarter_note_ms,
-                master_history_write,
-                master_history
-            );
+            ServiceExternalQuantizedCommands();
         }
     }
 
@@ -11343,13 +11389,33 @@ struct AddedPerformanceFx
         /*
          * Digitakt path:
          *
-         * PUMP + DELAY remain external-only.
+         * PUMP + DELAY + LOOPER are external-only.
          * CHOP + HPF + LPF use cheap independent DSP state.
          *
-         * LOOPER remains kick-only in this memory-safe build because a
-         * genuinely isolated second looper requires another large history
-         * buffer.
+         * The looper reads a frozen capture, so while it is active
+         * (including its release fade) the writer stops completely and the
+         * captured region becomes immutable. Rolling capture resumes once
+         * the looper is fully inactive.
          */
+        if(!looper.active)
+        {
+            loop_history[
+                loop_history_write
+            ] =
+                input;
+
+
+            loop_history_write++;
+
+
+            if(loop_history_write >=
+               LOOP_HISTORY_SAMPLES)
+            {
+                loop_history_write = 0;
+            }
+        }
+
+
         float x =
             pump.Process(
                 input,
@@ -11368,6 +11434,13 @@ struct AddedPerformanceFx
             external_stutter.Process(
                 x,
                 nullptr
+            );
+
+
+        x =
+            looper.Process(
+                x,
+                loop_history
             );
 
 
@@ -11391,58 +11464,13 @@ struct AddedPerformanceFx
     float ProcessMaster(float input)
     {
         /*
-         * ====================================================
-         * SHARED HISTORY / TRUE LOOPER FREEZE
-         * ====================================================
-         *
-         * CHOP is now a LIVE non-sampling processor, so LOOPER is the
-         * only effect that needs this history memory.
-         *
-         * IMPORTANT BUG FIX:
-         *
-         * The previous "looper" kept writing new audio into the same
-         * circular history buffer it was reading as a supposedly frozen
-         * loop. Eventually the write head entered the captured region and
-         * mutated samples underneath the playback head, causing random
-         * ticks/glitches even when the seam itself was crossfaded.
-         *
-         * While LOOPER is active (including its release fade), STOP the
-         * history writer completely. The capture therefore becomes truly
-         * immutable.
-         *
-         * Once the looper is fully inactive, rolling history recording
-         * resumes automatically.
+         * The chop is a LIVE non-sampling processor, so the kick lane no
+         * longer reads the loop capture at all.
          */
-        if(!looper.active)
-        {
-            master_history[
-                master_history_write
-            ] =
-                input;
-
-
-            master_history_write++;
-
-
-            if(master_history_write >=
-               MASTER_HISTORY_SAMPLES)
-            {
-                master_history_write = 0;
-            }
-        }
-
-
         float x =
             stutter.Process(
                 input,
-                master_history
-            );
-
-
-        x =
-            looper.Process(
-                x,
-                master_history
+                nullptr
             );
 
 
@@ -11456,15 +11484,15 @@ struct AddedPerformanceFx
         /*
          * Kick performance chain deliberately ends here:
          *
-         *     STUTTER -> LOOPER -> HPF
+         *     STUTTER -> HPF
          *
-         * LPF, pump and delay are external-input effects only.
+         * LOOPER, LPF, pump and delay are external-input effects only.
          */
         return x;
     }
 };
 
-constexpr uint32_t AddedPerformanceFx::MASTER_HISTORY_SAMPLES;
+constexpr uint32_t AddedPerformanceFx::LOOP_HISTORY_SAMPLES;
 
 static AddedPerformanceFx added_performance_fx;
 static AddedProtectedPunch added_protected_punch;
@@ -12735,11 +12763,12 @@ static void ClearStutterMacro()
 {
     macro_fx_value_stutter = 0.0f;
 
-    stutter_quantized_command =
+    PostStutterCommand(
         MakeQuantFxCommand(
             QUANT_FX_DISABLE,
             0
-        );
+        )
+    );
 }
 
 
@@ -12802,11 +12831,12 @@ static void SetMacroStutterRaw(
 
     if(!now_on)
     {
-        stutter_quantized_command =
+        PostStutterCommand(
             MakeQuantFxCommand(
                 QUANT_FX_DISABLE,
                 0
-            );
+            )
+        );
 
         return;
     }
@@ -12820,23 +12850,25 @@ static void SetMacroStutterRaw(
 
     if(was_off)
     {
-        stutter_quantized_command =
+        PostStutterCommand(
             MakeQuantFxCommand(
                 QUANT_FX_ENABLE,
                 rate
-            );
+            )
+        );
     }
     else
     {
         /*
          * CC value is now an explicit rate address. If it enters a new
-         * division zone, change rate at the next kick boundary.
+         * division zone, change rate at the next quantization point.
          */
-        stutter_quantized_command =
+        PostStutterCommand(
             MakeQuantFxCommand(
                 QUANT_FX_RATE_CHANGE,
                 rate
-            );
+            )
+        );
     }
 }
 
@@ -13761,8 +13793,9 @@ static void ProcessMidiByte(uint8_t byte)
          * quantized OFF request. Force-disable is still processed inside
          * the audio callback and therefore still fades out safely.
          */
-        stutter_quantized_command =
-            QUANT_FX_FORCE_DISABLE;
+        PostStutterCommand(
+            QUANT_FX_FORCE_DISABLE
+        );
 
         looper_quantized_command =
             QUANT_FX_FORCE_DISABLE;
@@ -15776,6 +15809,7 @@ int main(void)
     macro_fx_value_delay = 0.0f;
 
     stutter_quantized_command = QUANT_FX_NONE;
+    external_stutter_quantized_command = QUANT_FX_NONE;
     looper_quantized_command = QUANT_FX_NONE;
     master_decay_retime_pending = false;
 
