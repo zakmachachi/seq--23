@@ -349,19 +349,24 @@ class SimpleSequencer {
     // held into a looping per-step modulation of that kick parameter. The
     // engine ISR only flags the step; loop() does the sending, so the kick
     // controller's MIDI queue is never re-entered from interrupt context.
+    // One lane per parameter, so repeated commits stack instead of replacing
+    // each other. Committing re-arms, so several parameters can be layered
+    // without releasing Function.
     struct KickMotionLane {
       bool active = false;
-      bool recording = false;
-      uint8_t param = 0xFF;
       uint8_t slot[NUM_STEPS];
-      bool written[NUM_STEPS];
     };
-    KickMotionLane kickLane;
+    KickMotionLane kickLanes[KickPerformance::PARAM_COUNT];
+    bool laneRecording = false;
+    uint8_t laneRecordParam = 0xFF;
+    bool laneRecordWritten[NUM_STEPS];
+    uint8_t laneRecordSlot[NUM_STEPS];
     volatile uint8_t laneStepPending = 0;
     volatile bool laneStepDirty = false;
     void serviceKickLane();
-    void commitKickLane();
-    void clearKickLane();
+    bool commitKickLane();
+    void clearKickLanes();
+    void armLaneRecording();
 
     // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
     bool slideAllHold = false;   // Function + Fill: slide every note on the active channel

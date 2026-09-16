@@ -820,22 +820,19 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       return;
     }
     // Function + step 2 on the kick page turns the gesture just recorded into
-    // a looping modulation, or clears one that is already running.
+    // a looping modulation and stacks it on whatever is already running, then
+    // re-arms so the next knob can be layered without releasing Function.
     if (isFunctionHeld() && i == 1 && kickCCPage()){
-      if (kickLane.active) clearKickLane();
-      else {
-        commitKickLane();
-        // The loop drives this parameter now, so releasing Function must not
-        // revert it back underneath.
-        if (kickLane.active) snapCommitted = true;
-      }
+      // The loops drive these parameters now, so releasing Function must not
+      // revert them back underneath.
+      if (commitKickLane()) snapCommitted = true;
       pendingToggle[i] = false;
       return;
     }
-    // Function + step 3 drops the per-step locks on this page, or the running
-    // modulation on the kick page.
+    // Function + step 3 drops the per-step locks on this page, or every
+    // running modulation on the kick page.
     if (isFunctionHeld() && i == 2 && (activeMenu == 1 || kickCCPage())){
-      if (kickCCPage()) clearKickLane();
+      if (kickCCPage()) clearKickLanes();
       else clearPageLocks(selectedChannel);
       pendingToggle[i] = false;
       return;
@@ -2208,55 +2205,77 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
 // mutation: toggle slide, toggle accent, change note length, or change note
 // value. Used for "subtle evolution" — keeps the pattern intact and just
 // nudges one note.
+void SimpleSequencer::armLaneRecording(){
+  laneRecording = true;
+  laneRecordParam = 0xFF;
+  for (uint8_t s = 0; s < NUM_STEPS; s++) laneRecordWritten[s] = false;
+}
+
 void SimpleSequencer::serviceKickLane(){
   if (!laneStepDirty) return;
   laneStepDirty = false;
   uint8_t step = laneStepPending;
   if (step >= NUM_STEPS) return;
 
-  if (kickLane.recording && kickCCPage()){
+  if (laneRecording && kickCCPage()){
     KickPerformance::Parameter p = kickPerformance.focusedParameter();
     if (KickPerformance::parameterIsLaneable(p)){
-      kickLane.param = (uint8_t)p;
-      kickLane.slot[step] = kickPerformance.parameterValue(p);
-      kickLane.written[step] = true;
+      // Reaching for a different knob starts a fresh gesture rather than
+      // splicing two parameters into one lane.
+      if ((uint8_t)p != laneRecordParam){
+        laneRecordParam = (uint8_t)p;
+        for (uint8_t s = 0; s < NUM_STEPS; s++) laneRecordWritten[s] = false;
+      }
+      laneRecordSlot[step] = kickPerformance.parameterValue(p);
+      laneRecordWritten[step] = true;
     }
   }
 
-  if (kickLane.active && KickPerformance::parameterIsLaneable(
-        (KickPerformance::Parameter)kickLane.param)){
+  // setParameterValue returns early when the value has not moved, so a stack
+  // of lanes only costs UART traffic where something actually changes.
+  for (uint8_t p = 0; p < KickPerformance::PARAM_COUNT; p++){
+    if (!kickLanes[p].active) continue;
     kickPerformance.setParameterValue(
-      (KickPerformance::Parameter)kickLane.param, kickLane.slot[step]);
+      (KickPerformance::Parameter)p, kickLanes[p].slot[step]);
   }
 }
 
-void SimpleSequencer::commitKickLane(){
+bool SimpleSequencer::commitKickLane(){
+  if (laneRecordParam >= KickPerformance::PARAM_COUNT){
+    Serial.println("LANE nothing recorded");
+    return false;
+  }
   int first = -1;
   for (uint8_t s = 0; s < NUM_STEPS; s++){
-    if (kickLane.written[s]){ first = (int)s; break; }
+    if (laneRecordWritten[s]){ first = (int)s; break; }
   }
   if (first < 0){
     Serial.println("LANE nothing recorded");
-    return;
+    return false;
   }
   // Hold the last captured value across steps the gesture never reached, so a
   // move shorter than a bar still loops as a complete shape.
-  uint8_t hold = kickLane.slot[first];
+  KickMotionLane& lane = kickLanes[laneRecordParam];
+  uint8_t hold = laneRecordSlot[first];
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t idx = (uint8_t)((first + s) % NUM_STEPS);
-    if (kickLane.written[idx]) hold = kickLane.slot[idx];
-    else kickLane.slot[idx] = hold;
+    if (laneRecordWritten[idx]) hold = laneRecordSlot[idx];
+    lane.slot[idx] = hold;
   }
-  kickLane.active = true;
-  kickLane.recording = false;
-  Serial.print("LANE on, param "); Serial.println(kickLane.param);
+  lane.active = true;
+  Serial.print("LANE on, param "); Serial.println(laneRecordParam);
+  // Re-arm so the next gesture stacks on this one instead of replacing it.
+  armLaneRecording();
+  return true;
 }
 
-void SimpleSequencer::clearKickLane(){
-  kickLane.active = false;
-  kickLane.recording = false;
-  kickLane.param = 0xFF;
-  Serial.println("LANE off");
+void SimpleSequencer::clearKickLanes(){
+  for (uint8_t p = 0; p < KickPerformance::PARAM_COUNT; p++){
+    kickLanes[p].active = false;
+  }
+  laneRecording = false;
+  laneRecordParam = 0xFF;
+  Serial.println("LANES cleared");
 }
 
 void SimpleSequencer::onFunctionPressed(){
@@ -2266,8 +2285,7 @@ void SimpleSequencer::onFunctionPressed(){
     snapKind = 2;
     // Arm motion recording: every step from here captures the focused
     // parameter until step 2 turns it into a loop, or Function is released.
-    kickLane.recording = true;
-    for (uint8_t s = 0; s < NUM_STEPS; s++) kickLane.written[s] = false;
+    armLaneRecording();
   } else if (kickMixPage()){
     kickMixer.saveTo(snapKickMix);
     snapKind = 3;
@@ -2281,7 +2299,7 @@ void SimpleSequencer::onFunctionPressed(){
 }
 
 void SimpleSequencer::onFunctionReleased(){
-  kickLane.recording = false;
+  laneRecording = false;
   if (!snapArmed){ snapKind = 0; return; }
   if (!snapCommitted){
     // restoreFrom re-sends every CC, so the Daisy follows the revert too.
