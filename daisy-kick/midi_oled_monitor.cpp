@@ -15237,18 +15237,14 @@ static void AudioCallback(
 
 
         /*
-         * Macro-BPF layers add parallel energy. Compensate LINEARLY,
-         * rather than waiting for a limiter to clip when a layer pushes
-         * the branch across a threshold.
+         * The BPF bank already compensates for its own extra parallel
+         * energy, per layer, inside MacroBpfBank::Process. Subtracting a
+         * second layer-count penalty here charged it twice, and did so
+         * against the WHOLE dirty bus rather than the bank that added the
+         * energy — so raising the layer count also turned down the Mackie
+         * and Sherman character. That is what made stacking layers sound
+         * progressively duller instead of bigger.
          */
-        dirty_post_gain -=
-            static_cast<float>(
-                macro_bpf_layer_count_latched
-            )
-            *
-            0.035f;
-
-
         if(dirty_post_gain < 0.62f)
             dirty_post_gain = 0.62f;
 
