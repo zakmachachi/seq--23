@@ -293,6 +293,8 @@ class SimpleSequencer {
     uint8_t matrixRawState[MATRIX_KEYS]; // raw last reading (0/1)
     bool matrixState[MATRIX_KEYS]; // debounced stable state (true = pressed)
     unsigned long matrixLastDebounce[MATRIX_KEYS];
+    uint8_t matrixPendingEdges[MATRIX_KEYS]; // key index, high bit set = press
+    uint8_t matrixPendingEdgeCount = 0;
 
     // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
     bool slideAllHold = false;   // Function + Fill: slide every note on the active channel

@@ -622,7 +622,9 @@ void SimpleSequencer::scanMatrixStep(){
       bool pressed = (matrixRawState[idx] == 1);
       if (pressed != matrixState[idx]){
         matrixState[idx] = pressed;
-        if (pressed) onKeyPress(r, col); else onKeyRelease(r, col);
+        if (matrixPendingEdgeCount < MATRIX_KEYS){
+          matrixPendingEdges[matrixPendingEdgeCount++] = pressed ? (uint8_t)(idx | 0x80) : idx;
+        }
       }
     }
   }
@@ -637,8 +639,20 @@ void SimpleSequencer::readButtons(){
   // full speed every loop iteration, including just after the 17ms OLED
   // I2C transfer, so no key-press goes longer than one loop iteration
   // before being seen.
+  matrixPendingEdgeCount = 0;
   for (uint8_t c = 0; c < MATRIX_COLS; c++){
     scanMatrixStep();
+  }
+
+  // Dispatch only once every column has updated matrixState. Function is on
+  // column 4 but CH3-CH6 sit on columns 3..0, so dispatching inline let a
+  // simultaneous FN+CHn press run the channel handler before Function's own
+  // column had been read, silently turning a mute into a channel select.
+  for (uint8_t e = 0; e < matrixPendingEdgeCount; e++){
+    uint8_t idx = matrixPendingEdges[e] & 0x7F;
+    uint8_t row = idx / MATRIX_COLS;
+    uint8_t col = idx % MATRIX_COLS;
+    if (matrixPendingEdges[e] & 0x80) onKeyPress(row, col); else onKeyRelease(row, col);
   }
 }
 
