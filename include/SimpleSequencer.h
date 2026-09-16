@@ -374,6 +374,7 @@ class SimpleSequencer {
     enum NotesLaneParam : uint8_t { NL_PITCH, NL_GATE, NL_VELOCITY, NL_COUNT };
     struct NotesMotionLane {
       bool active = false;
+      uint8_t base = 0; // value the gesture started from; slots offset from it
       uint8_t slot[NUM_STEPS];
     };
     NotesMotionLane notesLanes[NUM_CHANNELS][NL_COUNT];
@@ -383,7 +384,14 @@ class SimpleSequencer {
     uint8_t notesRecordSlot[NUM_STEPS];
     static int8_t notesLaneParamForPot(uint8_t pot);
     uint8_t notesLaneValue(uint8_t ch, uint8_t param) const;
-    void setNotesLaneValue(uint8_t ch, uint8_t param, uint8_t value);
+    int notesLaneOffset(uint8_t ch, uint8_t param) const;
+    // Random velocity and slide are generated once per pattern and held, the
+    // way the trigger machines bake their placements, rather than re-rolled
+    // on every note. Offsets rather than absolutes, so moving the channel
+    // velocity (or looping it) carries the whole shape with it.
+    int8_t bakedVelOffset[NUM_CHANNELS][TOTAL_STEPS];
+    bool randomSlideEnabled[NUM_CHANNELS] = {};
+    void rollBakedVelocity(uint8_t ch);
     bool commitNotesLane();
     void clearNotesLanes(uint8_t ch);
     void releaseNotesLaneForPot(uint8_t ch, uint8_t pot);

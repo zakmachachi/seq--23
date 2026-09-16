@@ -1150,6 +1150,20 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       mutateHeld = true;
       mutateNextRepeatMs = millis() + MUTATE_REPEAT_DELAY_MS;
       mutatePattern(selectedChannel);
+    } else if (pot == 3){
+      // Pot 4 button: random slide on/off. Switching on re-rolls which notes
+      // slide, the way the trigger machines re-seed, so each toggle gives a
+      // new pattern. Pot 4's turn sets how many notes are caught.
+      uint8_t ch = selectedChannel;
+      randomSlideEnabled[ch] = !randomSlideEnabled[ch];
+      if (randomSlideEnabled[ch]) rerollSlides(ch);
+      else {
+        uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+        for (uint8_t s = 0; s < NUM_STEPS; s++) stepSlide[ch][base + s] = false;
+      }
+      Serial.print("RND SLIDE CH"); Serial.print(ch+1);
+      Serial.print(randomSlideEnabled[ch] ? " ON " : " OFF ");
+      Serial.print(randomSlideProb[ch]); Serial.println("%");
     } else if (pot == 4){
       // Pot 5 button: toggle random gate length for this channel. When on,
       // every note that uses the channel default gate gets a random length
@@ -1163,6 +1177,9 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       // note that uses the channel default velocity is jittered +/-27.
       uint8_t ch = selectedChannel;
       randomVelEnabled[ch] = !randomVelEnabled[ch];
+      // Re-roll on every switch-on, so toggling gives a new shape rather than
+      // the one from last time.
+      if (randomVelEnabled[ch]) rollBakedVelocity(ch);
       Serial.print("RND VEL CH"); Serial.print(ch+1);
       Serial.println(randomVelEnabled[ch] ? " ON" : " OFF");
     }
@@ -1349,10 +1366,11 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
         break;
       }
-      case 3: { // Pot 4: Random Slide probability — re-roll slides immediately
+      case 3: { // Pot 4: how many notes random slide catches. Its button is
+                // the on/off, so turning this while off only stores the value.
         randomSlideProb[ch] = (uint8_t)constrain(
           (int)randomSlideProb[ch] + ticks, 0, 100);
-        rerollSlides(ch);
+        if (randomSlideEnabled[ch]) rerollSlides(ch);
         Serial.print("SLIDE%="); Serial.println(randomSlideProb[ch]);
         break;
       }
@@ -2243,13 +2261,21 @@ uint8_t SimpleSequencer::notesLaneValue(uint8_t ch, uint8_t param) const {
   return channelVelocity[ch];
 }
 
-void SimpleSequencer::setNotesLaneValue(uint8_t ch, uint8_t param, uint8_t value){
-  if (param == NL_PITCH){ channelPitch[ch] = value; return; }
-  if (param == NL_GATE){
-    noteLenIdx[ch] = (uint8_t)constrain((int)value, 0, (int)NOTE_LEN_COUNT - 1);
-    return;
+// How far this step's lane value sits from where the gesture started. Applied
+// at trigger time rather than written into the pattern: in generative mode
+// every step already carries a concrete pitch, gate and velocity, so writing
+// the channel default would be ignored, and writing the steps themselves
+// would compound away the pattern within a few bars.
+int SimpleSequencer::notesLaneOffset(uint8_t ch, uint8_t param) const {
+  const NotesMotionLane& lane = notesLanes[ch][param];
+  if (!lane.active) return 0;
+  return (int)lane.slot[currentStep] - (int)lane.base;
+}
+
+void SimpleSequencer::rollBakedVelocity(uint8_t ch){
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++){
+    bakedVelOffset[ch][s] = (int8_t)random(-RANDOM_VEL_RANGE, RANDOM_VEL_RANGE + 1);
   }
-  channelVelocity[ch] = value;
 }
 
 bool SimpleSequencer::commitNotesLane(){
@@ -2260,6 +2286,9 @@ bool SimpleSequencer::commitNotesLane(){
   }
   if (first < 0) return false;
   NotesMotionLane& lane = notesLanes[notesRecordCh][notesRecordParam];
+  // Where the gesture began is the zero point, so committing a loop does not
+  // itself shift the pattern.
+  lane.base = notesRecordSlot[first];
   uint8_t hold = notesRecordSlot[first];
   for (uint8_t s = 0; s < NUM_STEPS; s++){
     uint8_t idx = (uint8_t)((first + s) % NUM_STEPS);
@@ -2326,14 +2355,6 @@ void SimpleSequencer::serviceKickLane(){
           }
           notesRecordSlot[step] = notesLaneValue(selectedChannel, (uint8_t)np);
           notesRecordWritten[step] = true;
-        }
-      }
-
-      // Local values, so no MIDI leaves here and there is nothing to spread.
-      for (uint8_t c = 0; c < NUM_CHANNELS; c++){
-        for (uint8_t p = 0; p < NL_COUNT; p++){
-          if (!notesLanes[c][p].active) continue;
-          setNotesLaneValue(c, p, notesLanes[c][p].slot[step]);
         }
       }
 
@@ -2887,21 +2908,19 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   chTrigMs[ch] = millis(); // CV TRIG mode + screen-2 flash follow real triggers
   uint8_t p = pitch[ch][pIdx];
   if (p == 255) p = channelPitch[ch];
-  uint8_t note = constrain(p, 0, 127);
+  uint8_t note = (uint8_t)constrain((int)p + notesLaneOffset(ch, NL_PITCH), 0, 127);
 
   uint8_t vel = stepVelocity[ch][pIdx];
   if (vel == 255){
     vel = channelVelocity[ch];
-    // Random velocity only jitters notes that follow the channel default,
-    // leaving per-step (p-locked) velocities fixed.
+    // Random velocity is rolled once per pattern and held, so a bar keeps its
+    // shape instead of shimmering. Stored as an offset, so moving the channel
+    // velocity carries the whole shape with it. P-locked steps keep theirs.
     if (randomVelEnabled[ch]){
-      int lo = (int)vel - RANDOM_VEL_RANGE;
-      int hi = (int)vel + RANDOM_VEL_RANGE;
-      if (lo < 0) lo = 0;
-      if (hi > 127) hi = 127;
-      vel = (uint8_t)random(lo, hi + 1);
+      vel = (uint8_t)constrain((int)vel + bakedVelOffset[ch][pIdx], 0, 127);
     }
   }
+  vel = (uint8_t)constrain((int)vel + notesLaneOffset(ch, NL_VELOCITY), 0, 127);
   // Accent-all (Function + Page) forces max velocity on the active channel.
   if (accentAllHold && ch == selectedChannel) vel = 127;
   // Slide-all (Function + Fill) forces slide on the active channel.
@@ -2939,6 +2958,10 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
     // Random gate only affects notes that follow the channel default, leaving
     // per-step (p-locked) gate lengths fixed. Full 1/32..1 range.
     if (randomGateEnabled[ch]) lenIdx = (uint8_t)random(0, (int)NOTE_LEN_COUNT);
+  }
+  {
+    int shifted = (int)lenIdx + notesLaneOffset(ch, NL_GATE);
+    lenIdx = (uint8_t)constrain(shifted, 0, (int)NOTE_LEN_COUNT - 1);
   }
 
   uint8_t rIdx = stepRatchet[ch][pIdx];
