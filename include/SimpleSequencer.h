@@ -361,6 +361,32 @@ class SimpleSequencer {
     uint8_t laneRecordParam = 0xFF;
     bool laneRecordWritten[NUM_STEPS];
     uint8_t laneRecordSlot[NUM_STEPS];
+
+    // Notes-page lanes. Only the three channel defaults that playback reads
+    // back are modulatable: pitch, gate and velocity. Scale, spread and slide
+    // probability are consumed at generation time, so driving them per step
+    // would change nothing until the next regenerate.
+    //
+    // Playback writes the channel value only. The knobs themselves apply a
+    // DELTA and then offset every per-step value to match, which replayed
+    // once a step would compound away the pattern; steps carrying their own
+    // p-lock keep it and simply ignore the channel value.
+    enum NotesLaneParam : uint8_t { NL_PITCH, NL_GATE, NL_VELOCITY, NL_COUNT };
+    struct NotesMotionLane {
+      bool active = false;
+      uint8_t slot[NUM_STEPS];
+    };
+    NotesMotionLane notesLanes[NUM_CHANNELS][NL_COUNT];
+    int8_t notesRecordParam = -1;
+    uint8_t notesRecordCh = 0;
+    bool notesRecordWritten[NUM_STEPS];
+    uint8_t notesRecordSlot[NUM_STEPS];
+    static int8_t notesLaneParamForPot(uint8_t pot);
+    uint8_t notesLaneValue(uint8_t ch, uint8_t param) const;
+    void setNotesLaneValue(uint8_t ch, uint8_t param, uint8_t value);
+    bool commitNotesLane();
+    void clearNotesLanes(uint8_t ch);
+    void releaseNotesLaneForPot(uint8_t ch, uint8_t pot);
     volatile uint8_t laneStepPending = 0;
     volatile bool laneStepDirty = false;
     uint8_t laneSendStep = 0;

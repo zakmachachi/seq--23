@@ -829,11 +829,20 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       pendingToggle[i] = false;
       return;
     }
+    // Same gesture on the Notes page, for pitch, gate and velocity.
+    if (isFunctionHeld() && i == 1 && activeMenu == 1){
+      if (commitNotesLane()) snapCommitted = true;
+      pendingToggle[i] = false;
+      return;
+    }
     // Function + step 3 drops the per-step locks on this page, or every
     // running modulation on the kick page.
     if (isFunctionHeld() && i == 2 && (activeMenu == 1 || kickCCPage())){
       if (kickCCPage()) clearKickLanes();
-      else clearPageLocks(selectedChannel);
+      else {
+        clearPageLocks(selectedChannel);
+        clearNotesLanes(selectedChannel);
+      }
       pendingToggle[i] = false;
       return;
     }
@@ -1196,6 +1205,12 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // Track which pot was last actually rotated so screen 2 can focus on it.
   lastTouchedPot  = (int8_t)pot;
   lastPotTouchMs  = millis();
+
+  // Grabbing a knob takes its parameter back from a running loop, so a
+  // modulation can always be escaped by the control that recorded it.
+  if (activeMenu == 1 && !isFunctionHeld()){
+    releaseNotesLaneForPot(selectedChannel, pot);
+  }
 
   // --- GLOBAL MODIFIER: Function + Pot 2 = BPM (anywhere except the Analog
   // menu, where FN + pots is the CV mode/param editor). Pot 1 gave this up so
@@ -2208,7 +2223,69 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
 void SimpleSequencer::armLaneRecording(){
   laneRecording = true;
   laneRecordParam = 0xFF;
-  for (uint8_t s = 0; s < NUM_STEPS; s++) laneRecordWritten[s] = false;
+  notesRecordParam = -1;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    laneRecordWritten[s] = false;
+    notesRecordWritten[s] = false;
+  }
+}
+
+int8_t SimpleSequencer::notesLaneParamForPot(uint8_t pot){
+  if (pot == 0) return NL_PITCH;
+  if (pot == 4) return NL_GATE;
+  if (pot == 5) return NL_VELOCITY;
+  return -1; // Scale, spread and slide probability only act on regenerate.
+}
+
+uint8_t SimpleSequencer::notesLaneValue(uint8_t ch, uint8_t param) const {
+  if (param == NL_PITCH) return channelPitch[ch];
+  if (param == NL_GATE) return noteLenIdx[ch];
+  return channelVelocity[ch];
+}
+
+void SimpleSequencer::setNotesLaneValue(uint8_t ch, uint8_t param, uint8_t value){
+  if (param == NL_PITCH){ channelPitch[ch] = value; return; }
+  if (param == NL_GATE){
+    noteLenIdx[ch] = (uint8_t)constrain((int)value, 0, (int)NOTE_LEN_COUNT - 1);
+    return;
+  }
+  channelVelocity[ch] = value;
+}
+
+bool SimpleSequencer::commitNotesLane(){
+  if (notesRecordParam < 0 || notesRecordParam >= NL_COUNT) return false;
+  int first = -1;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    if (notesRecordWritten[s]){ first = (int)s; break; }
+  }
+  if (first < 0) return false;
+  NotesMotionLane& lane = notesLanes[notesRecordCh][notesRecordParam];
+  uint8_t hold = notesRecordSlot[first];
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    uint8_t idx = (uint8_t)((first + s) % NUM_STEPS);
+    if (notesRecordWritten[idx]) hold = notesRecordSlot[idx];
+    lane.slot[idx] = hold;
+  }
+  lane.active = true;
+  Serial.print("NOTES LANE on CH"); Serial.print(notesRecordCh + 1);
+  Serial.print(" param "); Serial.println(notesRecordParam);
+  notesRecordParam = -1;
+  for (uint8_t s = 0; s < NUM_STEPS; s++) notesRecordWritten[s] = false;
+  return true;
+}
+
+void SimpleSequencer::clearNotesLanes(uint8_t ch){
+  for (uint8_t p = 0; p < NL_COUNT; p++) notesLanes[ch][p].active = false;
+  notesRecordParam = -1;
+  Serial.print("NOTES LANES cleared CH"); Serial.println(ch + 1);
+}
+
+// Grabbing the knob takes its parameter back, same rule as the kick page.
+void SimpleSequencer::releaseNotesLaneForPot(uint8_t ch, uint8_t pot){
+  int8_t p = notesLaneParamForPot(pot);
+  if (p < 0 || !notesLanes[ch][p].active) return;
+  notesLanes[ch][p].active = false;
+  Serial.print("NOTES LANE released by knob, param "); Serial.println((int)p);
 }
 
 void SimpleSequencer::serviceKickLane(){
@@ -2238,6 +2315,28 @@ void SimpleSequencer::serviceKickLane(){
           laneRecordWritten[step] = true;
         }
       }
+      if (laneRecording && activeMenu == 1 && lastTouchedPot >= 0){
+        int8_t np = notesLaneParamForPot((uint8_t)lastTouchedPot);
+        if (np >= 0){
+          // Reaching for a different knob starts a fresh gesture.
+          if (np != notesRecordParam || notesRecordCh != selectedChannel){
+            notesRecordParam = np;
+            notesRecordCh = selectedChannel;
+            for (uint8_t s = 0; s < NUM_STEPS; s++) notesRecordWritten[s] = false;
+          }
+          notesRecordSlot[step] = notesLaneValue(selectedChannel, (uint8_t)np);
+          notesRecordWritten[step] = true;
+        }
+      }
+
+      // Local values, so no MIDI leaves here and there is nothing to spread.
+      for (uint8_t c = 0; c < NUM_CHANNELS; c++){
+        for (uint8_t p = 0; p < NL_COUNT; p++){
+          if (!notesLanes[c][p].active) continue;
+          setNotesLaneValue(c, p, notesLanes[c][p].slot[step]);
+        }
+      }
+
       laneSendStep = step;
       laneSendCursor = 0; // begin emitting this step's values
     }
@@ -4824,28 +4923,60 @@ void SimpleSequencer::drawOverview(){
       uint8_t level = kickBpfRandom[ch] % KICK_BPF_RANDOM_LEVELS;
       uint8_t count = ks.bpfLayerCount & 3;
 
-      display2.setTextSize(1);
-      display2.setCursor(2, 1);
-      display2.print("KICK BPF");
-      display2.setCursor(56, 1);
-      display2.print("RND "); display2.print(RND_NAMES[level]);
-      display2.setCursor(110, 1);
-      display2.print("L"); display2.print(count);
-      // Brief outline so a press that lands on OFF still reads as a press.
-      if (now < bpfRandomFocusEndMs) display2.drawRect(54, 0, 50, 10, SH110X_WHITE);
+      const int base = 50, top = 14;
+      // Value 0..127 maps linearly to x because the Daisy's 140 Hz..3.2 kHz
+      // span is logarithmic, so the axis is already log and a constant-Q
+      // band is a symmetric bell on it.
+      auto bandX = [](uint8_t v){ return 8.0f + (float)v * 112.0f / 127.0f; };
 
-      // One peak per layer across the 140 Hz..3.2 kHz span the Daisy maps
-      // CC44-46 onto. Filled peaks are sounding; outlined ones are dialled in
-      // but sit above the current layer count.
-      const int base = 50, apexOn = 14, apexOff = 30;
-      display2.drawFastHLine(2, base, 124, SH110X_WHITE);
+      display2.setTextSize(1);
+      display2.setCursor(2, 0);
+      display2.print("KICK");
+      display2.setCursor(34, 0);
+      display2.print("RND "); display2.print(RND_NAMES[level]);
+      // Brief invert so a press that lands on OFF still reads as a press.
+      if (now < bpfRandomFocusEndMs){
+        display2.fillRect(32, -1, 58, 10, SH110X_INVERSE);
+      }
+      // Layer pips: filled = sounding, hollow = dialled but above the count.
       for (uint8_t i = 0; i < 3; i++){
-        int x = 8 + (int)ks.bpfFrequencyValue[i] * 112 / 127;
-        bool on = (i < count);
-        int half = on ? 10 : 7;
-        int apex = on ? apexOn : apexOff;
-        if (on) display2.fillTriangle(x - half, base, x + half, base, x, apex, SH110X_WHITE);
-        else    display2.drawTriangle(x - half, base, x + half, base, x, apex, SH110X_WHITE);
+        int px = 100 + i * 9;
+        if (i < count) display2.fillRect(px, 2, 6, 6, SH110X_WHITE);
+        else           display2.drawRect(px, 2, 6, 6, SH110X_WHITE);
+      }
+      display2.drawFastHLine(0, 10, 128, SH110X_WHITE);
+
+      // Summed response of the sounding layers, drawn as a filled spectrum.
+      // A Lorentzian is both cheap and the right shape for a resonant band
+      // on a log axis.
+      for (int x = 2; x < 126; x++){
+        float sum = 0.0f;
+        for (uint8_t i = 0; i < count && i < 3; i++){
+          float d = ((float)x - bandX(ks.bpfFrequencyValue[i])) / 11.0f;
+          sum += 1.0f / (1.0f + d * d);
+        }
+        if (sum > 1.0f) sum = 1.0f;
+        int h = (int)(sum * (float)(base - top) + 0.5f);
+        if (h > 0) display2.drawFastVLine(x, base - h, h, SH110X_WHITE);
+      }
+
+      // Dialled but not sounding: dotted, shorter, so you can see where the
+      // layer will come in when the count rises.
+      for (uint8_t i = count; i < 3; i++){
+        float cx = bandX(ks.bpfFrequencyValue[i]);
+        for (int x = 2; x < 126; x += 2){
+          float d = ((float)x - cx) / 11.0f;
+          float r = 1.0f / (1.0f + d * d);
+          if (r < 0.08f) continue;
+          display2.drawPixel(x, base - (int)(r * (base - top) * 0.55f), SH110X_WHITE);
+        }
+      }
+
+      display2.drawFastHLine(2, base, 124, SH110X_WHITE);
+      // Decade marks at 200 Hz, 500 Hz, 1 k and 2 k on the same log mapping.
+      static const uint8_t TICK_V[4] = {14, 52, 80, 108};
+      for (uint8_t t = 0; t < 4; t++){
+        display2.drawFastVLine((int)bandX(TICK_V[t]), base + 1, 2, SH110X_WHITE);
       }
     } else {
       drawMachineIcon(display2, 64, 12, m);
