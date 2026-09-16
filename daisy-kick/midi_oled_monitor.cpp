@@ -8677,8 +8677,19 @@ struct MacroBpfBank
         constexpr float layer_smooth_a = 0.99135701f;
         uint8_t count = macro_bpf_layer_count_latched;
 
+        /*
+         * Compensation for the parallel energy each extra layer adds. This
+         * is the ONLY layer-count attenuation left: the dirty bus used to
+         * subtract a second one, which also dimmed Mackie and Sherman even
+         * though they had gained no energy.
+         *
+         * Carrying that alone means it has to be enough on its own. With
+         * the old, weaker values a long decay feeding two or three layers
+         * could run away, and one non-finite sample poisons every filter
+         * downstream for good.
+         */
         float count_compensation =
-            count >= 3 ? 0.80f : (count == 2 ? 0.89f : 1.0f);
+            count >= 3 ? 0.68f : (count == 2 ? 0.82f : 1.0f);
 
         float source = SoftClip(input * 1.80f);
 
@@ -8705,7 +8716,12 @@ struct MacroBpfBank
                 layer_tilt[i];
         }
 
-        return added;
+        /*
+         * Sits far above any musical level, so it never colours the sound.
+         * It exists only so a runaway cannot climb to infinity and take the
+         * rest of the chain with it.
+         */
+        return ClampAdded(added, -4.0f, 4.0f);
     }
 };
 
@@ -15647,6 +15663,30 @@ static void AudioCallback(
                 kick_output,
                 param_reverb_amount
             );
+
+
+        /*
+         * LAST-RESORT NON-FINITE GUARD.
+         *
+         * A NaN or an infinity does not fade: it is stored by the next
+         * filter it reaches and every later sample multiplies against it,
+         * so the voice stays silent until the board is power-cycled. That
+         * presents as the engine dying rather than glitching, which is the
+         * worst possible failure on stage.
+         *
+         * The stages above are bounded, so reaching this should be
+         * impossible. If it ever does, mute this sample and reset the
+         * state that can hold one, turning a dead engine into a blip.
+         */
+        if(!(kick_output == kick_output) ||
+           fabsf(kick_output) > 1000.0f)
+        {
+            kick_output = 0.0f;
+
+            macro_bpf_bank.Reset();
+            macro_character_processor.Reset();
+            character_dirty_bus_manager.Reset();
+        }
 
 
         kick_output =
