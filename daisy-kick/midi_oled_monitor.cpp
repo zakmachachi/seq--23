@@ -1276,6 +1276,15 @@ static volatile bool reverse_disable_pending = false;
 static volatile float macro_tail_delay = 0.0f;
 static bool tail_delay_enabled = false;
 
+/*
+ * Beat-quantized requests. The control loop records what was asked for and
+ * the audio thread applies it on the next quarter-note pulse, so the tail
+ * delay and the K1 reset land on the beat instead of wherever the button
+ * happened to be pressed. -1 means nothing is waiting.
+ */
+static volatile int8_t tail_delay_pending_state = -1;
+static volatile bool fx_reset_pending = false;
+
 
 /* Macro 4: additive BPF layer bank. */
 static volatile uint8_t macro_bpf_layer_count = 0;
@@ -12997,6 +13006,15 @@ static void ClearAllK1FxExceptPump()
 }
 
 
+static void RequestClearAllK1FxExceptPump()
+{
+    if(midi_running)
+        fx_reset_pending = true;
+    else
+        ClearAllK1FxExceptPump();
+}
+
+
 /*
  * ============================================================
  * EMERGENCY B1 + B3 REBOOT
@@ -13104,7 +13122,7 @@ static void ServiceMacroFxButtonHold()
     if(now - macro_fx_button_down_time >=
        MACRO_FX_LONG_PRESS_MS)
     {
-        ClearAllK1FxExceptPump();
+        RequestClearAllK1FxExceptPump();
 
         macro_fx_long_press_fired = true;
 
@@ -13287,8 +13305,18 @@ static bool HandleSixMacroCC(
 
         case CC_TAIL_DELAY_STATE:
         {
-            tail_delay_enabled =
+            bool wanted =
                 value >= 64;
+
+
+            /*
+             * With no transport there is no beat to wait for, so honour the
+             * button immediately rather than letting it feel dead.
+             */
+            if(midi_running)
+                tail_delay_pending_state = wanted ? 1 : 0;
+            else
+                tail_delay_enabled = wanted;
 
             return true;
         }
@@ -13488,7 +13516,7 @@ static bool HandleSixMacroCC(
                 if(was_long)
                 {
                     if(!macro_fx_long_press_fired)
-                        ClearAllK1FxExceptPump();
+                        RequestClearAllK1FxExceptPump();
                 }
                 else
                 {
@@ -13741,6 +13769,28 @@ static void ProcessMidiByte(uint8_t byte)
 
         macro_fx_value_stutter = 0.0f;
         macro_fx_value_looper = 0.0f;
+
+
+        /*
+         * No further quarter pulses will arrive to land a beat-quantized
+         * request on, so honour what was waiting instead of swallowing it.
+         */
+        if(tail_delay_pending_state >= 0)
+        {
+            tail_delay_enabled =
+                tail_delay_pending_state > 0;
+
+            tail_delay_pending_state = -1;
+        }
+
+
+        if(fx_reset_pending)
+        {
+            fx_reset_pending = false;
+
+            ClearAllK1FxExceptPump();
+        }
+
 
         hw.SetLed(false);
 
@@ -14323,6 +14373,24 @@ static void AudioCallback(
     {
         perf_quarter_pending =
             false;
+
+
+        if(tail_delay_pending_state >= 0)
+        {
+            tail_delay_enabled =
+                tail_delay_pending_state > 0;
+
+            tail_delay_pending_state = -1;
+        }
+
+
+        if(fx_reset_pending)
+        {
+            fx_reset_pending = false;
+
+            ClearAllK1FxExceptPump();
+        }
+
 
         added_performance_fx.OnQuarter();
     }

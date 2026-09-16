@@ -17,6 +17,8 @@ All performance CCs use MIDI **channel 15** (status `0xBE`).
 
 BPF count 0 stages L1; counts 1, 2, 3 edit L1, L2, L3 respectively. Changing count sends no frequency. Changing character model sends no amount. Pump and tail enable buttons retain their amounts. REV is a plain 0..127 amount displayed as a percentage, OFF at zero. B1's reset preserves pump amount/enable and all K2–K6 state. Its OLED2 overlay lasts 700 ms.
 
+While the transport is running, TAIL ENABLE and B1's reset are applied by the Daisy on the next quarter-note pulse rather than on receipt, so both land on the beat. With the transport stopped there is no pulse to wait for and both apply immediately; a STOP arriving with either still pending applies it there and then rather than swallowing it. The controller's display and CC output are unchanged — the deferral happens entirely on the Daisy, which already tracks MIDI clock.
+
 One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Saving the patch stores all performance and mix values in EEPROM; boot restores them and re-sends every CC through the same pending mechanism, since the Daisy has no persistence. Without a saved patch these deterministic defaults stand. There are no CC100/101–105 commands or shared CC20–25 controls.
 
 ## Repeat sessions
