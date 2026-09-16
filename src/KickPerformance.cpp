@@ -67,6 +67,19 @@ uint8_t& KickPerformance::position(Parameter p){
 const uint8_t& KickPerformance::position(Parameter p) const {
   return const_cast<KickPerformance*>(this)->position(p);
 }
+KickPerformance::Parameter KickPerformance::focusedParameter() const {
+  return assignment(focus_.knob);
+}
+uint8_t KickPerformance::parameterValue(Parameter p) const { return position(p); }
+void KickPerformance::setParameterValue(Parameter p, uint8_t value){
+  if (!parameterIsLaneable(p)) return;
+  if (value > 127) value = 127;
+  if (position(p) == value) return;
+  position(p) = value;
+  queue(PARAM_CC[p], value);
+  flushMidi();
+  dirty_ = true;
+}
 uint8_t KickPerformance::outputValue(Parameter p) const {
   if (p == STUT) return state_.stutter.on ? STUT_VALUES[state_.stutter.division] : 0;
   if (p == LOOP) return state_.looper.on ? LOOP_VALUES[state_.looper.division] : 0;

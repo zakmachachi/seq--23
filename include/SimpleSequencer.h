@@ -337,6 +337,24 @@ class SimpleSequencer {
     void onFunctionReleased();
     void clearPageLocks(uint8_t ch);
 
+    // Function + step 2 turns the knob gesture recorded while Function was
+    // held into a looping per-step modulation of that kick parameter. The
+    // engine ISR only flags the step; loop() does the sending, so the kick
+    // controller's MIDI queue is never re-entered from interrupt context.
+    struct KickMotionLane {
+      bool active = false;
+      bool recording = false;
+      uint8_t param = 0xFF;
+      uint8_t slot[NUM_STEPS];
+      bool written[NUM_STEPS];
+    };
+    KickMotionLane kickLane;
+    volatile uint8_t laneStepPending = 0;
+    volatile bool laneStepDirty = false;
+    void serviceKickLane();
+    void commitKickLane();
+    void clearKickLane();
+
     // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
     bool slideAllHold = false;   // Function + Fill: slide every note on the active channel
     bool accentAllHold = false;  // Function + Page: accent every note on the active channel

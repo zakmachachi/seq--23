@@ -40,6 +40,16 @@ public:
   void render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus,
               uint32_t bpm, uint32_t now);
   const ControllerState& state() const { return state_; }
+  // Motion-lane support: read what the focused knob edits, and drive that
+  // parameter from outside so a recorded gesture can be replayed. STUT and
+  // LOOP are excluded because their value is a position within a repeat
+  // session rather than a plain amount.
+  Parameter focusedParameter() const;
+  uint8_t parameterValue(Parameter parameter) const;
+  static bool parameterIsLaneable(Parameter parameter){
+    return parameter != STUT && parameter != LOOP && parameter < PARAM_COUNT;
+  }
+  void setParameterValue(Parameter parameter, uint8_t value);
   // ControllerState is a flat POD, so the patch persists it as-is instead of
   // reaching into the controller.
   void saveTo(ControllerState& out) const;

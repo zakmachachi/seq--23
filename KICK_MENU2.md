@@ -23,6 +23,12 @@ While the transport is running, TAIL ENABLE and B1's reset are applied by the Da
 
 One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Saving the patch stores all performance and mix values in EEPROM; boot restores them and re-sends every CC through the same pending mechanism, since the Daisy has no persistence. Without a saved patch these deterministic defaults stand. There are no CC100/101–105 commands or shared CC20–25 controls.
 
+## Motion lane
+
+Holding Function makes knob edits on this page provisional: releasing it restores every value through the same snapshot the patch uses, which re-sends all CCs. Function + step 1 commits instead. While Function is held the focused parameter is sampled once per sequencer step; Function + step 2 turns that recording into a loop that keeps driving the parameter one value per step until Function + step 2 or step 3 clears it. Steps the gesture never reached hold the previous captured value, so a move shorter than a bar still loops as a complete shape.
+
+STUT and LOOP cannot be driven this way. Their CC is a position inside a repeat session rather than a plain amount, so replaying values into it would desync the session from the Daisy's ladder. Every other parameter on the page is available. Playback runs from the foreground loop rather than the engine interrupt, so a value lands within a loop pass of its step rather than exactly on it — inaudible on a swept parameter, which is all this can address.
+
 ## Repeat sessions
 
 STUT and LOOP keep virtual pot positions separately from canonical MIDI rate values. Positions 0–3 are OFF. The next accepted movement into ON starts a session. The two repeats no longer share a ladder or a starting rule.
