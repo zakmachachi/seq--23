@@ -189,6 +189,9 @@ static constexpr float REVERB_DAMPING        = 0.26f;
  */
 static constexpr float REVERB_DUCK_DEPTH     = 0.95f;
 static constexpr float REVERB_DUCK_RECOVER_A = 0.000298f;
+/* 2 ms ramp out of the duck: fast enough to still read as an instant cut,
+ * slow enough that it is not a single-sample step. */
+static constexpr float REVERB_DUCK_CUT_STEP  = 1.0f / (0.002f * SAMPLE_RATE);
 
 
 /*
@@ -886,10 +889,21 @@ static bool PSY_PHASE_LOCK_EVERY_HIT = true;
 static constexpr float RATCHET_PHASE_BRIDGE_MS = 3.5f;
 
 /*
- * The non-sub remainder from the immediately previous sample is included
- * only long enough to make the very first bridge sample value-continuous.
+ * The bridge continues only the old FUNDAMENTAL. Everything above it — the
+ * supers, and whatever the character bus was still putting out — is carried
+ * as a single residual and faded away.
+ *
+ * At 0.65 ms that fade was itself a transient, around 1.5 kHz. It went
+ * unnoticed while the residual was tiny, but decay decides how loud the
+ * previous hit still is when the next one lands: wind decay up and
+ * overlapping notes tick, because a large value is being removed in well
+ * under a millisecond.
+ *
+ * Reaching -60 dB at 3 ms puts the fade below the audible click range while
+ * still finishing inside RATCHET_PHASE_BRIDGE_MS, so the old remainder is
+ * gone by the time the crossfade hands over and cannot smear the new attack.
  */
-static constexpr float RATCHET_RESIDUAL_DECAY_MS = 0.65f;
+static constexpr float RATCHET_RESIDUAL_DECAY_MS = 3.0f;
 
 
 /* ============================================================
@@ -4625,6 +4639,8 @@ struct KickSidechainReverb
     float lp0 = 0.0f, lp1 = 0.0f, lp2 = 0.0f, lp3 = 0.0f;
 
     float send_hp_state = 0.0f;
+    /* Set by Trigger(); the tank is emptied once the gain has ramped out. */
+    bool clear_pending = false;
     /* MUST default to zero: any non-zero member initialiser moves this whole
      * object (32 KB of comb buffers) out of .bss into .data, i.e. into FLASH.
      * Reset() sets the real starting value. */
@@ -4647,6 +4663,7 @@ struct KickSidechainReverb
         ClearTank();
         send_hp_state = 0.0f;
         duck_gain = 1.0f;
+        clear_pending = false;
     }
 
     /*
@@ -4660,8 +4677,15 @@ struct KickSidechainReverb
      */
     void Trigger()
     {
-        ClearTank();
-        duck_gain = 0.0f;
+        /*
+         * Do NOT cut here. Stepping duck_gain to zero in one sample is an
+         * amplitude discontinuity in the output - an audible click, and a
+         * louder one the longer the decay, because a longer tail leaves more
+         * energy standing in the tank. Ramp out over REVERB_DUCK_CUT_MS and
+         * empty the tank only once the gain is actually at zero, where the
+         * discontinuity really is inaudible.
+         */
+        clear_pending = true;
     }
 
     static float Comb(float in, float* buf, int size, int& idx, float& store)
@@ -4692,6 +4716,7 @@ struct KickSidechainReverb
             /* Track the input so re-enabling does not thump. */
             send_hp_state = dry;
             duck_gain = 1.0f;
+            clear_pending = false;
             return dry;
         }
 
@@ -4713,10 +4738,24 @@ struct KickSidechainReverb
         wet = Allpass(wet, ap0, A0, ai0);
         wet = Allpass(wet, ap1, A1, ai1);
 
-        /* Duck is set by Trigger() on each kick and recovers from there. */
-        duck_gain += (1.0f - duck_gain) * REVERB_DUCK_RECOVER_A;
-        if(duck_gain > 1.0f)
-            duck_gain = 1.0f;
+        if(clear_pending)
+        {
+            /* Fast but finite ramp out, then empty the tank at silence. */
+            duck_gain -= REVERB_DUCK_CUT_STEP;
+
+            if(duck_gain <= 0.0f)
+            {
+                duck_gain = 0.0f;
+                ClearTank();
+                clear_pending = false;
+            }
+        }
+        else
+        {
+            duck_gain += (1.0f - duck_gain) * REVERB_DUCK_RECOVER_A;
+            if(duck_gain > 1.0f)
+                duck_gain = 1.0f;
+        }
 
         if(!(wet == wet))
         {
