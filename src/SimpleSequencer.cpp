@@ -2296,6 +2296,11 @@ bool SimpleSequencer::commitNotesLane(){
     lane.slot[idx] = hold;
   }
   lane.active = true;
+  // Recording was destructive: these knobs transpose the notes and offset
+  // every per-step value as they turn, and they leave the channel sitting at
+  // the end of the gesture. Put the channel back as it was before Function,
+  // so the loop replays the shape instead of stacking on top of it.
+  restoreChannel(snapBack);
   Serial.print("NOTES LANE on CH"); Serial.print(notesRecordCh + 1);
   Serial.print(" param "); Serial.println(notesRecordParam);
   notesRecordParam = -1;
@@ -2429,6 +2434,7 @@ void SimpleSequencer::onFunctionPressed(){
   } else if (activeMenu == 1){
     captureChannel(snapBack, selectedChannel);
     snapKind = 1;
+    armLaneRecording();
   } else {
     snapKind = 0;
   }
@@ -2512,7 +2518,9 @@ void SimpleSequencer::restoreChannel(ChannelSnapshot& in){
   channelVelocity[ch] = in.channelVelocity;
   noteLenIdx[ch]      = in.noteLenIdx;
   randomSlideProb[ch] = in.randomSlideProb;
-  in.valid = false;
+  // Deliberately still valid: several lanes can be committed inside one
+  // Function hold, and each needs to undo its own gesture from the same
+  // pre-Function state. The owner clears it.
 }
 
 void SimpleSequencer::mutatePattern(uint8_t ch){
