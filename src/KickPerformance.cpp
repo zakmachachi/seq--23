@@ -70,6 +70,11 @@ const uint8_t& KickPerformance::position(Parameter p) const {
 KickPerformance::Parameter KickPerformance::focusedParameter() const {
   return assignment(focus_.knob);
 }
+KickPerformance::Parameter KickPerformance::takeUserEditedParameter(){
+  Parameter p = (Parameter)userEdited_;
+  userEdited_ = PARAM_COUNT;
+  return p;
+}
 uint8_t KickPerformance::parameterValue(Parameter p) const { return position(p); }
 void KickPerformance::setParameterValue(Parameter p, uint8_t value){
   if (!parameterIsLaneable(p)) return;
@@ -276,6 +281,7 @@ void KickPerformance::adjust(uint8_t knob, int delta){
   uint8_t current = position(p);
   uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
   if (next == current) return; // No wrap and no repeated MIDI at the limits.
+  userEdited_ = (uint8_t)p; // Physical move only; lane playback must not set this.
   if (p == STUT) updateRepeat(state_.stutter,false,next);
   else if (p == LOOP) updateRepeat(state_.looper,true,next);
   else {

@@ -2212,6 +2212,15 @@ void SimpleSequencer::armLaneRecording(){
 }
 
 void SimpleSequencer::serviceKickLane(){
+  // Grabbing a knob takes that parameter back from its loop. Without this a
+  // loop that reached a destructive value could not be escaped by the control
+  // that set it, because the loop simply overwrote the knob every step.
+  KickPerformance::Parameter edited = kickPerformance.takeUserEditedParameter();
+  if (edited < KickPerformance::PARAM_COUNT && kickLanes[edited].active){
+    kickLanes[edited].active = false;
+    Serial.print("LANE released by knob, param "); Serial.println((int)edited);
+  }
+
   if (!laneStepDirty) return;
   laneStepDirty = false;
   uint8_t step = laneStepPending;

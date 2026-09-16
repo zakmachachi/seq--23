@@ -45,6 +45,9 @@ public:
   // LOOP are excluded because their value is a position within a repeat
   // session rather than a plain amount.
   Parameter focusedParameter() const;
+  // Which parameter a physical knob last moved, PARAM_COUNT if none since the
+  // last call. Lets a running lane hand control back when the knob is grabbed.
+  Parameter takeUserEditedParameter();
   uint8_t parameterValue(Parameter parameter) const;
   static bool parameterIsLaneable(Parameter parameter){
     return parameter != STUT && parameter != LOOP && parameter < PARAM_COUNT;
@@ -78,6 +81,7 @@ private:
   ButtonState buttons_[6];
   FocusState focus_;
   MidiState midi_;
+  uint8_t userEdited_ = PARAM_COUNT;
   bool active_ = false, dirty_ = true, rendered_ = false;
   uint32_t lastFrameMs_ = 0, renderedBpm_ = 0;
 

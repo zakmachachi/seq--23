@@ -1304,6 +1304,14 @@ static inline void PostStutterCommand(uint32_t command)
  */
 static volatile bool master_decay_retime_pending = false;
 
+/*
+ * Raised by the audio thread when the kick output stops being a finite
+ * number. The recovery itself runs in the control loop: it clears the
+ * 43200-sample loop capture, which is far too long to sit inside an audio
+ * block.
+ */
+static volatile bool audio_panic_pending = false;
+
 
 /* Macro 2: true tail length / release scale. */
 static volatile float macro_decay = 0.50f;
@@ -8679,17 +8687,12 @@ struct MacroBpfBank
 
         /*
          * Compensation for the parallel energy each extra layer adds. This
-         * is the ONLY layer-count attenuation left: the dirty bus used to
+         * is the ONLY layer-count attenuation: the dirty bus used to
          * subtract a second one, which also dimmed Mackie and Sherman even
          * though they had gained no energy.
-         *
-         * Carrying that alone means it has to be enough on its own. With
-         * the old, weaker values a long decay feeding two or three layers
-         * could run away, and one non-finite sample poisons every filter
-         * downstream for good.
          */
         float count_compensation =
-            count >= 3 ? 0.68f : (count == 2 ? 0.82f : 1.0f);
+            count >= 3 ? 0.80f : (count == 2 ? 0.89f : 1.0f);
 
         float source = SoftClip(input * 1.80f);
 
@@ -15683,9 +15686,7 @@ static void AudioCallback(
         {
             kick_output = 0.0f;
 
-            macro_bpf_bank.Reset();
-            macro_character_processor.Reset();
-            character_dirty_bus_manager.Reset();
+            audio_panic_pending = true;
         }
 
 
@@ -15768,6 +15769,43 @@ static void AudioCallback(
 /* ============================================================
    MAIN
    ============================================================ */
+
+/*
+ * Every piece of DSP state that can hold a value across samples.
+ *
+ * Used both at startup and by the non-finite recovery, so the recovery can
+ * never miss a stage the way a hand-picked list does: a NaN parked in one
+ * untouched filter keeps poisoning the output and the engine stays dead
+ * until the board is power-cycled.
+ */
+static void ResetAudioDspState()
+{
+    character_lowpass.Reset();
+    sub_lowpass.Reset();
+    character_postfilter.Reset();
+    character_bandpass.Reset();
+
+    added_performance_fx.Reset();
+    added_protected_punch.Reset();
+    added_body_lowpass.Reset();
+    added_resonant_sweep_layer.Reset();
+    added_kick_master_envelope.Reset();
+
+    macro_tail_delay_envelope.Reset();
+    macro_bpf_bank.Reset();
+    macro_character_processor.Reset();
+    character_dirty_bus_manager.Reset();
+    kick_reverb.Reset();
+    macro_whole_kick_reverse.Reset();
+
+    character_delta_hp_state = 0.0f;
+    character_delta_hp_state_2 = 0.0f;
+    character_delta_hp_state_3 = 0.0f;
+
+    tail_env.active = false;
+    tail_env.value = 0.0f;
+}
+
 
 int main(void)
 {
@@ -15860,33 +15898,7 @@ int main(void)
     ResetKickPhases();
 
 
-    /*
-     * Reset filters.
-     */
-    character_lowpass.Reset();
-    sub_lowpass.Reset();
-    character_postfilter.Reset();
-    character_bandpass.Reset();
-
-
-    /*
-     * ADDED DSP initial state.
-     */
-    added_performance_fx.Reset();
-    added_protected_punch.Reset();
-    added_body_lowpass.Reset();
-    added_resonant_sweep_layer.Reset();
-    added_kick_master_envelope.Reset();
-
-    macro_tail_delay_envelope.Reset();
-    macro_bpf_bank.Reset();
-    macro_character_processor.Reset();
-    character_dirty_bus_manager.Reset();
-    kick_reverb.Reset();
-    character_delta_hp_state = 0.0f;
-    character_delta_hp_state_2 = 0.0f;
-    character_delta_hp_state_3 = 0.0f;
-    macro_whole_kick_reverse.Reset();
+    ResetAudioDspState();
 
 
     /*
@@ -15976,6 +15988,22 @@ int main(void)
          * Do not put blocking OLED operations here.
          */
         ServiceMidi();
+
+
+        /*
+         * NON-FINITE RECOVERY.
+         *
+         * The audio thread has muted itself and asked for a rebuild. Doing
+         * it here keeps the 43200-sample capture clear out of the audio
+         * block. The result is a dropout instead of an engine that stays
+         * dead until the board is power-cycled.
+         */
+        if(audio_panic_pending)
+        {
+            audio_panic_pending = false;
+
+            ResetAudioDspState();
+        }
 
 
         /*
