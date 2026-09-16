@@ -15256,14 +15256,23 @@ static void AudioCallback(
 
 
         /*
-         * The BPF bank already compensates for its own extra parallel
-         * energy, per layer, inside MacroBpfBank::Process. Subtracting a
-         * second layer-count penalty here charged it twice, and did so
-         * against the WHOLE dirty bus rather than the bank that added the
-         * energy — so raising the layer count also turned down the Mackie
-         * and Sherman character. That is what made stacking layers sound
-         * progressively duller instead of bigger.
+         * BISECT: restored while hunting a kill at long decay.
+         *
+         * Removing this made stacking BPF layers brighter, because it also
+         * dimmed Mackie and Sherman which had gained no energy. But it is
+         * the only level change made to this bus, and the fault appears at
+         * long decay, which is when the bus carries the most sustained
+         * energy. If the kill survives this, the cause is elsewhere and
+         * this should come back out.
          */
+        dirty_post_gain -=
+            static_cast<float>(
+                macro_bpf_layer_count_latched
+            )
+            *
+            0.035f;
+
+
         if(dirty_post_gain < 0.62f)
             dirty_post_gain = 0.62f;
 
