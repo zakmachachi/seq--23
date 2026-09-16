@@ -150,6 +150,8 @@ class SimpleSequencer {
     // Grow numPages[ch] to at least 'target', duplicating page 0 into each
     // newly-allocated slot. No-op if target <= current numPages.
     void growPagesAndDuplicate(uint8_t ch, uint8_t target);
+    uint8_t rollKickBpf(uint8_t ch, bool isBase);
+    void rerollKickBpf(uint8_t ch);
 
     // --- TRIGGER MACHINES (Menu 4) ---
     uint8_t trigMachine[NUM_CHANNELS];           // active machine type per channel
@@ -162,6 +164,12 @@ class SimpleSequencer {
     // repeated fill step keeps its own character instead of shimmering.
     // 255 = not a kick fill step, so no CC is sent when it fires.
     uint8_t machineKickBpf[NUM_CHANNELS][NUM_STEPS];   // 0..3 BPF layer count
+    // Random BPF per kick channel. 0 off, 1 fills +/-1 layer, 2 fills across
+    // the full range, 3 every triggered step across the full range. A live
+    // performance toggle, so deliberately not persisted.
+    uint8_t kickBpfRandom[NUM_CHANNELS] = {};
+    static const uint8_t KICK_BPF_RANDOM_LEVELS = 4;
+    uint32_t bpfRandomFocusEndMs = 0;
     // Kick-specific live-performance params (per channel)
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet

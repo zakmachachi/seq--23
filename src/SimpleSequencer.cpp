@@ -1081,6 +1081,18 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
     }
     return;
   }
+  if (activeMenu == 4 && pot == 3 && trigMachine[selectedChannel] == TM_KICK){
+    // Kick machine page: Pot 4 button cycles random BPF through its intensity
+    // and span settings and back to off. Re-seed so the new setting is heard
+    // on the next pass instead of waiting for the next knob touch.
+    uint8_t ch = selectedChannel;
+    kickBpfRandom[ch] = (uint8_t)((kickBpfRandom[ch] + 1) % KICK_BPF_RANDOM_LEVELS);
+    rerollKickBpf(ch);
+    bpfRandomFocusEndMs = millis() + 1500;
+    Serial.print("KICK BPF RND CH"); Serial.print(ch+1);
+    Serial.print(" = "); Serial.println(kickBpfRandom[ch]);
+    return;
+  }
   if (activeMenu == 2){
     // Euclid page: Pot 1 button toggles euclid on/off
     if (pot == 0){
@@ -1832,6 +1844,32 @@ static uint8_t machinePoolMax(uint8_t machine){
 static const uint8_t FILL_CC[] = {47};
 static const uint8_t KICK_COUNT_VALUES[] = {0, 42, 85, 127};
 
+// 255 means "use the dialled-in layer count", which is what every step got
+// before random BPF became a deliberate choice rather than always-on.
+uint8_t SimpleSequencer::rollKickBpf(uint8_t ch, bool isBase){
+  uint8_t level = kickBpfRandom[ch];
+  if (level == 0) return 255;
+  if (isBase && level < 3) return 255;
+  if (level == 1){
+    int dialled = (int)(kickPerformance.state().bpfLayerCount & 3);
+    int v = dialled + (int)random(0, 3) - 1;
+    return (uint8_t)constrain(v, 0, 3);
+  }
+  return (uint8_t)random(0, 4);
+}
+
+// Re-roll only the layer counts. Changing the random-BPF setting must not
+// disturb the rhythm, which a full regenerate would re-seed.
+void SimpleSequencer::rerollKickBpf(uint8_t ch){
+  if (trigMachine[ch] != TM_KICK) return;
+  uint8_t shift = trigShift[ch] % NUM_STEPS;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    if (!machinePattern[ch][s]){ machineKickBpf[ch][s] = 255; continue; }
+    uint8_t src = (s + NUM_STEPS - shift) % NUM_STEPS;
+    machineKickBpf[ch][s] = rollKickBpf(ch, W_KICK[src] == 100);
+  }
+}
+
 void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
   uint8_t m = trigMachine[ch];
   uint8_t shift = trigShift[ch] % NUM_STEPS;
@@ -1922,7 +1960,9 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
       if (isBase){
         pitch[ch][pI] = 255;
         machineRatchet[ch][s] = 0;
-        machineKickBpf[ch][s] = 255;
+        // Only the widest random-BPF setting reaches the skeleton; below that
+        // the downbeats keep the dialled-in layer count.
+        machineKickBpf[ch][s] = rollKickBpf(ch, true);
         continue;
       }
       if (spread > 0){
@@ -1939,7 +1979,7 @@ void SimpleSequencer::regenerateMachinePattern(uint8_t ch){
       }
       // Rolled here alongside spread/ratchet, so a fill step keeps one sound
       // until the extras re-seed. triggerChannel() only replays these.
-      machineKickBpf[ch][s] = (uint8_t)random(0, 4);
+      machineKickBpf[ch][s] = rollKickBpf(ch, false);
     }
   }
 }
@@ -4739,14 +4779,49 @@ void SimpleSequencer::drawOverview(){
     // Non-KICK layouts skip the kick row and let the density bar sit at the
     // same bottom slot.
 
-    drawMachineIcon(display2, 64, 12, m);
+    // KICK gives up the icon and name for the BPF picture: screen 1 already
+    // says which machine this is, and the band shape is what needs watching
+    // while random BPF is running.
+    if (m == TM_KICK){
+      static const char* const RND_NAMES[KICK_BPF_RANDOM_LEVELS] =
+        {"OFF", "+/-1", "WIDE", "ALL"};
+      const KickPerformance::ControllerState& ks = kickPerformance.state();
+      uint8_t level = kickBpfRandom[ch] % KICK_BPF_RANDOM_LEVELS;
+      uint8_t count = ks.bpfLayerCount & 3;
 
-    const char* nm = names[m];
-    int textW = (int)strlen(nm) * 12;
-    int tx = (128 - textW) / 2; if (tx < 0) tx = 0;
-    display2.setTextSize(2);
-    display2.setCursor(tx, 26);
-    display2.print(nm);
+      display2.setTextSize(1);
+      display2.setCursor(2, 1);
+      display2.print("KICK BPF");
+      display2.setCursor(56, 1);
+      display2.print("RND "); display2.print(RND_NAMES[level]);
+      display2.setCursor(110, 1);
+      display2.print("L"); display2.print(count);
+      // Brief outline so a press that lands on OFF still reads as a press.
+      if (now < bpfRandomFocusEndMs) display2.drawRect(54, 0, 50, 10, SH110X_WHITE);
+
+      // One peak per layer across the 140 Hz..3.2 kHz span the Daisy maps
+      // CC44-46 onto. Filled peaks are sounding; outlined ones are dialled in
+      // but sit above the current layer count.
+      const int base = 50, apexOn = 14, apexOff = 30;
+      display2.drawFastHLine(2, base, 124, SH110X_WHITE);
+      for (uint8_t i = 0; i < 3; i++){
+        int x = 8 + (int)ks.bpfFrequencyValue[i] * 112 / 127;
+        bool on = (i < count);
+        int half = on ? 10 : 7;
+        int apex = on ? apexOn : apexOff;
+        if (on) display2.fillTriangle(x - half, base, x + half, base, x, apex, SH110X_WHITE);
+        else    display2.drawTriangle(x - half, base, x + half, base, x, apex, SH110X_WHITE);
+      }
+    } else {
+      drawMachineIcon(display2, 64, 12, m);
+
+      const char* nm = names[m];
+      int textW = (int)strlen(nm) * 12;
+      int tx = (128 - textW) / 2; if (tx < 0) tx = 0;
+      display2.setTextSize(2);
+      display2.setCursor(tx, 26);
+      display2.print(nm);
+    }
 
     // Density fill bar — one segment per slot in the machine's extra pool, so
     // the bar fills one notch per added trigger.
