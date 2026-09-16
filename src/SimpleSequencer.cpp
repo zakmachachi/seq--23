@@ -2221,31 +2221,39 @@ void SimpleSequencer::serviceKickLane(){
     Serial.print("LANE released by knob, param "); Serial.println((int)edited);
   }
 
-  if (!laneStepDirty) return;
-  laneStepDirty = false;
-  uint8_t step = laneStepPending;
-  if (step >= NUM_STEPS) return;
-
-  if (laneRecording && kickCCPage()){
-    KickPerformance::Parameter p = kickPerformance.focusedParameter();
-    if (KickPerformance::parameterIsLaneable(p)){
-      // Reaching for a different knob starts a fresh gesture rather than
-      // splicing two parameters into one lane.
-      if ((uint8_t)p != laneRecordParam){
-        laneRecordParam = (uint8_t)p;
-        for (uint8_t s = 0; s < NUM_STEPS; s++) laneRecordWritten[s] = false;
+  if (laneStepDirty){
+    laneStepDirty = false;
+    uint8_t step = laneStepPending;
+    if (step < NUM_STEPS){
+      if (laneRecording && kickCCPage()){
+        KickPerformance::Parameter p = kickPerformance.focusedParameter();
+        if (KickPerformance::parameterIsLaneable(p)){
+          // Reaching for a different knob starts a fresh gesture rather than
+          // splicing two parameters into one lane.
+          if ((uint8_t)p != laneRecordParam){
+            laneRecordParam = (uint8_t)p;
+            for (uint8_t s = 0; s < NUM_STEPS; s++) laneRecordWritten[s] = false;
+          }
+          laneRecordSlot[step] = kickPerformance.parameterValue(p);
+          laneRecordWritten[step] = true;
+        }
       }
-      laneRecordSlot[step] = kickPerformance.parameterValue(p);
-      laneRecordWritten[step] = true;
+      laneSendStep = step;
+      laneSendCursor = 0; // begin emitting this step's values
     }
   }
 
-  // setParameterValue returns early when the value has not moved, so a stack
-  // of lanes only costs UART traffic where something actually changes.
-  for (uint8_t p = 0; p < KickPerformance::PARAM_COUNT; p++){
+  // At most one lane value per loop pass. The Daisy polls its UART between
+  // blocking OLED transfers with no receive FIFO, so a whole stack of CCs
+  // arriving at once overruns the receive register -- and an overrun there
+  // latches ORE and stops the port receiving at all. Spreading the sends
+  // keeps every lane well inside one step without ever bursting.
+  while (laneSendCursor < KickPerformance::PARAM_COUNT){
+    uint8_t p = laneSendCursor++;
     if (!kickLanes[p].active) continue;
     kickPerformance.setParameterValue(
-      (KickPerformance::Parameter)p, kickLanes[p].slot[step]);
+      (KickPerformance::Parameter)p, kickLanes[p].slot[laneSendStep]);
+    break;
   }
 }
 

@@ -363,6 +363,8 @@ class SimpleSequencer {
     uint8_t laneRecordSlot[NUM_STEPS];
     volatile uint8_t laneStepPending = 0;
     volatile bool laneStepDirty = false;
+    uint8_t laneSendStep = 0;
+    uint8_t laneSendCursor = KickPerformance::PARAM_COUNT; // idle when at end
     void serviceKickLane();
     bool commitKickLane();
     void clearKickLanes();

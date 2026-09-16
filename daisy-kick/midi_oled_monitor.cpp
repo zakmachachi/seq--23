@@ -14173,6 +14173,47 @@ static void ServiceMidi()
      * No BlockingReceive.
      * No custom USART3 IRQ.
      */
+    /*
+     * RECEIVER ERROR RECOVERY — DO NOT REMOVE.
+     *
+     * There is no FIFO and no DMA here, and this loop only runs between
+     * blocking OLED I2C transfers. A burst arriving while the control loop
+     * is busy therefore overruns the single receive register.
+     *
+     * An overrun latches ORE, and while ORE is set RXNE stops asserting:
+     * the loop below sees nothing, the port is deaf for good, and the last
+     * Note-On never receives its Note-Off, so the kick drones until the
+     * board is power-cycled. ORE is only cleared by writing ICR, which is
+     * what this does.
+     *
+     * Framing and noise errors latch the same way and are cleared here too.
+     */
+    uint32_t rx_errors =
+        USART3->ISR &
+        (
+            USART_ISR_ORE |
+            USART_ISR_FE |
+            USART_ISR_NE
+        );
+
+
+    if(rx_errors)
+    {
+        USART3->ICR =
+            USART_ICR_ORECF |
+            USART_ICR_FECF |
+            USART_ICR_NECF;
+
+
+        /*
+         * Bytes were lost mid-stream, so a remembered running status would
+         * reassemble the next bytes into the wrong message. Drop it and
+         * wait for a fresh status byte.
+         */
+        midi_running_status = 0;
+    }
+
+
     while(
         USART3->ISR &
         USART_ISR_RXNE_RXFNE
@@ -15256,23 +15297,14 @@ static void AudioCallback(
 
 
         /*
-         * BISECT: restored while hunting a kill at long decay.
-         *
-         * Removing this made stacking BPF layers brighter, because it also
-         * dimmed Mackie and Sherman which had gained no energy. But it is
-         * the only level change made to this bus, and the fault appears at
-         * long decay, which is when the bus carries the most sustained
-         * energy. If the kill survives this, the cause is elsewhere and
-         * this should come back out.
+         * The BPF bank already compensates for its own extra parallel
+         * energy, per layer, inside MacroBpfBank::Process. Subtracting a
+         * second layer-count penalty here charged it twice, and did so
+         * against the WHOLE dirty bus rather than the bank that added the
+         * energy — so raising the layer count also turned down the Mackie
+         * and Sherman character, which is what made stacking layers sound
+         * progressively duller instead of bigger.
          */
-        dirty_post_gain -=
-            static_cast<float>(
-                macro_bpf_layer_count_latched
-            )
-            *
-            0.035f;
-
-
         if(dirty_post_gain < 0.62f)
             dirty_post_gain = 0.62f;
 
