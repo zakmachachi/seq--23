@@ -2123,21 +2123,23 @@ static float MacroTailDelayMs(float x)
 /*
  * Macro 4 — musical logarithmic BPF centre.
  */
+/*
+ * Band span, shared by the frequency map and the Q law so the two cannot
+ * drift apart. Extended down from 140 to 115 and now to 85 Hz, which is low
+ * enough to sit on the fundamental rather than above it.
+ */
+static constexpr float MACRO_BPF_LOW_HZ = 85.0f;
+static constexpr float MACRO_BPF_HIGH_HZ = 3200.0f;
+
 static float MacroBpfFrequencyHz(float x)
 {
     x = Clamp01Added(x);
 
-    /*
-     * Extended downward from the previous 140 Hz floor.
-     */
-    const float low_hz = 115.0f;
-    const float high_hz = 3200.0f;
-
     return
-        low_hz *
+        MACRO_BPF_LOW_HZ *
         powf(
-            high_hz /
-            low_hz,
+            MACRO_BPF_HIGH_HZ /
+            MACRO_BPF_LOW_HZ,
             x
         );
 }
@@ -8634,8 +8636,8 @@ struct MacroBpfBank
                 (macro_bpf_target_hz[i] - current_hz[i]) * 0.035f;
 
             float normalized =
-                logf(current_hz[i] / 115.0f) /
-                logf(3200.0f / 115.0f);
+                logf(current_hz[i] / MACRO_BPF_LOW_HZ) /
+                logf(MACRO_BPF_HIGH_HZ / MACRO_BPF_LOW_HZ);
             normalized = Clamp01Added(normalized);
 
             /* Broad pre-drive EQ; never a whistling resonator. */
@@ -8649,8 +8651,35 @@ struct MacroBpfBank
                 1.70f + normalized * 2.60f + static_cast<float>(i) * 0.30f;
             float mid_tame = MacroBpfMidTameAmount(current_hz[i]);
             return_q *= 1.0f - mid_tame * 0.10f;
-            if(return_q > 5.20f)
-                return_q = 5.20f;
+
+            /*
+             * The band now reaches down to 85 Hz, onto the kick's own
+             * fundamental. A wide filter there just lifts everything the sub
+             * and punch are already doing, so tighten it as it descends: down
+             * low it should pick out a pitch, not add weight.
+             *
+             * Squared, so the whole upper range keeps exactly the character
+             * it had and this only takes hold once the band is genuinely low.
+             */
+            float low_sharpen =
+                (200.0f - current_hz[i]) /
+                (200.0f - MACRO_BPF_LOW_HZ);
+
+            if(low_sharpen < 0.0f)
+                low_sharpen = 0.0f;
+
+            if(low_sharpen > 1.0f)
+                low_sharpen = 1.0f;
+
+
+            return_q +=
+                low_sharpen *
+                low_sharpen *
+                3.40f;
+
+
+            if(return_q > 8.00f)
+                return_q = 8.00f;
 
             /*
              * Tilt toward the top of the band. A layer parked low sits on

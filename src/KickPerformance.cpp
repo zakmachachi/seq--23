@@ -356,7 +356,9 @@ float KickPerformance::frequency(Parameter p, uint8_t v){
   float x = v / 127.f;
   if (p == HPF) return 30.f * powf(11500.f/30.f,x);
   if (p == LPF) return 18000.f * powf(120.f/18000.f,x);
-  return 140.f * powf(3200.f/140.f,x);
+  // Must track MACRO_BPF_LOW_HZ / MACRO_BPF_HIGH_HZ in the Daisy firmware,
+  // or the displayed frequency is not the one being filtered.
+  return 85.f * powf(3200.f/85.f,x);
 }
 float KickPerformance::releaseMs(uint8_t v){ return 8.f * powf(375.f,v/127.f); }
 void KickPerformance::shapeValues(uint8_t v, float& ratio, float& seconds){
@@ -549,7 +551,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   else if (p == TAIL){
     unsigned ms = (unsigned)(60000.f/(bpm ? bpm : 120)*.5f*x+.5f);
     snprintf(footer,sizeof(footer),"%u ms  %s",ms,state_.tailDelayEnabled ? "ON" : "OFF");
-  } else if (p <= BPF3) snprintf(footer,sizeof(footer),"140Hz ----- 3.2kHz");
+  } else if (p <= BPF3) snprintf(footer,sizeof(footer),"85Hz ------ 3.2kHz");
   else if (p == MACKIE || p == SHERMAN){
     unsigned pct = percent(v);
     snprintf(extra,sizeof(extra),"%s",v == 0 ? "DRY" : pct <= 25 ? "BASE DRIVE" : pct <= 48 ? "MID I" : pct < 73 ? "MID II" : "MID III");

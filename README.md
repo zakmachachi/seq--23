@@ -11,6 +11,36 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## What's new in v1.2.0
+
+**Knob movements can now be recorded and looped.** Hold **FUNCTION**, move a knob, then press **step 2**: that movement becomes a loop, replayed one value per step and quantised to the sequencer. Press step 2 again after moving a different knob and the two run together; **step 3** clears them. Grabbing a knob hands that parameter straight back, so a loop can always be caught by hand.
+
+It works on the kick page for every performance parameter except the two repeats, whose CC is a position inside a repeat session rather than a plain amount. On the Notes page it covers pitch, gate and velocity — so a melody can rise and fall on its own. Committing a loop returns the pattern to where it was before you started moving, so the shape plays instead of stacking on top of what you dialled in.
+
+**Holding FUNCTION now makes knob edits provisional.** Release it and the values go back. **FUNCTION + step 1** keeps them instead, so an idea can be tried against the track before committing to it. **FUNCTION + step 3** drops the per-step locks on the page.
+
+**The kick**
+- The filter bank reaches down to **85 Hz**, and tightens as it descends, so a low layer picks out a pitch rather than adding weight under the sub
+- Stacking filter layers no longer dims the distortion character — only the bank is compensated for its own added energy, not the whole bus
+- Fixed a click on every hit with sub and punch down, worse the longer the decay: a gate was cutting the previous tail off in a single sample
+- **LOOP** now works on the Digitakt return rather than the kick, where it belongs; **STUT** covers both, and no longer needs a kick playing to engage
+- Tail delay and the FX reset land on the beat instead of wherever the button was pressed
+- **STUT** spans `1/4 · 1/4T · 1/8 · 1/8T`, always opening at 1/4 and sweeping up, so a knob position always gives the same rate
+
+**Patterns**
+- **Mutate** moves more of the bar at once, keeps evolving while held, and with FUNCTION held reverts the whole burst when released
+- **Random velocity** is now rolled once for the pattern and held, so a bar has a shape instead of shimmering; switching it off and on rolls a new one
+- **Random slide** gets its own on/off on pot 4's button, re-rolling each time; pot 4's turn sets how many notes it catches
+- **Random filter character** on kick fills is now a choice rather than always on — pot 4's button on the kick machine page cycles off, narrow, wide, and everything
+- Screen 2 on the kick machine draws the actual filter response, with staged layers dotted in so you can see where they come in
+- The Pages menu is also reachable on **FUNCTION + MENU3**
+
+**Fixed**
+- Muting with FUNCTION + channels 3–6 often selected the channel instead. The matrix was acting on a key before it had finished reading the row FUNCTION sits on
+- The kick could go permanently silent, holding one endless note, until both boards were power-cycled. Its MIDI input had no error handling, so a burst arriving while the screen was redrawing left the port deaf for good
+
+---
+
 ## What's new in v1.1.0
 
 **seq-23 now has a voice of its own.** Alongside sequencing external gear, it drives a dedicated kick synthesiser running on a Daisy Seed, played live from the sequencer's own knobs.

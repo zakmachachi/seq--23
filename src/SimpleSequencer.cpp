@@ -3789,9 +3789,9 @@ void SimpleSequencer::bootAnimation() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(46, 20); display.print("seq-23");
   display.setCursor(7,  34); display.print("made by Bob and Zak");
-  // Size-2 (12px per char): "v1.1.0" is 72px, so x=28 centres it on the card.
+  // Size-2 (12px per char): "v1.2.0" is 72px, so x=28 centres it on the card.
   display.setTextSize(2);
-  display.setCursor(28, 48); display.print("v1.1.0");
+  display.setCursor(28, 48); display.print("v1.2.0");
   display.setTextSize(1);
   display.display();
 
@@ -3802,7 +3802,7 @@ void SimpleSequencer::bootAnimation() {
     display2.setCursor(46, 20); display2.print("seq-23");
     display2.setCursor(7,  34); display2.print("made by Bob and Zak");
     display2.setTextSize(2);
-    display2.setCursor(28, 48); display2.print("v1.1.0");
+    display2.setCursor(28, 48); display2.print("v1.2.0");
     display2.setTextSize(1);
     display2.display();
   }
@@ -4955,7 +4955,7 @@ void SimpleSequencer::drawOverview(){
       uint8_t count = ks.bpfLayerCount & 3;
 
       const int base = 50, top = 14;
-      // Value 0..127 maps linearly to x because the Daisy's 140 Hz..3.2 kHz
+      // Value 0..127 maps linearly to x because the Daisy's 85 Hz..3.2 kHz
       // span is logarithmic, so the axis is already log and a constant-Q
       // band is a symmetric bell on it.
       auto bandX = [](uint8_t v){ return 8.0f + (float)v * 112.0f / 127.0f; };
@@ -5004,8 +5004,9 @@ void SimpleSequencer::drawOverview(){
       }
 
       display2.drawFastHLine(2, base, 124, SH110X_WHITE);
-      // Decade marks at 200 Hz, 500 Hz, 1 k and 2 k on the same log mapping.
-      static const uint8_t TICK_V[4] = {14, 52, 80, 108};
+      // Decade marks at 200 Hz, 500 Hz, 1 k and 2 k on the same log mapping,
+      // which now spans 85 Hz to 3.2 kHz.
+      static const uint8_t TICK_V[4] = {30, 62, 86, 111};
       for (uint8_t t = 0; t < 4; t++){
         display2.drawFastVLine((int)bandX(TICK_V[t]), base + 1, 2, SH110X_WHITE);
       }
