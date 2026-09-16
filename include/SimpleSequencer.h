@@ -132,10 +132,17 @@ class SimpleSequencer {
     int8_t contourBias[NUM_CHANNELS];
     void rerollSlides(uint8_t ch);
     void transposeChannelNotes(uint8_t ch, int semitones);
-    // Mutate one random active step on the edit page: toggle slide, toggle
-    // accent, change note length, or change note value. Used as a "subtle
-    // evolution" alternative to a full regenerate.
+    // Mutate several random active steps on the edit page: toggle slide,
+    // toggle accent, change note length, or change note value. Used as an
+    // "evolve" alternative to a full regenerate.
     void mutatePattern(uint8_t ch);
+    void applyOneMutation(uint8_t ch, uint16_t idx, uint8_t pickStep);
+    // Mutate held past MUTATE_REPEAT_DELAY_MS keeps evolving the pattern.
+    // Holding Function when the press starts makes the whole burst an
+    // audition: the pre-press state is restored when mutate is released.
+    void serviceMutateHold(uint32_t now);
+    void captureMutateSnapshot(uint8_t ch);
+    void restoreMutateSnapshot();
     // Copy one full 16-step page worth of per-step state (steps, pitches,
     // velocities, slides, ratchets, gates, fill marks, machine overlays)
     // from srcPg to dstPg on channel ch. Used to seed newly-allocated pages
@@ -296,6 +303,20 @@ class SimpleSequencer {
     uint8_t matrixPendingEdges[MATRIX_KEYS]; // key index, high bit set = press
     uint8_t matrixPendingEdgeCount = 0;
 
+    static const uint32_t MUTATE_REPEAT_DELAY_MS = 500;
+    static const uint32_t MUTATE_REPEAT_INTERVAL_MS = 160;
+    bool mutateHeld = false;
+    bool mutateRevertOnRelease = false;
+    uint32_t mutateNextRepeatMs = 0;
+    // Only the fields mutatePattern touches, for the whole channel so a page
+    // change mid-hold cannot strand part of the audition.
+    bool mutateSnapshotValid = false;
+    uint8_t mutateSnapshotCh = 0;
+    uint8_t mutateSnapPitch[TOTAL_STEPS];
+    uint8_t mutateSnapNoteLen[TOTAL_STEPS];
+    uint8_t mutateSnapVelocity[TOTAL_STEPS];
+    bool mutateSnapSlide[TOTAL_STEPS];
+
     // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
     bool slideAllHold = false;   // Function + Fill: slide every note on the active channel
     bool accentAllHold = false;  // Function + Page: accent every note on the active channel
@@ -332,6 +353,7 @@ class SimpleSequencer {
     void clearTrack(uint8_t ch);
     // --- CONTEXTUAL POT INPUT HANDLERS ---
     void onPotButtonPress(uint8_t pot);
+    void onPotButtonRelease(uint8_t pot);
     void handlePotRotation(uint8_t pot, int ticks);
     // --- EEPROM SAVE SYSTEM ---
     struct SaveData {

@@ -342,6 +342,7 @@ void SimpleSequencer::loop(){
   if (!fnHeld && cvSubmenu) cvSubmenu = false;
   // Run the CV engine (gate/LFO/trig) every loop pass, in every menu.
   cvService();
+  serviceMutateHold(now);
   if (fillModeActive != fillBtnLastState){
     Serial.print("FILL "); Serial.println(fillModeActive ? "ON" : "OFF");
     fillBtnLastState = fillModeActive;
@@ -928,6 +929,8 @@ void SimpleSequencer::readEncoders(){
           kickMixer.buttonEdge(i, pressed, millis());
         } else if (pressed) {
           onPotButtonPress(i);
+        } else {
+          onPotButtonRelease(i);
         }
       }
     }
@@ -1083,8 +1086,12 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       randomizeEuclidMelody(selectedChannel);
       Serial.print("REGEN CH"); Serial.println(selectedChannel+1);
     } else if (pot == 2){
-      // Pot 3 button: mutate — change one random active note on the edit
-      // page (toggle slide, toggle accent, change length, or change pitch).
+      // Pot 3 button: mutate. Holding keeps evolving the pattern; holding
+      // Function as well makes the burst an audition that reverts on release.
+      mutateRevertOnRelease = isFunctionHeld();
+      if (mutateRevertOnRelease) captureMutateSnapshot(selectedChannel);
+      mutateHeld = true;
+      mutateNextRepeatMs = millis() + MUTATE_REPEAT_DELAY_MS;
       mutatePattern(selectedChannel);
     } else if (pot == 4){
       // Pot 5 button: toggle random gate length for this channel. When on,
@@ -2121,6 +2128,44 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
 // mutation: toggle slide, toggle accent, change note length, or change note
 // value. Used for "subtle evolution" — keeps the pattern intact and just
 // nudges one note.
+void SimpleSequencer::onPotButtonRelease(uint8_t pot){
+  if (pot != 2 || !mutateHeld) return;
+  mutateHeld = false;
+  if (mutateRevertOnRelease) restoreMutateSnapshot();
+  mutateRevertOnRelease = false;
+}
+
+void SimpleSequencer::serviceMutateHold(uint32_t now){
+  if (!mutateHeld || activeMenu != 1) return;
+  if ((int32_t)(now - mutateNextRepeatMs) < 0) return;
+  mutateNextRepeatMs = now + MUTATE_REPEAT_INTERVAL_MS;
+  mutatePattern(selectedChannel);
+}
+
+void SimpleSequencer::captureMutateSnapshot(uint8_t ch){
+  mutateSnapshotCh = ch;
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++){
+    mutateSnapPitch[s]    = pitch[ch][s];
+    mutateSnapNoteLen[s]  = noteLen[ch][s];
+    mutateSnapVelocity[s] = stepVelocity[ch][s];
+    mutateSnapSlide[s]    = stepSlide[ch][s];
+  }
+  mutateSnapshotValid = true;
+}
+
+void SimpleSequencer::restoreMutateSnapshot(){
+  if (!mutateSnapshotValid) return;
+  uint8_t ch = mutateSnapshotCh;
+  for (uint16_t s = 0; s < TOTAL_STEPS; s++){
+    pitch[ch][s]         = mutateSnapPitch[s];
+    noteLen[ch][s]       = mutateSnapNoteLen[s];
+    stepVelocity[ch][s]  = mutateSnapVelocity[s];
+    stepSlide[ch][s]     = mutateSnapSlide[s];
+  }
+  mutateSnapshotValid = false;
+  Serial.print("MUTATE revert CH"); Serial.println(ch+1);
+}
+
 void SimpleSequencer::mutatePattern(uint8_t ch){
   uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
   uint8_t actives[NUM_STEPS];
@@ -2138,8 +2183,20 @@ void SimpleSequencer::mutatePattern(uint8_t ch){
     Serial.println(" -> no active (triggered) steps");
     return;
   }
-  uint8_t pickStep = actives[random(0, nA)];
-  uint16_t idx = base + pickStep;
+  // Scale with how busy the pattern is so a sparse bar still changes audibly
+  // and a full one moves properly, rather than one step either way.
+  uint8_t count = 1 + nA / 4;
+  if (count > nA) count = nA;
+  for (uint8_t m = 0; m < count; m++){
+    // Consume the chosen step so one press never mutates it twice.
+    uint8_t pickIdx = (uint8_t)random(0, nA);
+    uint8_t pickStep = actives[pickIdx];
+    actives[pickIdx] = actives[--nA];
+    applyOneMutation(ch, base + pickStep, pickStep);
+  }
+}
+
+void SimpleSequencer::applyOneMutation(uint8_t ch, uint16_t idx, uint8_t pickStep){
   uint8_t mutation = (uint8_t)random(0, 4);
   switch (mutation){
     case 0: { // Toggle slide
