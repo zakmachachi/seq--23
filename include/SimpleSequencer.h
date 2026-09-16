@@ -141,8 +141,6 @@ class SimpleSequencer {
     // Holding Function when the press starts makes the whole burst an
     // audition: the pre-press state is restored when mutate is released.
     void serviceMutateHold(uint32_t now);
-    void captureMutateSnapshot(uint8_t ch);
-    void restoreMutateSnapshot();
     // Copy one full 16-step page worth of per-step state (steps, pitches,
     // velocities, slides, ratchets, gates, fill marks, machine overlays)
     // from srcPg to dstPg on channel ch. Used to seed newly-allocated pages
@@ -308,14 +306,36 @@ class SimpleSequencer {
     bool mutateHeld = false;
     bool mutateRevertOnRelease = false;
     uint32_t mutateNextRepeatMs = 0;
-    // Only the fields mutatePattern touches, for the whole channel so a page
-    // change mid-hold cannot strand part of the audition.
-    bool mutateSnapshotValid = false;
-    uint8_t mutateSnapshotCh = 0;
-    uint8_t mutateSnapPitch[TOTAL_STEPS];
-    uint8_t mutateSnapNoteLen[TOTAL_STEPS];
-    uint8_t mutateSnapVelocity[TOTAL_STEPS];
-    bool mutateSnapSlide[TOTAL_STEPS];
+
+    // Everything mutate and the Notes-page knobs can touch on one channel.
+    // Whole channel rather than the edit page, so changing page mid-gesture
+    // cannot strand half of it.
+    struct ChannelSnapshot {
+      uint8_t pitch[TOTAL_STEPS];
+      uint8_t noteLen[TOTAL_STEPS];
+      uint8_t velocity[TOTAL_STEPS];
+      bool    slide[TOTAL_STEPS];
+      uint8_t channelPitch = 0, channelVelocity = 0;
+      uint8_t noteLenIdx = 0, randomSlideProb = 0;
+      uint8_t ch = 0;
+      bool    valid = false;
+    };
+    ChannelSnapshot mutateSnap;
+    ChannelSnapshot snapBack;
+    void captureChannel(ChannelSnapshot& out, uint8_t ch);
+    void restoreChannel(ChannelSnapshot& in);
+
+    // Function-held edits are provisional: released without a commit they
+    // revert. Function + step 1 commits, step 3 clears p-locks.
+    bool fnHeldPrev = false;
+    bool snapArmed = false;
+    bool snapCommitted = false;
+    KickPerformance::ControllerState snapKickPerf;
+    KickMixer::SavedState snapKickMix;
+    uint8_t snapKind = 0; // 0 none, 1 notes channel, 2 kick CC, 3 kick mix
+    void onFunctionPressed();
+    void onFunctionReleased();
+    void clearPageLocks(uint8_t ch);
 
     // --- LIVE PERFORMANCE MODIFIERS (held combos) ---
     bool slideAllHold = false;   // Function + Fill: slide every note on the active channel

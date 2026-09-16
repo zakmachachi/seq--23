@@ -330,6 +330,11 @@ void SimpleSequencer::loop(){
 
   // --- LIVE MODIFIERS (computed from fresh matrix state) ---
   bool fnHeld   = isFunctionHeld();
+  // Function arms a provisional edit; releasing it reverts unless step 1
+  // committed the change in the meantime.
+  if (fnHeld && !fnHeldPrev) onFunctionPressed();
+  else if (!fnHeld && fnHeldPrev) onFunctionReleased();
+  fnHeldPrev = fnHeld;
   bool fillNow  = isFillHeld();
   bool pageHeld = (MATRIX_BTN_PAGE_INDEX < MATRIX_KEYS) && matrixState[MATRIX_BTN_PAGE_INDEX];
   // Plain Fill = global fill performance (unchanged). Function+Fill = slide-all
@@ -770,9 +775,12 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
-    activeMenu = 2;  // Euclid page
+    // Function opens Pages here. Menu 4 would have been the natural home but
+    // Function + Menu 4 is already the transport combo.
+    activeMenu = isFunctionHeld() ? 5 : 2;  // Pages, else Euclid
     heldStep = -1; focusEncoder = 0;
-    Serial.print("MENU3 -> activeMenu=2 (Euclid)"); Serial.println();
+    Serial.println(activeMenu == 5 ? "FN+MENU3 -> activeMenu=5 (Pages)"
+                                   : "MENU3 -> activeMenu=2 (Euclid)");
     return;
   }
   if (i == MATRIX_BTN_MENU4_INDEX){
@@ -799,6 +807,21 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       editPage[selectedChannel] = target;
       Serial.print("CH"); Serial.print(selectedChannel+1);
       Serial.print(" goto page "); Serial.println(target+1);
+      return;
+    }
+    // Function + step 1 commits the provisional edit so releasing Function
+    // keeps it. Only claimed while an edit is actually armed, so Function +
+    // step keeps cycling overlays on the Trigger Machines page.
+    if (isFunctionHeld() && i == 0 && snapArmed){
+      snapCommitted = true;
+      pendingToggle[i] = false;
+      Serial.println("SNAP commit");
+      return;
+    }
+    // Function + step 3 drops the per-step locks on this page.
+    if (isFunctionHeld() && i == 2 && activeMenu == 1){
+      clearPageLocks(selectedChannel);
+      pendingToggle[i] = false;
       return;
     }
     if (activeMenu == 4 && trigMachine[selectedChannel] != TM_OFF){
@@ -1089,7 +1112,7 @@ void SimpleSequencer::onPotButtonPress(uint8_t pot){
       // Pot 3 button: mutate. Holding keeps evolving the pattern; holding
       // Function as well makes the burst an audition that reverts on release.
       mutateRevertOnRelease = isFunctionHeld();
-      if (mutateRevertOnRelease) captureMutateSnapshot(selectedChannel);
+      if (mutateRevertOnRelease) captureChannel(mutateSnap, selectedChannel);
       mutateHeld = true;
       mutateNextRepeatMs = millis() + MUTATE_REPEAT_DELAY_MS;
       mutatePattern(selectedChannel);
@@ -1149,9 +1172,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   lastTouchedPot  = (int8_t)pot;
   lastPotTouchMs  = millis();
 
-  // --- GLOBAL MODIFIER: Function + Pot 1 = BPM (anywhere except the Analog
-  // menu, where FN + pots is the CV mode/param editor) ---
-  if (pot == 0 && isFunctionHeld() && activeMenu != 6){
+  // --- GLOBAL MODIFIER: Function + Pot 2 = BPM (anywhere except the Analog
+  // menu, where FN + pots is the CV mode/param editor). Pot 1 gave this up so
+  // it can snap back like the other unmodified knobs. ---
+  if (pot == 1 && isFunctionHeld() && activeMenu != 6){
     int newBpm = (int)bpm + ticks;
     if (newBpm < 20) newBpm = 20;
     if (newBpm > 300) newBpm = 300;
@@ -2128,10 +2152,61 @@ void SimpleSequencer::randomizeEuclidMelody(uint8_t ch) {
 // mutation: toggle slide, toggle accent, change note length, or change note
 // value. Used for "subtle evolution" — keeps the pattern intact and just
 // nudges one note.
+void SimpleSequencer::onFunctionPressed(){
+  snapCommitted = false;
+  if (kickCCPage()){
+    kickPerformance.saveTo(snapKickPerf);
+    snapKind = 2;
+  } else if (kickMixPage()){
+    kickMixer.saveTo(snapKickMix);
+    snapKind = 3;
+  } else if (activeMenu == 1){
+    captureChannel(snapBack, selectedChannel);
+    snapKind = 1;
+  } else {
+    snapKind = 0;
+  }
+  snapArmed = (snapKind != 0);
+}
+
+void SimpleSequencer::onFunctionReleased(){
+  if (!snapArmed){ snapKind = 0; return; }
+  if (!snapCommitted){
+    // restoreFrom re-sends every CC, so the Daisy follows the revert too.
+    if (snapKind == 1) restoreChannel(snapBack);
+    else if (snapKind == 2) kickPerformance.restoreFrom(snapKickPerf);
+    else if (snapKind == 3) kickMixer.restoreFrom(snapKickMix);
+    Serial.println("SNAP revert");
+  } else {
+    Serial.println("SNAP kept");
+  }
+  snapBack.valid = false;
+  snapArmed = false;
+  snapCommitted = false;
+  snapKind = 0;
+}
+
+// Drop the sentinel-based per-step locks on the current edit page so those
+// steps fall back to the channel values again. Slides are left alone: they
+// have no "unlocked" state to return to.
+void SimpleSequencer::clearPageLocks(uint8_t ch){
+  uint16_t base = (uint16_t)editPage[ch] * NUM_STEPS;
+  for (uint8_t s = 0; s < NUM_STEPS; s++){
+    pitch[ch][base + s]        = 255;
+    noteLen[ch][base + s]      = 255;
+    stepVelocity[ch][base + s] = 255;
+  }
+  Serial.print("PLOCKS cleared CH"); Serial.print(ch+1);
+  Serial.print(" page "); Serial.println(editPage[ch] + 1);
+}
+
 void SimpleSequencer::onPotButtonRelease(uint8_t pot){
   if (pot != 2 || !mutateHeld) return;
   mutateHeld = false;
-  if (mutateRevertOnRelease) restoreMutateSnapshot();
+  if (mutateRevertOnRelease){
+    restoreChannel(mutateSnap);
+    Serial.println("MUTATE revert");
+  }
   mutateRevertOnRelease = false;
 }
 
@@ -2142,28 +2217,35 @@ void SimpleSequencer::serviceMutateHold(uint32_t now){
   mutatePattern(selectedChannel);
 }
 
-void SimpleSequencer::captureMutateSnapshot(uint8_t ch){
-  mutateSnapshotCh = ch;
+void SimpleSequencer::captureChannel(ChannelSnapshot& out, uint8_t ch){
+  out.ch = ch;
   for (uint16_t s = 0; s < TOTAL_STEPS; s++){
-    mutateSnapPitch[s]    = pitch[ch][s];
-    mutateSnapNoteLen[s]  = noteLen[ch][s];
-    mutateSnapVelocity[s] = stepVelocity[ch][s];
-    mutateSnapSlide[s]    = stepSlide[ch][s];
+    out.pitch[s]    = pitch[ch][s];
+    out.noteLen[s]  = noteLen[ch][s];
+    out.velocity[s] = stepVelocity[ch][s];
+    out.slide[s]    = stepSlide[ch][s];
   }
-  mutateSnapshotValid = true;
+  out.channelPitch    = channelPitch[ch];
+  out.channelVelocity = channelVelocity[ch];
+  out.noteLenIdx      = noteLenIdx[ch];
+  out.randomSlideProb = randomSlideProb[ch];
+  out.valid = true;
 }
 
-void SimpleSequencer::restoreMutateSnapshot(){
-  if (!mutateSnapshotValid) return;
-  uint8_t ch = mutateSnapshotCh;
+void SimpleSequencer::restoreChannel(ChannelSnapshot& in){
+  if (!in.valid) return;
+  uint8_t ch = in.ch;
   for (uint16_t s = 0; s < TOTAL_STEPS; s++){
-    pitch[ch][s]         = mutateSnapPitch[s];
-    noteLen[ch][s]       = mutateSnapNoteLen[s];
-    stepVelocity[ch][s]  = mutateSnapVelocity[s];
-    stepSlide[ch][s]     = mutateSnapSlide[s];
+    pitch[ch][s]        = in.pitch[s];
+    noteLen[ch][s]      = in.noteLen[s];
+    stepVelocity[ch][s] = in.velocity[s];
+    stepSlide[ch][s]    = in.slide[s];
   }
-  mutateSnapshotValid = false;
-  Serial.print("MUTATE revert CH"); Serial.println(ch+1);
+  channelPitch[ch]    = in.channelPitch;
+  channelVelocity[ch] = in.channelVelocity;
+  noteLenIdx[ch]      = in.noteLenIdx;
+  randomSlideProb[ch] = in.randomSlideProb;
+  in.valid = false;
 }
 
 void SimpleSequencer::mutatePattern(uint8_t ch){
