@@ -21,19 +21,28 @@ One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=
 
 ## Repeat sessions
 
-STUT and LOOP keep virtual pot positions separately from canonical MIDI rate values. Positions 0–3 are OFF. The next accepted movement into ON starts a locally weighted random session:
+STUT and LOOP keep virtual pot positions separately from canonical MIDI rate values. Positions 0–3 are OFF. The next accepted movement into ON starts a session. The two repeats no longer share a ladder or a starting rule.
 
-| Division | STUT CC30 | Start weight | LOOP CC31 | Start weight |
-| --- | ---: | ---: | ---: | ---: |
-| 1/2 | 10 | 50% | 13 | 55% |
-| 1/4 | 28 | 25% | 38 | 25% |
-| 1/8 | 46 | 12% | 63 | 12% |
-| 1/16 | 64 | 7% | 88 | 6% |
-| 1/32 | 82 | 3% | 114 | 2% |
-| 1/64 | 100 | 2% | — | — |
-| 1/128 | 118 | 1% | — | — |
+STUT spans a quarter note down to an eighth triplet, alternating straight and triplet divisions (1/4T is 1/6, 1/8T is 1/12). It always opens at the slowest division and sweeps up as the knob rises — there is no random start, so a given knob position always produces the same rate.
 
-A repeated starting draw is retried once, then replaced by a neighboring division if still equal. Starts through 1/16 move faster as the knob rises; faster starts move slower. Remaining travel to 127 is divided evenly, with two-count hysteresis around rate boundaries. Turning back retraces the session; returning to OFF ends it. Switching FX preserves the session, including its starting rate, direction and virtual position. Neither repeat has a wet control.
+| Division | STUT CC30 |
+| --- | ---: |
+| 1/4 | 16 |
+| 1/4T | 48 |
+| 1/8 | 80 |
+| 1/8T | 112 |
+
+LOOP still opens on a locally weighted random division:
+
+| Division | LOOP CC31 | Start weight |
+| --- | ---: | ---: |
+| 1/2 | 13 | 55% |
+| 1/4 | 38 | 25% |
+| 1/8 | 63 | 12% |
+| 1/16 | 88 | 6% |
+| 1/32 | 114 | 2% |
+
+A repeated LOOP starting draw is retried once, then replaced by a neighboring division if still equal. Starts through 1/16 move faster as the knob rises; faster starts move slower. Remaining travel to 127 is divided evenly, with two-count hysteresis around rate boundaries. Turning back retraces the session; returning to OFF ends it. Switching FX preserves the session, including its starting rate, direction and virtual position. Neither repeat has a wet control.
 
 ## Implementation and display
 

@@ -6359,7 +6359,7 @@ struct AddedStutter
     bool active = false;
     bool desired_enabled = false;
 
-    uint8_t latched_rate_index = 3;
+    uint8_t latched_rate_index = 2;
 
     /*
      * Continuous pattern phase.
@@ -6378,7 +6378,7 @@ struct AddedStutter
         active = false;
         desired_enabled = false;
 
-        latched_rate_index = 3;
+        latched_rate_index = 2;
 
         phase = 0.0f;
 
@@ -6406,33 +6406,24 @@ struct AddedStutter
         uint8_t rate_index) const
     {
         /*
-         * Preserve the existing CC30 division ladder:
+         * CC30 division ladder, as multiples of a quarter note:
          *
-         * 1/2, 1/4, 1/8, 1/16, 1/32 (1/64 and 1/128 CC codes clamp to 1/32)
+         * 1/4, 1/4T, 1/8, 1/8T   where 1/4T = 1/6 and 1/8T = 1/12
+         *
+         * Must stay in step with STUT_VALUES and StutterRateFromCc, and with
+         * the Teensy's STUT_LABELS ladder in src/KickPerformance.cpp.
          */
-        static const float fractions[7] =
+        static const float fractions[4] =
         {
-            2.0f,
             1.0f,
-            0.50f,
-            0.25f,
-            0.125f,
-            0.0625f,
-            0.03125f
+            0.666666667f,
+            0.5f,
+            0.333333333f
         };
 
 
-        /*
-         * Teensy compatibility:
-         *
-         * Continue accepting legacy 1/64 and 1/128 rate codes, but clamp
-         * both internally to the fastest allowed CHOP rate: 1/32.
-         *
-         * The Teensy OLED may still display the sent legacy value; MIDI
-         * protocol compatibility is intentionally unchanged.
-         */
-        if(rate_index > 4)
-            rate_index = 4;
+        if(rate_index > 3)
+            rate_index = 3;
 
 
         uint32_t samples =
@@ -12698,21 +12689,15 @@ static uint8_t StutterRateFromCc(
      * Explicit addressable encoding. 0 is OFF.
      *
      * Teensy should normally send the centre values:
-     *   10  = 1/2
-     *   28  = 1/4
-     *   46  = 1/8
-     *   64  = 1/16
-     *   82  = 1/32
-     *   100 = 1/64
-     *   118 = 1/128
+     *   16  = 1/4
+     *   48  = 1/4T
+     *   80  = 1/8
+     *   112 = 1/8T
      */
-    if(raw <= 18)  return 0;
-    if(raw <= 36)  return 1;
-    if(raw <= 54)  return 2;
-    if(raw <= 72)  return 3;
-    if(raw <= 90)  return 4;
-    if(raw <= 108) return 5;
-    return 6;
+    if(raw <= 32) return 0;
+    if(raw <= 64) return 1;
+    if(raw <= 96) return 2;
+    return 3;
 }
 
 

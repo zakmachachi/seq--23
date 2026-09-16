@@ -7,9 +7,18 @@ namespace {
 constexpr uint8_t CC[] = {30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
 constexpr uint8_t CC_SLOTS = sizeof(CC);
 constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51};
-constexpr uint8_t STUT_VALUES[] = {10,28,46,64,82,100,118};
+constexpr uint8_t STUT_VALUES[] = {16,48,80,112};
 constexpr uint8_t LOOP_VALUES[] = {13,38,63,88,114};
 constexpr uint8_t COUNT_VALUES[] = {0,42,85,127};
+// The stutter ladder alternates straight and triplet across 1/4..1/8T, so its
+// labels can no longer be derived as 2<<index the way the looper's still are.
+const char* const STUT_LABELS[] = {"1/4","1/4T","1/8","1/8T"};
+constexpr uint8_t STUT_DIVISIONS = sizeof(STUT_LABELS)/sizeof(STUT_LABELS[0]);
+constexpr uint8_t LOOP_DIVISIONS = sizeof(LOOP_VALUES);
+void divisionLabel(char* out, size_t size, bool loop, uint8_t division){
+  if (loop) snprintf(out,size,"1/%u",2u << division);
+  else snprintf(out,size,"%s",STUT_LABELS[division]);
+}
 const char* const FX_NAMES[] = {"STUT","LOOP","DLY","HPF","LPF","PUMP","REV"};
 constexpr uint8_t FX_PAGES = sizeof(FX_NAMES)/sizeof(FX_NAMES[0]);
 constexpr float PI_F = 3.14159265358979323846f;
@@ -92,8 +101,8 @@ void KickPerformance::restoreFrom(const ControllerState& in){
   state_ = in;
   // A corrupted or partially written image must not index the canonical rate
   // tables out of bounds, so every restored field is re-bounded here.
-  clampRepeat(state_.stutter,7);
-  clampRepeat(state_.looper,5);
+  clampRepeat(state_.stutter,STUT_DIVISIONS);
+  clampRepeat(state_.looper,LOOP_DIVISIONS);
   if (state_.selectedFx > REVERB) state_.selectedFx = STUT;
   if (state_.bpfLayerCount > 3) state_.bpfLayerCount = 0;
   if (state_.editedBpfLayer > 2) state_.editedBpfLayer = 0;
@@ -262,11 +271,9 @@ void KickPerformance::adjust(uint8_t knob, int delta){
   }
   flushMidi();
 }
-uint8_t KickPerformance::randomStart(bool loop, int8_t previous){
-  static const uint8_t stutWeights[] = {50,25,12,7,3,2,1};
-  static const uint8_t loopWeights[] = {55,25,12,6,2};
-  const uint8_t* weights = loop ? loopWeights : stutWeights;
-  uint8_t count = loop ? 5 : 7, pick = 0;
+uint8_t KickPerformance::randomStart(int8_t previous){
+  static const uint8_t weights[] = {55,25,12,6,2};
+  uint8_t count = LOOP_DIVISIONS, pick = 0;
   for (uint8_t attempt = 0; attempt < 2; ++attempt){
     long draw = random(0,100);
     for (pick = 0; pick + 1 < count; ++pick){
@@ -289,7 +296,9 @@ void KickPerformance::updateRepeat(RepeatState& r, bool loop, uint8_t value){
     return;
   }
   if (!r.on){
-    r.randomStart = randomStart(loop, r.previousStart);
+    // Stutter always opens at the slowest division and sweeps up; only the
+    // looper still draws a weighted random starting rate.
+    r.randomStart = loop ? randomStart(r.previousStart) : 0;
     r.previousStart = r.randomStart;
     r.division = r.randomStart;
     r.direction = r.randomStart <= 3 ? 1 : -1;
@@ -297,7 +306,7 @@ void KickPerformance::updateRepeat(RepeatState& r, bool loop, uint8_t value){
     queue(cc,canonical[r.division]);
     return;
   }
-  int last = loop ? 4 : 6;
+  int last = (loop ? LOOP_DIVISIONS : STUT_DIVISIONS) - 1;
   int steps = r.direction > 0 ? last - r.randomStart : r.randomStart;
   int range = 127 - r.activationPosition;
   if (steps == 0 || range <= 0) return;
@@ -352,7 +361,7 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
   if (p == STUT || p == LOOP){
     const RepeatState& r = p == STUT ? state_.stutter : state_.looper;
     if (!r.on) snprintf(out,size,"OFF");
-    else snprintf(out,size,"1/%u",2u << r.division);
+    else divisionLabel(out,size,p == LOOP,r.division);
   } else if (p == HPF || p == LPF){
     if (v == 0) snprintf(out,size,"OFF");
     else frequencyText(out,size,frequency(p,v),compact);
@@ -402,10 +411,10 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
   float x = v/127.f;
   if (p == STUT || p == LOOP){
     const RepeatState& r = p == STUT ? state_.stutter : state_.looper;
-    uint8_t count = p == STUT ? 7 : 5;
+    uint8_t count = p == STUT ? STUT_DIVISIONS : LOOP_DIVISIONS;
     for (uint8_t i = 0; i < count; ++i){
       int tx = 2 + (i % 4)*32, ty = 33 + (i / 4)*9;
-      char text[8]; snprintf(text,sizeof(text),"1/%u",2u << i);
+      char text[8]; divisionLabel(text,sizeof(text),p == LOOP,i);
       if (r.on && r.division == i){
         d.fillRect(tx,ty,31,8,SH110X_WHITE); d.setTextColor(SH110X_BLACK);
       }
@@ -501,8 +510,11 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   valueText(p,value,sizeof(value),false);
   if (p == STUT || p == LOOP){
     const RepeatState& r = p == STUT ? state_.stutter : state_.looper;
-    if (r.on) snprintf(footer,sizeof(footer),"START 1/%u > %s",2u << r.randomStart,r.direction > 0 ? "FAST" : "SLOW");
-    else snprintf(footer,sizeof(footer),"UP = RANDOM RATE");
+    if (r.on){
+      char start[8]; divisionLabel(start,sizeof(start),p == LOOP,r.randomStart);
+      snprintf(footer,sizeof(footer),"START %s > %s",start,r.direction > 0 ? "FAST" : "SLOW");
+    }
+    else snprintf(footer,sizeof(footer),p == LOOP ? "UP = RANDOM RATE" : "UP = 1/4 > 1/8T");
   } else if (p == DELAY){
     unsigned wet = v ? (unsigned)(10.f+66.f*smoothstep(x)+.5f) : 0;
     unsigned fb = v ? (unsigned)(18.f+60.f*powf(x,1.25f)+.5f) : 0;

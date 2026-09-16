@@ -44,20 +44,22 @@ int main(int argc, char** argv){
  h.set(0,89);h.page(K::DELAY);assert(h.k.state_.delay==114);h.k.adjust(0,-3);assert(h.k.state_.delay==111);
  h.midi.clear();h.page(K::HPF);assert(h.k.state_.hpf==89&&h.midi.empty());h.k.adjust(0,-2);assert(h.k.state_.hpf==87&&h.sent(33,87));}
  // C: all weighted bins, previous-start avoidance, both rate directions and OFF.
- {int stutBins[]={0,50,75,87,94,97,99},loopBins[]={0,55,80,92,98};
- for(int loop=0;loop<2;++loop){int count=loop?5:7;for(int i=0;i<count;++i){draws={loop?loopBins[i]:stutBins[i]};assert(K::randomStart(loop,-1)==i);draws={loop?loopBins[i]:stutBins[i],loop?loopBins[i]:stutBins[i]};assert(K::randomStart(loop,i)!=i);}
- int histogram[7]={};std::srand(1);for(int i=0;i<10000;++i)++histogram[K::randomStart(loop,-1)];assert(histogram[0]+histogram[1]>7000);}
- Harness h;draws={50};h.set(0,4);assert(h.k.state_.stutter.division==1);h.move(0,127);assert(h.k.state_.stutter.division==6);h.move(0,4);assert(h.k.state_.stutter.division==1);h.move(0,0);assert(!h.k.state_.stutter.on&&h.sent(30,0));draws={97};h.move(0,4);assert(h.k.state_.stutter.division==5&&h.k.state_.stutter.direction==-1);h.move(0,127);assert(h.k.state_.stutter.division==0);
+ {int loopBins[]={0,55,80,92,98};
+ for(int i=0;i<5;++i){draws={loopBins[i]};assert(K::randomStart(-1)==i);draws={loopBins[i],loopBins[i]};assert(K::randomStart(i)!=i);}
+ int histogram[5]={};std::srand(1);for(int i=0;i<10000;++i)++histogram[K::randomStart(-1)];assert(histogram[0]+histogram[1]>7000);
+ // Stutter opens at the slowest division every time, with no draw consumed.
+ Harness h;h.set(0,4);assert(h.k.state_.stutter.division==0&&h.k.state_.stutter.direction==1);h.move(0,127);assert(h.k.state_.stutter.division==3);h.move(0,4);assert(h.k.state_.stutter.division==0);h.move(0,0);assert(!h.k.state_.stutter.on&&h.sent(30,0));
+ h.move(0,4);assert(h.k.state_.stutter.division==0&&h.k.state_.stutter.direction==1);assert(draws.empty());
  // Boundary jitter must not alternate canonical rate values.
- K::RepeatState r;draws={0};h.k.updateRepeat(r,false,4);h.k.updateRepeat(r,false,27);int rate=r.division;for(int i=0;i<50;++i)h.k.updateRepeat(r,false,i%2?26:27);assert(r.division==rate);}
+ K::RepeatState r;h.k.updateRepeat(r,false,4);h.k.updateRepeat(r,false,27);int rate=r.division;for(int i=0;i<50;++i)h.k.updateRepeat(r,false,i%2?26:27);assert(r.division==rate);}
  // Exhaustive repeat destinations: canonical CCs and travel direction for each start.
- {const int stutCC[]={10,28,46,64,82,100,118},loopCC[]={13,38,63,88,114};
- const int stutBins[]={0,50,75,87,94,97,99},loopBins[]={0,55,80,92,98};
- for(int loop=0;loop<2;++loop)for(int start=0;start<(loop?5:7);++start){
-  Harness h;K::RepeatState r;draws={loop?loopBins[start]:stutBins[start]};
+ {const int stutCC[]={16,48,80,112},loopCC[]={13,38,63,88,114};
+ const int loopBins[]={0,55,80,92,98};
+ for(int loop=0;loop<2;++loop)for(int start=0;start<(loop?5:1);++start){
+  Harness h;K::RepeatState r;if(loop)draws={loopBins[start]};
   h.k.updateRepeat(r,loop,4);h.k.flushMidi();assert(h.sent(loop?31:30,loop?loopCC[start]:stutCC[start]));
   int prev=start;for(int v=6;v<=127;++v){h.k.updateRepeat(r,loop,v);assert(r.direction>0?r.division>=prev:r.division<=prev);prev=r.division;}
-  assert(r.division==(start<=3?(loop?4:6):0));
+  assert(r.division==(start<=3?(loop?4:3):0));
   for(int v=126;v>=4;--v)h.k.updateRepeat(r,loop,v);assert(r.division==start);
   h.k.updateRepeat(r,loop,3);assert(!r.on);h.k.flushMidi();assert(h.sent(loop?31:30,0));
  }}
@@ -66,7 +68,7 @@ int main(int argc, char** argv){
  h.k.setActive(false);h.k.sampleAngle(1,Harness::angle(35));h.k.setActive(true);h.seed(1,35);h.midi.clear();
  assert(h.k.state_.decay==value&&h.midi.empty());h.turn(1,-4);assert(h.k.state_.decay<value&&h.sent(40,h.k.state_.decay));}
  // D: repeat session survives changing FX page, return retains its relative value.
- {Harness h;draws={50};h.set(0,4);auto before=h.k.state_.stutter;h.page(K::HPF);h.midi.clear();h.page(K::STUT);assert(h.k.state_.stutter.on&&h.k.state_.stutter.division==before.division&&h.k.state_.stutter.activationPosition==before.activationPosition&&h.midi.empty());}
+ {Harness h;h.set(0,4);auto before=h.k.state_.stutter;h.page(K::HPF);h.midi.clear();h.page(K::STUT);assert(h.k.state_.stutter.on&&h.k.state_.stutter.division==before.division&&h.k.state_.stutter.activationPosition==before.activationPosition&&h.midi.empty());}
  // E: separate character memories; model buttons send only absolute CC50.
  {Harness h;h.set(4,102);h.click(4);h.set(4,32);h.midi.clear();h.click(4);assert(h.k.state_.mackieAmount==102&&h.k.state_.shermanAmount==32&&h.midi.size()==1&&h.sent(50,0));h.click(4);assert(h.k.state_.shermanAmount==32&&h.sent(50,127));}
  // F: all BPF memories persist across repeated count cycles, per-layer edits.
@@ -118,7 +120,7 @@ int main(int argc, char** argv){
  {Harness h;h.page(K::PUMP);h.set(0,89);h.midi.clear();for(int i=0;i<3;++i)h.click(5);assert(h.k.state_.pumpAmount==89&&h.k.state_.pumpEnabled&&h.midi.size()==3);for(auto&m:h.midi)assert(m.first==52);}
  // Every parameter at every possible value fits on the panels; draws never send MIDI.
  {Harness h;Adafruit_SH1106G a,b;for(int p=0;p<K::PARAM_COUNT;++p)for(int v=0;v<128;++v){int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;h.k.position((K::Parameter)p)=v;h.k.focus_.knob=knob;h.k.drawOverview(a);h.k.drawFocus(b,300);assert(!b.has("PICK"));}assert(h.midi.empty());
- h.k.state_.selectedFx=K::STUT;h.k.state_.stutter.on=true;h.k.state_.stutter.division=6;h.k.state_.stutter.randomStart=6;h.k.state_.stutter.direction=-1;h.k.focus_.knob=0;h.k.drawOverview(a);h.k.drawFocus(b,120);if(argc>1){a.save("overview.svg");b.save("stutter.svg");}
+ h.k.state_.selectedFx=K::STUT;h.k.state_.stutter.on=true;h.k.state_.stutter.division=3;h.k.state_.stutter.randomStart=0;h.k.state_.stutter.direction=-1;h.k.focus_.knob=0;h.k.drawOverview(a);h.k.drawFocus(b,120);if(argc>1){a.save("overview.svg");b.save("stutter.svg");}
  h.k.focus_.knob=3;h.k.state_.bpfLayerCount=2;h.k.state_.editedBpfLayer=1;h.k.drawFocus(b,120);if(argc>1)b.save("bpf.svg");
  h.k.focus_.knob=5;h.k.drawFocus(b,120);if(argc>1)b.save("shape.svg");}
  puts("PASS: relative control, clamping/reversal, angle seams, recall, repeat rates, resets, MIDI, ADC noise and displays");

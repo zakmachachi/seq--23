@@ -84,7 +84,7 @@ private:
   void updateRepeat(RepeatState& repeat, bool loop, uint8_t value);
   static void clampRepeat(RepeatState& repeat, uint8_t divisions);
   void resetFx(uint32_t now);
-  static uint8_t randomStart(bool loop, int8_t previous);
+  static uint8_t randomStart(int8_t previous);
   static uint8_t percent(uint8_t value);
   static float smoothstep(float value);
   static float frequency(Parameter parameter, uint8_t value);
