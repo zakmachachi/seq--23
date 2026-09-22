@@ -179,6 +179,7 @@ int main(int argc, char** argv)
     maybe("sub",     CC_MIX_SUB_GAIN);
     maybe("punch",   CC_MIX_PUNCH_GAIN);
     maybe("decay",   CC_DECAY_ABSOLUTE);
+    maybe("shape",   CC_KICK_SHAPE_ABSOLUTE);
     maybe("hpf",     CC_MACRO_FX_HPF);
     maybe("lpf",     CC_MACRO_FX_LPF);
 
