@@ -3925,6 +3925,21 @@ static constexpr float KICK_SWEEP_MUTE_ZONE = 0.10f;
  */
 static constexpr float KICK_SWEEP_SUM_TRIM = 0.75f;
 
+/*
+ * Where the sweep fades out, as a fraction of its remaining pitch span. For a
+ * 55 Hz note starting at 1962 Hz this fades the sweep between about 340 Hz
+ * and 150 Hz, so it is gone well before it could sit close enough to the sub
+ * to beat with it.
+ *
+ * Measured beat depth in the sub's band at SHAPE 127: 1.401 without this,
+ * 0.074 with it, against 0.492 on the pre-redesign engine. The fade point
+ * saturates past ~0.12 - moving it further only shortens the sweep for
+ * nothing - and the laser is unaffected at every value, because the laser
+ * lives in the first 12 ms while the sweep is still far above the sub.
+ */
+static constexpr float KICK_SWEEP_LAND_HI = 0.150f;
+static constexpr float KICK_SWEEP_LAND_LO = 0.050f;
+
 static inline float SoftClip(float x);
 
 
@@ -4306,6 +4321,47 @@ struct KickVoice
                 *
                 1.57079632679f
             );
+
+
+        /*
+         * THE SWEEP IS OVER WHEN IT LANDS.
+         *
+         * The punch is a pitch sweep that descends ONTO the note. The sub is
+         * already sounding at that note, because the two now trigger
+         * together. So for the last part of its descent the sweep is a second
+         * full-level tone a few Hz from the sub with an unrelated phase, and
+         * the two beat - the rate slowing as they converge. That is a
+         * flanger, and it is what "a lot of phasing" was.
+         *
+         * Measured at SHAPE 127 the sweep sat at full level from 99 Hz all
+         * the way down to 57 Hz against a 55 Hz sub.
+         *
+         * The old engine had the same descent but its crossfade held the sub
+         * near silence until the sweep had finished, so they were never both
+         * loud. That crossfade was doing more than de-clicking.
+         *
+         * This keeps them simultaneous, as asked, and instead ends the sweep
+         * as a function of ITS OWN pitch: once it is close to where it is
+         * landing there is nothing left for it to say. The sub reads nothing
+         * from the sweep, so none of the old coupling comes back.
+         */
+        float landed =
+            SmoothstepAdded(
+                Clamp01Added(
+                    (
+                        sweep_pitch -
+                        KICK_SWEEP_LAND_LO
+                    )
+                    /
+                    (
+                        KICK_SWEEP_LAND_HI -
+                        KICK_SWEEP_LAND_LO
+                    )
+                )
+            );
+
+
+        body *= landed;
 
 
         sweep_out =
