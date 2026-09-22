@@ -101,7 +101,46 @@ of this was bought by softening the transient.
 against a build with the floor forced to zero: identical at 60/90/120 BPM
 (0 overlapping hits), differing at 150/185 BPM (3 of 4 hits overlapping).
 
-Builds at **93.78 %** flash, up from 93.64 %.
+Builds at **93.67 %** flash, against 93.64 % at `3af0e35`.
+
+---
+
+## Second bug: the DJ HPF had an "onset protection" that was the click
+
+Reported on the bench after the above was flashed: the retrigger click was
+gone, but engaging the DJ HPF produced a big click at **any** cutoff, and at
+1.5 kHz the click was all there was.
+
+`AddedDjHighpass::Process(x, protect_kick_onset = true)` on the kick lane held
+the path **fully dry for the first 4 ms of every hit** and crossfaded into the
+HPF over the next 12 ms. The stated reason was that a high-pass emphasizes a
+kick's step-like onset and reads as a brittle click.
+
+**It never did that.** Rendered onset impulse — max `|d2|` over the first 30 ms
+of a hit — is the same with it and without, 0.00059 either way, at every
+cutoff. What it actually did was inject 4 ms of full-level *unfiltered* kick,
+which at high settings is exactly the sub the control was asked to remove.
+
+| DJ HPF | dry burst (0–4 ms) | settled (>20 ms) | burst / settled |
+|---|---|---|---|
+| 40 Hz | 0.0805 | 0.0798 | 1.0x |
+| 300 Hz | 0.0805 | 0.0117 | 6.9x |
+| 800 Hz | 0.0805 | 0.0029 | 27.4x |
+| 1500 Hz | 0.0805 | 0.0010 | **80.2x** |
+| 3000 Hz | 0.0805 | 0.0003 | **278.5x** |
+
+The burst was the loudest thing in the output at every setting above ~300 Hz.
+Removing it drops the onset peak 18x at 1.5 kHz and 53x at 3 kHz, with the
+onset impulse unchanged, and takes the retrigger click at 40 Hz back to what
+it is with the HPF off (0.0217 vs 0.0225).
+
+Removed: the `protect_kick_onset` parameter, the branch, and
+`PerformanceFilterKickOnsetBlend()` with its two constants. A note on
+`AddedDjHighpass` records why it must not come back.
+
+**What remains at high cutoffs is the kick's own attack** — burst/settled
+settles at ~6x from 800 Hz up, and that is the effect working. A kick through
+a 1.5 kHz high-pass *is* mostly its click; there is nothing left to be wrong.
 
 ---
 
@@ -132,6 +171,7 @@ not change the kick DSP without rendering before and after.**
 | `PSY_PHASE_LOCK_EVERY_HIT = false` | Worse (previous session). |
 | `RATCHET_RESIDUAL_DECAY_MS` 0.65 <-> 3 ms | No help (previous session); the constant no longer exists. |
 | `ENABLE_PROTECTED_PUNCH`, `tail_pitch_phase` | Not involved; already off / vestigial. |
+| DJ HPF onset dry-hold + crossfade | Removed. It did not reduce the onset impulse at all and was itself the click — see above. |
 
 ## The "decay is no longer smooth, it is clicking" report
 

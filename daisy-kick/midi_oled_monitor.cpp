@@ -672,8 +672,6 @@ static constexpr float PERFORMANCE_FILTER_ONSET_Q = 0.72f;
  * For the first few milliseconds of every kick, leave the already-HF-
  * guarded dry master signal alone, then fade the selected filter in.
  */
-static constexpr float PERFORMANCE_FILTER_DRY_HOLD_MS = 4.0f;
-static constexpr float PERFORMANCE_FILTER_FADE_IN_MS  = 12.0f;
 
 
 /*
@@ -5579,40 +5577,6 @@ static bool PerformanceMasterFilterActive()
  * high-pass response from turning the kick's rising edge into a brittle
  * digital click. External-input HPF does not use this kick-onset guard.
  */
-static float PerformanceFilterKickOnsetBlend()
-{
-    float age_ms =
-        static_cast<float>(
-            kick_age_samples
-        )
-        *
-        1000.0f /
-        SAMPLE_RATE;
-
-
-    if(age_ms <=
-       PERFORMANCE_FILTER_DRY_HOLD_MS)
-    {
-        return 0.0f;
-    }
-
-
-    float t =
-        (
-            age_ms -
-            PERFORMANCE_FILTER_DRY_HOLD_MS
-        )
-        /
-        PERFORMANCE_FILTER_FADE_IN_MS;
-
-
-    return
-        SmoothstepAdded(
-            Clamp01Added(
-                t
-            )
-        );
-}
 
 
 static float ProcessAbsoluteFinalLpf(
@@ -7903,6 +7867,24 @@ struct AddedQuantizedLooper
    MASTER DJ HIGH-PASS
    ============================================================ */
 
+/*
+ * DO NOT REINTRODUCE AN ONSET BYPASS HERE.
+ *
+ * This used to hold the kick path DRY for the first 4 ms of every hit and
+ * crossfade into the HPF over the next 12 ms, on the reasoning that a
+ * high-pass emphasizes a kick's step-like onset and reads as a brittle click.
+ *
+ * It did not do that. Rendered onset impulse (max |d2| over the first 30 ms
+ * of a hit) is the same with it and without - 0.00059 either way, at every
+ * cutoff. What it actually did was inject 4 ms of FULL-LEVEL UNFILTERED kick,
+ * which at high settings is precisely the sub the control was asked to remove:
+ * that burst measured 80x the filtered signal at 1.5 kHz and 278x at 3 kHz.
+ * It was the loudest thing in the output, and it was the click people heard
+ * whenever the DJ HPF was engaged.
+ *
+ * The SVF is primed to the current input on enable and runs continuously, so
+ * there is nothing for a bypass to protect against.
+ */
 struct AddedDjHighpass
 {
     float ic1eq = 0.0f;
@@ -7997,8 +7979,7 @@ struct AddedDjHighpass
 
 
     float Process(
-        float input,
-        bool protect_kick_onset = false)
+        float input)
     {
         bool requested =
             PERF_DJ_HPF_ENABLED &&
@@ -8140,28 +8121,8 @@ struct AddedDjHighpass
 
 
         /*
-         * A high-pass naturally emphasizes a kick's step-like onset. On
-         * the generated kick that reads as a brittle click. Keep the SVF
-         * running from sample one so its state is settled, but hold the
-         * audible kick path dry briefly and crossfade into the HPF.
+         * NO ONSET BYPASS HERE - see the note on AddedDjHighpass.
          */
-        if(protect_kick_onset)
-        {
-            float onset_mix =
-                PerformanceFilterKickOnsetBlend();
-
-
-            filtered =
-                input +
-                (
-                    filtered -
-                    input
-                )
-                *
-                onset_mix;
-        }
-
-
         return filtered;
     }
 };
@@ -11644,8 +11605,7 @@ struct AddedPerformanceFx
 
         x =
             external_dj_hpf.Process(
-                x,
-                false
+                x
             );
 
 
@@ -11674,8 +11634,7 @@ struct AddedPerformanceFx
 
         x =
             dj_hpf.Process(
-                x,
-                true
+                x
             );
 
 

@@ -10,6 +10,7 @@
  *
  *   bpm=185  hits=4  decay=<0..1>  sub=<0..1>  punch=<0..1>
  *   line=<0..1>  mackie=<0..1>  sherman=<0..1>  bpf=<0..1>
+ *   hpf=<0..1>   lpf=<0..1>     (DJ filter position; hpf enables itself)
  *   tail=<ms of silence after the last hit>
  */
 
@@ -178,6 +179,8 @@ int main(int argc, char** argv)
     maybe("sub",     CC_MIX_SUB_GAIN);
     maybe("punch",   CC_MIX_PUNCH_GAIN);
     maybe("decay",   CC_DECAY_ABSOLUTE);
+    maybe("hpf",     CC_MACRO_FX_HPF);
+    maybe("lpf",     CC_MACRO_FX_LPF);
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);
