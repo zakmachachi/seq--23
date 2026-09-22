@@ -3294,10 +3294,191 @@ static float GenerateTransientOscillator(
 }
 
 
+static bool ResetDspStateForThisTrigger()
+{
+    /*
+     * Fresh hits always reset.
+     *
+     * In PSY phase-lock mode, overlapping ratchets also deliberately
+     * reset so each new kick is a repeatable one-shot.
+     */
+    return
+        !kick_retrigger_active ||
+        PSY_PHASE_LOCK_EVERY_HIT;
+}
 
 
+static void BeginRatchetPhaseBridge()
+{
+    if(!kick_retrigger_active ||
+       !PSY_PHASE_LOCK_EVERY_HIT)
+    {
+        ratchet_phase_bridge_active = false;
+        return;
+    }
 
 
+    ratchet_bridge_phase =
+        sub_phase;
+
+
+    ratchet_bridge_frequency =
+        ClampAdded(
+            current_tail_frequency_for_bridge,
+            24.0f,
+            95.0f
+        );
+
+
+    ratchet_bridge_tail_gain =
+        generated_output_envelope;
+
+
+    /*
+     * Predict the next old-tail sample. Build the tiny residual so the
+     * first bridge output equals the exact previous generated-kick value.
+     */
+    float predicted_old_tail =
+        sinf(
+            ratchet_bridge_phase *
+            TWO_PI
+        )
+        *
+        ratchet_bridge_tail_gain;
+
+
+    ratchet_bridge_residual =
+        last_generated_kick_signal -
+        predicted_old_tail;
+
+
+    ratchet_bridge_pos = 0;
+
+
+    ratchet_bridge_samples =
+        static_cast<uint32_t>(
+            RATCHET_PHASE_BRIDGE_MS *
+            SAMPLE_RATE /
+            1000.0f
+        );
+
+
+    if(ratchet_bridge_samples < 16)
+        ratchet_bridge_samples = 16;
+
+
+    ratchet_phase_bridge_active = true;
+}
+
+
+static float ProcessRatchetPhaseBridge(
+    float new_kick)
+{
+    if(!ratchet_phase_bridge_active)
+        return new_kick;
+
+
+    float t =
+        static_cast<float>(
+            ratchet_bridge_pos
+        )
+        /
+        static_cast<float>(
+            ratchet_bridge_samples
+        );
+
+
+    t =
+        Clamp01Added(
+            t
+        );
+
+
+    float smooth_t =
+        SmoothstepAdded(
+            t
+        );
+
+
+    /*
+     * Continue the OLD low-frequency sine for a few milliseconds.
+     */
+    float old_tail =
+        sinf(
+            ratchet_bridge_phase *
+            TWO_PI
+        )
+        *
+        ratchet_bridge_tail_gain;
+
+
+    ratchet_bridge_phase +=
+        ratchet_bridge_frequency /
+        SAMPLE_RATE;
+
+
+    while(ratchet_bridge_phase >= 1.0f)
+        ratchet_bridge_phase -= 1.0f;
+
+
+    /*
+     * Preserve exact sample continuity at t=0, but discard the old
+     * nonlinear/HF remainder extremely quickly.
+     */
+    float elapsed_ms =
+        static_cast<float>(
+            ratchet_bridge_pos
+        )
+        *
+        1000.0f /
+        SAMPLE_RATE;
+
+
+    float residual_gain =
+        expf(
+            -6.9078f *
+            elapsed_ms /
+            RATCHET_RESIDUAL_DECAY_MS
+        );
+
+
+    float old_bridge =
+        old_tail +
+        ratchet_bridge_residual *
+        residual_gain;
+
+
+    /*
+     * Equal-power handoff:
+     * old deterministic continuation -> new deterministic phase-reset hit.
+     */
+    float old_gain =
+        1.0f - smooth_t;
+
+
+    float new_gain =
+        1.0f;
+
+
+    float output =
+        old_bridge *
+        old_gain +
+        new_kick *
+        new_gain;
+
+
+    ratchet_bridge_pos++;
+
+
+    if(ratchet_bridge_pos >=
+       ratchet_bridge_samples)
+    {
+        ratchet_phase_bridge_active = false;
+    }
+
+
+    return output;
+}
 
 
 static float ProcessFinalHfDynamicTamer(
@@ -3849,540 +4030,88 @@ static float ProcessVelocityTailPitchRatio()
 }
 
 
+static void GetTransientTailCrossfade(
+    float& transient_gain,
+    float& tail_gain)
+{
+    float age_ms =
+        static_cast<float>(
+            kick_age_samples
+        )
+        *
+        1000.0f
+        /
+        SAMPLE_RATE;
+
+
+    float handoff_start_ms =
+        USE_NEW_SHAPE_TRANSIENT_MACRO
+        ? transient_handoff_start_ms_current
+        : 7.0f;
+
+
+    float handoff_end_ms =
+        USE_NEW_SHAPE_TRANSIENT_MACRO
+        ? transient_handoff_end_ms_current
+        : 40.0f;
+
+
+    float span =
+        handoff_end_ms -
+        handoff_start_ms;
+
+
+    if(span < 1.0f)
+        span = 1.0f;
+
+
+    float t =
+        (
+            age_ms -
+            handoff_start_ms
+        )
+        /
+        span;
+
+
+    t =
+        Clamp01Added(
+            t
+        );
+
+
+    t =
+        SmoothstepAdded(
+            t
+        );
+
+
+    /*
+     * Equal-power handoff:
+     *
+     * transient: 1 -> 0
+     * tail:      0 -> 1
+     *
+     * This avoids the audible hole of a linear crossfade.
+     */
+    transient_gain =
+        cosf(
+            t *
+            1.57079632679f
+        );
+
+
+    tail_gain =
+        sinf(
+            t *
+            1.57079632679f
+        );
+}
 
 
 /* ============================================================
    KICK TRIGGER
    ============================================================ */
-
-/* ============================================================
-   KICK VOICE — PITCH SWEEP + BASS TONE
-   ============================================================
-
-   The kick is two oscillators:
-
-       SWEEP   the punch. A sine whose pitch falls exponentially from well
-               above the note down onto it. SHAPE sets how far it starts
-               above and how fast it lands, from no punch at all to a laser.
-
-       SUB     the bass tone. A sine at the note, pitch-moved by velocity
-               through the existing bipolar control.
-
-   Both are phase-reset on every trigger, so a given hit is always the same
-   waveform.
-
-   THE POINT OF THIS STRUCTURE:
-
-   Each envelope starts at EXACTLY zero and rises through a smoothstep, so
-   at the trigger sample the output is zero, its slope is zero and its
-   curvature is zero. A sine at phase 0 scaled by that cannot produce a step
-   or a kink, whatever was sounding a sample earlier. Click-freeness is a
-   property of the shape rather than something a later stage has to repair.
-
-   The previous engine restarted its envelopes FROM THEIR CURRENT LEVEL and
-   reset the oscillator phase underneath them, which is a step, and then
-   spent a phase bridge trying to hide it.
-
-   OVERLAP is handled by stealing, in AudioCallback: the outgoing voice is
-   copied aside and keeps running untouched into a short smoothstep fade
-   while the new one starts from silence. Two sweeps therefore never coexist
-   for longer than that fade, which is where the parasitic overlap clicks
-   came from.
- */
-
-/*
- * Envelope ramp-in lengths. Short enough to stay punchy, long enough that the
- * output leaves silence smoothly rather than stepping out of it.
- */
-static constexpr float KICK_SWEEP_ATTACK_MS = 0.35f;
-static constexpr float KICK_SUB_ATTACK_MS   = 2.0f;
-
-/*
- * The sweep's CHARACTER is not defined here. Start frequency, fall time,
- * level, drive, tone cutoff and length all come from the existing SHAPE
- * curves, latched per hit by TriggerKickAudio into transient_start_frequency,
- * transient_pitch_time, transient_shape_*_current and
- * transient_handoff_*_ms_current. That is the ROUND -> PUNCH -> SNAP
- * continuum people already know, and the laser at the top of the knob is the
- * SNAP end of it: up to 3 kHz falling over 110 ms with a 115..165 ms body.
- *
- * An earlier version of this struct invented its own curves - 16x the note
- * falling in 5 ms - which is not a laser, it is an impulse, and it clicked.
- */
-
-/* SHAPE 0 must be NO punch, below where the old gain curve bottoms out. */
-static constexpr float KICK_SWEEP_MUTE_ZONE = 0.10f;
-
-/*
- * The sweep and the sub now sound TOGETHER, where the old anatomy crossfade
- * ran them one at a time at equal power. Their peaks therefore add instead of
- * alternating, which measured 1.45x hotter with SHAPE up and pushed the kick
- * much further into OutputCeiling's knee. The sub lane is already level with
- * the old engine (0.96x at SHAPE 0), so the trim belongs on the sweep alone.
- *
- * This is gain staging, not the old coupling: a fixed number, not a curve one
- * lane drives from the other's timeline.
- */
-static constexpr float KICK_SWEEP_SUM_TRIM = 0.75f;
-
-static inline float SoftClip(float x);
-
-
-static float ExpCoeffPerSample(float ms)
-{
-    if(ms < 0.05f)
-        ms = 0.05f;
-
-    return
-        expf(
-            -6.9078f /
-            (
-                ms *
-                SAMPLE_RATE /
-                1000.0f
-            )
-        );
-}
-
-
-struct KickVoice
-{
-    /* SWEEP */
-    float    sweep_phase;
-    float    sweep_pitch;          /* 1 -> 0, exponential */
-    float    sweep_pitch_coeff;
-    float    sweep_span_hz;        /* start frequency minus the note */
-    float    sweep_level;          /* 0 at SHAPE 0 = no punch */
-    float    sweep_drive;
-    float    sweep_cutoff_hz;
-    float    handoff_start_ms;     /* the sweep's own body length */
-    float    handoff_end_ms;
-    uint32_t sweep_attack_samples;
-
-    /* Per-voice filter memory, so a stolen voice keeps its own. */
-    float    tone_lp_state;
-    float    hf_guard_state_1;
-    float    hf_guard_state_2;
-
-    /* SUB */
-    float    sub_phase;
-    float    sub_env;
-    float    sub_decay_coeff;
-    uint32_t sub_attack_samples;
-
-    float    base_hz;
-    float    last_sweep_hz;    /* exposed for the protected-punch lane */
-    uint32_t age;
-    bool     active;
-
-
-    void Reset()
-    {
-        sweep_phase = 0.0f;
-        sweep_pitch = 0.0f;
-        sweep_pitch_coeff = 0.0f;
-        sweep_span_hz = 0.0f;
-        sweep_level = 0.0f;
-        sweep_drive = 1.0f;
-        sweep_cutoff_hz = 6000.0f;
-        handoff_start_ms = 36.0f;
-        handoff_end_ms = 82.0f;
-        sweep_attack_samples = 1;
-
-        tone_lp_state = 0.0f;
-        hf_guard_state_1 = 0.0f;
-        hf_guard_state_2 = 0.0f;
-
-        sub_phase = 0.0f;
-        sub_env = 0.0f;
-        sub_decay_coeff = 0.0f;
-        sub_attack_samples = 1;
-
-        base_hz = 55.0f;
-        last_sweep_hz = 55.0f;
-        age = 0;
-        active = false;
-    }
-
-
-    void Start(float note_hz)
-    {
-        float shape =
-            Clamp01Added(
-                macro_kick_shape
-            );
-
-
-        base_hz = note_hz;
-
-        /* Deterministic: every hit begins at the same point on the sine. */
-        sweep_phase = 0.0f;
-        sub_phase = 0.0f;
-
-        sweep_pitch = 1.0f;
-        sub_env = 1.0f;
-
-        age = 0;
-        active = true;
-
-        tone_lp_state = 0.0f;
-        hf_guard_state_1 = 0.0f;
-        hf_guard_state_2 = 0.0f;
-
-
-        /* ---- SWEEP: the existing SHAPE continuum, latched for this hit ---- */
-
-        sweep_span_hz =
-            transient_start_frequency -
-            note_hz;
-
-        if(sweep_span_hz < 0.0f)
-            sweep_span_hz = 0.0f;
-
-
-        sweep_pitch_coeff =
-            ExpCoeffPerSample(
-                transient_pitch_time *
-                1000.0f
-            );
-
-
-        /*
-         * Old gain curve (ROUND 0.16 -> PUNCH 0.62 -> SNAP 1.00), taken to
-         * silence across the bottom of the knob so 0 really is no punch.
-         */
-        sweep_level =
-            transient_shape_gain_current *
-            SmoothstepAdded(
-                Clamp01Added(
-                    shape /
-                    KICK_SWEEP_MUTE_ZONE
-                )
-            );
-
-
-        sweep_drive =
-            transient_shape_drive_current;
-
-
-        sweep_cutoff_hz =
-            ClampAdded(
-                transient_shape_cutoff_current,
-                500.0f,
-                12000.0f
-            );
-
-
-        /*
-         * The sweep's own length. This is the curve that used to be the
-         * transient/tail anatomy crossfade; it now shapes ONLY the sweep, so
-         * the sub no longer has its level dictated by the punch's timeline.
-         * That coupling is what made the tail drop out under a retrigger.
-         */
-        handoff_start_ms =
-            transient_handoff_start_ms_current;
-
-        handoff_end_ms =
-            transient_handoff_end_ms_current;
-
-
-        sweep_attack_samples =
-            static_cast<uint32_t>(
-                KICK_SWEEP_ATTACK_MS *
-                SAMPLE_RATE /
-                1000.0f
-            );
-
-        if(sweep_attack_samples < 1)
-            sweep_attack_samples = 1;
-
-
-        /* ---- SUB: K2 still owns the bass tone's length ---- */
-
-        sub_decay_coeff =
-            ExpCoeffPerSample(
-                MacroDecaySeconds(
-                    macro_decay
-                ) *
-                1000.0f
-            );
-
-        sub_attack_samples =
-            static_cast<uint32_t>(
-                KICK_SUB_ATTACK_MS *
-                SAMPLE_RATE /
-                1000.0f
-            );
-
-        if(sub_attack_samples < 1)
-            sub_attack_samples = 1;
-    }
-
-
-    /*
-     * tail_ratio is the velocity-derived sub pitch movement, advanced once
-     * per sample by the caller so a stolen voice cannot double-advance it.
-     */
-    void Render(
-        float  tail_ratio,
-        float& sweep_out,
-        float& sub_out)
-    {
-        if(!active)
-        {
-            sweep_out = 0.0f;
-            sub_out = 0.0f;
-            return;
-        }
-
-
-        /* ---- SWEEP ---- */
-
-        float age_ms =
-            static_cast<float>(age) *
-            1000.0f /
-            SAMPLE_RATE;
-
-
-        float sweep_hz =
-            base_hz +
-            sweep_span_hz *
-            sweep_pitch;
-
-
-        last_sweep_hz = sweep_hz;
-
-
-        /* The oscillator has always been bounded here; keep that bound. */
-        if(sweep_hz > 1200.0f)
-            sweep_hz = 1200.0f;
-
-        if(sweep_hz < 20.0f)
-            sweep_hz = 20.0f;
-
-
-        float osc =
-            sinf(
-                sweep_phase *
-                TWO_PI
-            );
-
-
-        sweep_phase += sweep_hz / SAMPLE_RATE;
-
-        while(sweep_phase >= 1.0f)
-            sweep_phase -= 1.0f;
-
-        sweep_pitch *= sweep_pitch_coeff;
-
-
-        /*
-         * Saturation fades in with the body rather than hitting the bare
-         * onset, exactly as before.
-         */
-        float onset_mix =
-            SmoothstepAdded(
-                Clamp01Added(
-                    (
-                        age_ms -
-                        PURE_SWEEP_ONLY_MS
-                    )
-                    /
-                    PURE_SWEEP_BODY_FADE_MS
-                )
-            );
-
-
-        float driven =
-            SoftClip(
-                osc *
-                sweep_drive
-            );
-
-
-        osc =
-            osc +
-            (
-                driven -
-                osc
-            ) *
-            onset_mix;
-
-
-        /* SHAPE tone control. */
-        float tone_a =
-            expf(
-                -TWO_PI *
-                sweep_cutoff_hz /
-                SAMPLE_RATE
-            );
-
-
-        tone_lp_state =
-            (1.0f - tone_a) * osc +
-            tone_a * tone_lp_state;
-
-        osc = tone_lp_state;
-
-
-        /*
-         * ULTRA-HF / LASER GUARD.
-         *
-         * Two cascaded one-poles opening from 3.2 kHz to 6.8 kHz over the
-         * first 16 ms. Leaving this out is what turned SHAPE into a click:
-         * a fast pitch fall is broadband, and without the guard the whole
-         * impulse reaches the output.
-         */
-        if(ENABLE_TRANSIENT_HF_GUARD)
-        {
-            float guard_cutoff =
-                TRANSIENT_HF_GUARD_INITIAL_HZ +
-                (
-                    TRANSIENT_HF_GUARD_FINAL_HZ -
-                    TRANSIENT_HF_GUARD_INITIAL_HZ
-                )
-                *
-                SmoothstepAdded(
-                    Clamp01Added(
-                        age_ms /
-                        TRANSIENT_HF_GUARD_OPEN_MS
-                    )
-                );
-
-
-            float guard_a =
-                expf(
-                    -TWO_PI *
-                    guard_cutoff /
-                    SAMPLE_RATE
-                );
-
-
-            hf_guard_state_1 =
-                (1.0f - guard_a) * osc +
-                guard_a * hf_guard_state_1;
-
-            hf_guard_state_2 =
-                (1.0f - guard_a) * hf_guard_state_1 +
-                guard_a * hf_guard_state_2;
-
-            osc = hf_guard_state_2;
-        }
-
-
-        /*
-         * Amplitude: smoothstep out of silence, then the SHAPE body curve
-         * that used to be the transient half of the anatomy crossfade.
-         */
-        float sweep_attack =
-            SmoothstepAdded(
-                Clamp01Added(
-                    static_cast<float>(age) /
-                    static_cast<float>(sweep_attack_samples)
-                )
-            );
-
-
-        float body_span =
-            handoff_end_ms -
-            handoff_start_ms;
-
-        if(body_span < 1.0f)
-            body_span = 1.0f;
-
-
-        float body =
-            cosf(
-                SmoothstepAdded(
-                    Clamp01Added(
-                        (
-                            age_ms -
-                            handoff_start_ms
-                        )
-                        /
-                        body_span
-                    )
-                )
-                *
-                1.57079632679f
-            );
-
-
-        sweep_out =
-            osc *
-            sweep_attack *
-            body *
-            sweep_level *
-            KICK_SWEEP_SUM_TRIM *
-            KICK_TRANSIENT_GAIN;
-
-
-        /* ---- SUB ---- */
-
-        float sub_hz =
-            base_hz *
-            tail_ratio;
-
-
-        if(sub_hz < TAIL_SWEEP_MIN_FREQUENCY_HZ)
-            sub_hz = TAIL_SWEEP_MIN_FREQUENCY_HZ;
-
-        if(sub_hz > TAIL_SWEEP_MAX_FREQUENCY_HZ)
-            sub_hz = TAIL_SWEEP_MAX_FREQUENCY_HZ;
-
-
-        float sub_attack =
-            SmoothstepAdded(
-                Clamp01Added(
-                    static_cast<float>(age) /
-                    static_cast<float>(sub_attack_samples)
-                )
-            );
-
-
-        sub_out =
-            sinf(
-                sub_phase *
-                TWO_PI
-            )
-            *
-            sub_attack *
-            sub_env *
-            KICK_TAIL_GAIN;
-
-
-        sub_phase += sub_hz / SAMPLE_RATE;
-
-        while(sub_phase >= 1.0f)
-            sub_phase -= 1.0f;
-
-        sub_env *= sub_decay_coeff;
-
-
-        age++;
-
-        /*
-         * The voice is done when the sub has decayed and the sweep body has
-         * closed. Only then can its state be reused.
-         */
-        if(sub_env < 0.000001f &&
-           age_ms > handoff_end_ms)
-        {
-            active = false;
-        }
-    }
-};
-
-
-static KickVoice kick_voice;
-static KickVoice kick_dying;
-
-/* Length of the steal fade on the voice being replaced. */
-static constexpr float KICK_STEAL_MS = 4.0f;
-
-static uint32_t kick_steal_age = 0;
-static uint32_t kick_steal_samples = 1;
-
 
 static void TriggerKickAudio(uint8_t velocity)
 {
@@ -4514,15 +4243,19 @@ static void TriggerKickAudio(uint8_t velocity)
 
 
     /*
-     * Filter memories are deliberately NOT zeroed here any more.
-     *
-     * Under the old generator they had to be: the phase bridge added a copy
-     * of the old tail on top of the new hit, so the filters had to be
-     * emptied or the two stacked. KickVoice starts from silence instead, so
-     * there is nothing to stack, and zeroing a running filter would itself
-     * be the step this redesign exists to remove. On a genuinely fresh hit
-     * they have already decayed to zero on their own.
+     * DO NOT zero live filter memories on an overlapping ratchet.
+     * Let the existing state continue from the exact previous sample.
      */
+    if(ResetDspStateForThisTrigger())
+    {
+        transient_tone_lp_state = 0.0f;
+        transient_hf_guard_state_1 = 0.0f;
+        transient_hf_guard_state_2 = 0.0f;
+
+        final_kick_hf_state_1 = 0.0f;
+        final_kick_hf_state_2 = 0.0f;
+        final_kick_hf_state_3 = 0.0f;
+    }
 
 
     /*
@@ -4564,7 +4297,17 @@ static void TriggerKickAudio(uint8_t velocity)
     transient_env.holding = true;
 
 
-
+    /*
+     * Preserve an already-sounding tail across a ratchet.
+     *
+     * StartTailAudio() below will retime/retrigger it smoothly. A hard
+     * value=0 here was another source of broadband ratchet clicks.
+     */
+    if(ResetDspStateForThisTrigger())
+    {
+        tail_env.active = false;
+        tail_env.value = 0.0f;
+    }
 
 
     /*
@@ -4601,6 +4344,39 @@ static void TriggerKickAudio(uint8_t velocity)
    START TAIL
    ============================================================ */
 
+static void StartTailAudio()
+{
+    /*
+     * Both fresh hits and ratchets use the same continuous mechanism:
+     *
+     * current level -> smooth 2.5 ms reinforcement toward 1 -> K2 decay
+     *
+     * No hard 0 or 1 assignment exists anywhere in this path.
+     */
+    tail_env.AttackThenDecayFromCurrent();
+
+
+    tail_env.attack =
+        0.005f;
+
+
+    tail_env.decay =
+        MacroDecaySeconds(
+            macro_decay
+        );
+
+
+    tail_env.decay_linearity =
+        TAIL_DECAY_LINEARITY;
+
+
+    /*
+     * Tail pitch gesture restarts, but oscillator PHASE is preserved
+     * during an overlapping ratchet.
+     */
+    tail_pitch_phase =
+        1.0f;
+}
 
 
 /* ============================================================
@@ -14581,56 +14357,32 @@ static void AudioCallback(
          * treated as a monophonic retrigger rather than a fresh voice.
          */
         kick_retrigger_active =
-            kick_voice.active;
+            tail_env.active &&
+            tail_env.value >
+            RATCHET_RETRIGGER_LEVEL_THRESHOLD;
 
 
         /*
-         * MONOPHONIC STEAL.
-         *
-         * The outgoing voice is copied aside and keeps running, untouched,
-         * into a short smoothstep fade. It is not reset, re-phased or
-         * re-enveloped, so it stays continuous in value and in slope; the
-         * new voice starts from silence beside it. Nothing here has to
-         * reconstruct or estimate the old waveform, which is what every
-         * previous attempt at this spent its effort on.
+         * Snapshot the old sine tail BEFORE the deterministic phase reset.
          */
-        if(kick_voice.active)
-        {
-            kick_dying = kick_voice;
-
-            kick_steal_age = 0;
-
-            kick_steal_samples =
-                static_cast<uint32_t>(
-                    KICK_STEAL_MS *
-                    SAMPLE_RATE /
-                    1000.0f
-                );
-
-            if(kick_steal_samples < 1)
-                kick_steal_samples = 1;
-        }
+        BeginRatchetPhaseBridge();
 
 
         /*
          * ORIGINAL fixed2 kick trigger.
-         *
-         * This is what latches this hit's SHAPE curves into
-         * transient_start_frequency, transient_pitch_time and the
-         * transient_shape and handoff currents, so it MUST run before
-         * KickVoice::Start() reads them.
          */
         TriggerKickAudio(
             last_velocity
         );
 
 
-        kick_voice.Start(
-            kick_frequency
-        );
-
-
-
+        /*
+         * Start the independent clean bass tail at Note-On.
+         *
+         * The new master gate envelope determines how long the COMPLETE
+         * kick is audible.
+         */
+        StartTailAudio();
 
 
         /*
@@ -14768,6 +14520,23 @@ static void AudioCallback(
 
 
     /*
+     * Gain compensation for oscillator morph.
+     */
+    float morph_gain =
+        USE_NEW_SHAPE_TRANSIENT_MACRO
+        ? (
+            1.0f -
+            oscillator_morph *
+            0.04f
+          )
+        : (
+            1.0f -
+            oscillator_morph *
+            0.13f
+          );
+
+
+    /*
      * Bass character gain.
      */
     float bass_character =
@@ -14873,102 +14642,100 @@ static void AudioCallback(
         out[KICK_OUTPUT_CHANNEL][i] = 0.0f;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = 0.0f;
         /* ====================================================
-           KICK VOICE — SWEEP + SUB
-           ====================================================
-
-           Everything that used to live here — the transient oscillator and
-           its morph/drive/HF-guard chain, the tail oscillator, the two
-           envelopes and the equal-power anatomy crossfade between them — is
-           now KickVoice. See its definition for why the envelopes start at
-           exactly zero and what that buys.
-
-           The contract with the rest of the engine is unchanged: this block
-           produces `transient`, `sub` and `clean_tail`, plus the two age
-           mixes the character bus and the output stage read.
-         */
+           TRANSIENT PITCH
+           ==================================================== */
 
         /*
-         * Velocity-derived sub pitch movement. Advanced ONCE per sample and
-         * handed to both voices, so a stolen voice cannot double-advance it.
+         * Exponential pitch descent.
+         *
+         * transient_pitch_phase starts at 1 and decays toward 0.
          */
+        float transient_decay =
+            expf(
+                -6.9078f /
+                (
+                    transient_pitch_time
+                    * SAMPLE_RATE
+                )
+            );
+
+
+        transient_pitch_phase *=
+            transient_decay;
+
+
+        float transient_frequency =
+            kick_frequency +
+            (
+                transient_start_frequency
+                - kick_frequency
+            )
+            *
+            transient_pitch_phase;
+
+
+        if(transient_frequency < kick_frequency)
+            transient_frequency =
+                kick_frequency;
+
+
+        /* ====================================================
+           TAIL PITCH — VELOCITY PERFORMANCE CONTROL
+           ====================================================
+
+           The old source calculated a tail_frequency_current but then
+           advanced the actual tail oscillator with plain kick_frequency,
+           so that pitch calculation was inaudible.
+
+           The clean tail now uses the velocity-derived ratio for its
+           REAL oscillator increment.
+         */
+
         float tail_pitch_ratio =
             ProcessVelocityTailPitchRatio();
 
 
-        float transient = 0.0f;
-        float sub_voice = 0.0f;
-
-
-        kick_voice.Render(
-            tail_pitch_ratio,
-            transient,
-            sub_voice
-        );
+        float tail_frequency_current =
+            kick_frequency *
+            tail_pitch_ratio;
 
 
         /*
-         * The stolen voice, still running untouched, faded out over
-         * KICK_STEAL_MS. Smoothstep is flat at both ends, so joining it and
-         * leaving it are both free of a slope step.
+         * Keep the playable sweep inside a safe sub/kick range.
          */
-        if(kick_dying.active &&
-           kick_steal_age < kick_steal_samples)
+        if(tail_frequency_current <
+           TAIL_SWEEP_MIN_FREQUENCY_HZ)
         {
-            float steal_gain =
-                1.0f -
-                SmoothstepAdded(
-                    static_cast<float>(kick_steal_age) /
-                    static_cast<float>(kick_steal_samples)
-                );
+            tail_frequency_current =
+                TAIL_SWEEP_MIN_FREQUENCY_HZ;
+        }
 
 
-            float dying_sweep = 0.0f;
-            float dying_sub = 0.0f;
-
-
-            kick_dying.Render(
-                tail_pitch_ratio,
-                dying_sweep,
-                dying_sub
-            );
-
-
-            transient += dying_sweep * steal_gain;
-            sub_voice += dying_sub * steal_gain;
-
-
-            kick_steal_age++;
-
-
-            if(kick_steal_age >= kick_steal_samples)
-                kick_dying.active = false;
+        if(tail_frequency_current >
+           TAIL_SWEEP_MAX_FREQUENCY_HZ)
+        {
+            tail_frequency_current =
+                TAIL_SWEEP_MAX_FREQUENCY_HZ;
         }
 
 
         /*
-         * KickVoice already applied the envelopes, so the separation trim
-         * that used to ride on clean_tail_gain is applied here instead.
+         * Musical anatomy handoff for this sample.
          */
-        float clean_tail =
-            sub_voice *
-            (
-                0.52f +
-                separation *
-                0.20f
-            );
+        float transient_handoff_gain = 1.0f;
+        float tail_handoff_gain = 0.0f;
 
 
-        transient *=
-            0.52f;
+        GetTransientTailCrossfade(
+            transient_handoff_gain,
+            tail_handoff_gain
+        );
 
 
-        /* ====================================================
-           AGE MIXES
-           ====================================================
-
-           Read by the character bus and the output headroom. Unchanged.
+        /*
+         * 0 through first 20 ms.
+         * Smoothly rises to 1 through 20..30 ms.
          */
-
         float current_kick_age_ms =
             static_cast<float>(
                 kick_age_samples
@@ -15007,6 +14774,282 @@ static void AudioCallback(
                 ),
                 character_open_mix_state
             );
+
+
+        /* ====================================================
+           TRANSIENT OSCILLATOR
+           ==================================================== */
+
+        float transient =
+            GenerateTransientOscillator(
+                transient_frequency,
+                oscillator_morph
+            );
+
+
+        if(USE_NEW_SHAPE_TRANSIENT_MACRO)
+        {
+            /*
+             * NEW:
+             * SHAPE decides whether a bright transient is admitted.
+             * Velocity remains a timbral modifier, never loudness.
+             */
+            float transient_drive =
+                transient_shape_drive_current;
+
+
+            float driven_transient =
+                SoftClip(
+                    transient *
+                    transient_drive
+                );
+
+
+            /*
+             * Preserve the actual sine oscillator for the first 20 ms.
+             * Saturation only fades in with the body after that point.
+             */
+            transient =
+                transient +
+                (
+                    driven_transient -
+                    transient
+                )
+                *
+                onset_processed_mix;
+
+
+            float transient_cutoff =
+                transient_shape_cutoff_current;
+
+
+            transient_cutoff =
+                ClampAdded(
+                    transient_cutoff,
+                    500.0f,
+                    12000.0f
+                );
+
+
+            float transient_lp_a =
+                expf(
+                    -TWO_PI *
+                    transient_cutoff /
+                    SAMPLE_RATE
+                );
+
+
+            transient_tone_lp_state =
+                (
+                    1.0f -
+                    transient_lp_a
+                ) *
+                transient
+                +
+                transient_lp_a *
+                transient_tone_lp_state;
+
+
+            transient =
+                transient_tone_lp_state;
+        }
+        else
+        {
+            /*
+             * PREVIOUS VERSION:
+             * fixed transient character drive, no SHAPE tone LP.
+             */
+            float transient_drive =
+                1.05f +
+                DEFAULT_TRANSIENT_CHARACTER *
+                1.45f;
+
+
+            transient =
+                SoftClip(
+                    transient *
+                    transient_drive
+                );
+        }
+
+
+        /*
+         * ====================================================
+         * INDEPENDENT ULTRA-HF / LASER GUARD
+         * ====================================================
+         *
+         * Two cascaded one-poles strongly suppress the >8 kHz impulse
+         * that otherwise gets exaggerated by distortion and resonant FX.
+         *
+         * The filter opens smoothly from ~3.2 kHz to only ~6.8 kHz
+         * during the first 16 ms. This deliberately makes the protected
+         * 65..95 Hz knock/body carry more of the kick's identity.
+         */
+        if(ENABLE_TRANSIENT_HF_GUARD)
+        {
+            float age_ms =
+                static_cast<float>(
+                    kick_age_samples
+                ) *
+                1000.0f /
+                SAMPLE_RATE;
+
+
+            float open_t =
+                SmoothstepAdded(
+                    Clamp01Added(
+                        age_ms /
+                        TRANSIENT_HF_GUARD_OPEN_MS
+                    )
+                );
+
+
+            float guard_cutoff =
+                TRANSIENT_HF_GUARD_INITIAL_HZ +
+                (
+                    TRANSIENT_HF_GUARD_FINAL_HZ -
+                    TRANSIENT_HF_GUARD_INITIAL_HZ
+                ) *
+                open_t;
+
+
+            float guard_a =
+                expf(
+                    -TWO_PI *
+                    guard_cutoff /
+                    SAMPLE_RATE
+                );
+
+
+            transient_hf_guard_state_1 =
+                (
+                    1.0f -
+                    guard_a
+                ) *
+                transient
+                +
+                guard_a *
+                transient_hf_guard_state_1;
+
+
+            transient_hf_guard_state_2 =
+                (
+                    1.0f -
+                    guard_a
+                ) *
+                transient_hf_guard_state_1
+                +
+                guard_a *
+                transient_hf_guard_state_2;
+
+
+            transient =
+                transient_hf_guard_state_2;
+        }
+
+
+        /* ====================================================
+           TRANSIENT ENVELOPE
+           ==================================================== */
+
+        float transient_amp =
+            transient_env.Process(
+                SAMPLE_RATE
+            );
+
+
+        /*
+         * Small gain compensation as harmonic content rises.
+         */
+        transient *=
+            transient_amp *
+            morph_gain *
+            0.52f *
+            KICK_TRANSIENT_GAIN *
+            (
+                USE_NEW_SHAPE_TRANSIENT_MACRO
+                ? transient_shape_gain_current
+                : 1.0f
+            ) *
+            transient_handoff_gain;
+
+
+        /* ====================================================
+           CLEAN SUB
+           ==================================================== */
+
+        float sub_increment =
+            tail_frequency_current /
+            SAMPLE_RATE;
+
+
+        if(sub_increment > 0.45f)
+            sub_increment = 0.45f;
+
+
+        float sub =
+            sinf(
+                sub_phase *
+                6.28318530718f
+            );
+
+
+        sub_phase +=
+            sub_increment;
+
+
+        if(sub_phase >= 1.0f)
+            sub_phase -= 1.0f;
+
+
+        /*
+         * SHARED K2 DECAY ENVELOPE.
+         *
+         * This exact tail_amp controls both the clean sub below and the
+         * phase-coherent processed-tail feed into Mackie/Sherman.
+         */
+        float tail_amp =
+            tail_env.Process(
+                SAMPLE_RATE
+            );
+
+
+        /*
+         * Clean low-frequency tail.
+         */
+        float clean_tail_gain =
+            tail_amp *
+            (
+                0.52f +
+                separation *
+                0.20f
+            ) *
+            KICK_TAIL_GAIN *
+            tail_handoff_gain;
+
+
+        float clean_tail =
+            sub *
+            clean_tail_gain;
+
+
+        /*
+         * Continuously expose the old sine's exact musical state so an
+         * overlapping phase-locked retrigger can bridge it cleanly.
+         */
+        current_clean_tail_gain_for_bridge =
+            clean_tail_gain;
+
+
+        current_tail_frequency_for_bridge =
+            tail_frequency_current;
+
+
+        /*
+         * K2 reverse and K3 tail-delay no longer touch only clean_tail.
+         * Both are routed later, after the complete kick body has been
+         * assembled.
+         */
 
 
         /* ====================================================
@@ -15433,7 +15476,7 @@ static void AudioCallback(
         {
             protected_punch =
                 added_protected_punch.Process(
-                    kick_voice.last_sweep_hz,
+                    transient_frequency,
                     oscillator_morph,
                     punch_envelope
                 );
@@ -15614,6 +15657,16 @@ static void AudioCallback(
             signal =
                 final_kick_hf_state_3;
         }
+
+
+        /*
+         * Deterministic ratchet handoff:
+         * old continuing sine tail -> new reset-phase kick.
+         */
+        signal =
+            ProcessRatchetPhaseBridge(
+                signal
+            );
 
 
         last_generated_kick_signal =
@@ -15935,11 +15988,6 @@ int main(void)
      * Reset oscillators.
      */
     kick_retrigger_active = false;
-
-    kick_voice.Reset();
-    kick_dying.Reset();
-    kick_steal_age = 0;
-    kick_steal_samples = 1;
 
     ratchet_phase_bridge_active = false;
     ratchet_bridge_phase = 0.0f;
