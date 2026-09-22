@@ -162,6 +162,19 @@ static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
 static constexpr float PARAM_SHERMAN_GAIN_MAX = 2.5f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
+
+/*
+ * CC wrote these directly and they are read per sample, so every message
+ * stepped the gain - audible as a tick while turning, worst on SUB where the
+ * step lands on a loud low sine. CC now writes *_target; audio slews to it.
+ */
+static volatile float param_line_gain_target    = 2.8184f;
+static volatile float param_mackie_gain_target  = 1.01703f;
+static volatile float param_sherman_gain_target = 1.56710f;
+static volatile float param_bpf_gain_target     = 4.0f;
+static volatile float param_sub_gain_target     = 0.95f;
+static volatile float param_punch_gain_target   = 1.0f;
+static constexpr float PARAM_GAIN_SLEW = 0.06f;
 static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
 
 /* How much of the punch is held out of the tail-delay duck. 1 = immune. */
@@ -883,27 +896,19 @@ static bool PSY_PHASE_LOCK_EVERY_HIT = true;
  * tiny synthetic copy of the OLD sine tail while the NEW deterministic
  * kick fades in.
  *
- * 3.5 ms is short enough to preserve timing but long enough to remove
- * the discontinuity that a hard phase reset would otherwise create.
+ * 8 ms is the knee. Shorter and the handover is abrupt enough to be heard;
+ * longer and the complementary fade below starts eating the new hit's attack
+ * - measured attack retention is flat to 8 ms and falls away from 9 ms.
  */
-static constexpr float RATCHET_PHASE_BRIDGE_MS = 3.5f;
+static constexpr float RATCHET_PHASE_BRIDGE_MS = 8.0f;
 
 /*
- * The bridge continues only the old FUNDAMENTAL. Everything above it — the
- * supers, and whatever the character bus was still putting out — is carried
- * as a single residual and faded away.
- *
- * At 0.65 ms that fade was itself a transient, around 1.5 kHz. It went
- * unnoticed while the residual was tiny, but decay decides how loud the
- * previous hit still is when the next one lands: wind decay up and
- * overlapping notes tick, because a large value is being removed in well
- * under a millisecond.
- *
- * Reaching -60 dB at 3 ms puts the fade below the audible click range while
- * still finishing inside RATCHET_PHASE_BRIDGE_MS, so the old remainder is
- * gone by the time the crossfade hands over and cannot smear the new attack.
+ * The bridge continues the old FUNDAMENTAL only. Everything above it - the
+ * supers, and whatever the character bus was still putting out - is dropped
+ * at the handover rather than faded, because the resonator below continues
+ * the waveform the engine really produced and there is no separate residual
+ * left to dispose of.
  */
-static constexpr float RATCHET_RESIDUAL_DECAY_MS = 3.0f;
 
 
 /* ============================================================
@@ -2644,15 +2649,33 @@ static bool kick_retrigger_active = false;
  */
 static bool ratchet_phase_bridge_active = false;
 
-static float ratchet_bridge_phase = 0.0f;
 static float ratchet_bridge_frequency = 55.0f;
-static float ratchet_bridge_tail_gain = 0.0f;
-static float ratchet_bridge_residual = 0.0f;
 
 static uint32_t ratchet_bridge_pos = 0;
 static uint32_t ratchet_bridge_samples = 1;
 
 static float last_generated_kick_signal = 0.0f;
+static float prev_generated_kick_signal = 0.0f;
+
+/*
+ * Two-pole sinusoidal resonator used to continue the old tail.
+ *
+ *     y[n] = k*y[n-1] - y[n-2],  k = 2*cos(2*pi*f/fs)
+ *
+ * Seeded with the last two samples the engine actually produced, this is the
+ * exact continuation of whatever sinusoid at f passes through them: right
+ * amplitude, right phase, right SLOPE, with nothing estimated.
+ *
+ * The old bridge reconstructed sin(phase)*guessed_amplitude and patched the
+ * error with an additive residual that was then decayed away in under a ms.
+ * That made the value continuous but not the derivative - the residual lost
+ * ~20% of itself in the FIRST sample, which is a kink, and a kink radiates
+ * broadband energy proportional to the tail level. That was the last of the
+ * sub-proportional retrigger click.
+ */
+static float ratchet_bridge_k  = 0.0f;
+static float ratchet_bridge_y1 = 0.0f;
+static float ratchet_bridge_y2 = 0.0f;
 static float current_clean_tail_gain_for_bridge = 0.0f;
 static float current_tail_frequency_for_bridge = 55.0f;
 
@@ -3300,10 +3323,6 @@ static void BeginRatchetPhaseBridge()
     }
 
 
-    ratchet_bridge_phase =
-        sub_phase;
-
-
     ratchet_bridge_frequency =
         ClampAdded(
             current_tail_frequency_for_bridge,
@@ -3312,26 +3331,25 @@ static void BeginRatchetPhaseBridge()
         );
 
 
-    ratchet_bridge_tail_gain =
-        current_clean_tail_gain_for_bridge;
-
-
     /*
-     * Predict the next old-tail sample. Build the tiny residual so the
-     * first bridge output equals the exact previous generated-kick value.
+     * Seed the resonator from the two samples the engine really produced.
+     * No amplitude is measured and no residual is needed.
      */
-    float predicted_old_tail =
-        sinf(
-            ratchet_bridge_phase *
-            TWO_PI
-        )
-        *
-        ratchet_bridge_tail_gain;
+    ratchet_bridge_k =
+        2.0f *
+        cosf(
+            TWO_PI *
+            ratchet_bridge_frequency /
+            SAMPLE_RATE
+        );
 
 
-    ratchet_bridge_residual =
-        last_generated_kick_signal -
-        predicted_old_tail;
+    ratchet_bridge_y1 =
+        last_generated_kick_signal;
+
+
+    ratchet_bridge_y2 =
+        prev_generated_kick_signal;
 
 
     ratchet_bridge_pos = 0;
@@ -3383,69 +3401,45 @@ static float ProcessRatchetPhaseBridge(
 
 
     /*
-     * Continue the OLD low-frequency sine for a few milliseconds.
+     * Continue the OLD tail exactly: the next sample of the sinusoid that
+     * the last two real output samples were already on.
      */
-    float old_tail =
-        sinf(
-            ratchet_bridge_phase *
-            TWO_PI
-        )
-        *
-        ratchet_bridge_tail_gain;
-
-
-    ratchet_bridge_phase +=
-        ratchet_bridge_frequency /
-        SAMPLE_RATE;
-
-
-    while(ratchet_bridge_phase >= 1.0f)
-        ratchet_bridge_phase -= 1.0f;
-
-
-    /*
-     * Preserve exact sample continuity at t=0, but discard the old
-     * nonlinear/HF remainder extremely quickly.
-     */
-    float elapsed_ms =
-        static_cast<float>(
-            ratchet_bridge_pos
-        )
-        *
-        1000.0f /
-        SAMPLE_RATE;
-
-
-    float residual_gain =
-        expf(
-            -6.9078f *
-            elapsed_ms /
-            RATCHET_RESIDUAL_DECAY_MS
-        );
-
-
     float old_bridge =
-        old_tail +
-        ratchet_bridge_residual *
-        residual_gain;
+        ratchet_bridge_k *
+        ratchet_bridge_y1
+        -
+        ratchet_bridge_y2;
+
+
+    ratchet_bridge_y2 =
+        ratchet_bridge_y1;
+
+
+    ratchet_bridge_y1 =
+        old_bridge;
 
 
     /*
-     * Equal-power handoff:
-     * old deterministic continuation -> new deterministic phase-reset hit.
+     * Complementary fade between the old continuation and the new hit.
+     *
+     * Leaving the new hit at unity instead - "voice steal", on the argument
+     * that its own envelope should bring it in - only works while something
+     * else is holding the new voice down for the length of the bridge. The
+     * transient/tail handoff used to do exactly that by gating the tail lane
+     * off at every retrigger, which is the bug this change set removes. With
+     * the tail lane now continuous, unity double-counts it: measured 1.8x
+     * WORSE than before at PUNCH 100.
+     *
+     * Equal-power (cos/sin) is wrong here for the opposite reason - the two
+     * sides are the same fundamental, so where they correlate it sums to
+     * sqrt(2). Linear complementary can never exceed the larger of the two.
      */
     float old_gain =
-        cosf(
-            smooth_t *
-            1.57079632679f
-        );
+        1.0f - smooth_t;
 
 
     float new_gain =
-        sinf(
-            smooth_t *
-            1.57079632679f
-        );
+        smooth_t;
 
 
     float output =
@@ -4018,6 +4012,33 @@ static float ProcessVelocityTailPitchRatio()
 }
 
 
+/*
+ * THE TAIL LANE MUST NOT BE GATED OFF BY AN OVERLAPPING RATCHET.
+ *
+ * GetTransientTailCrossfade() derives the transient/tail handoff purely from
+ * kick_age_samples, and TriggerKickAudio() zeroes that on every hit including
+ * a retrigger. tail_gain therefore STEPPED from whatever it was straight back
+ * to sin(0) = 0 and needed the full ~44 ms handoff to climb out again.
+ *
+ * On a fresh hit that is correct - there is no tail yet. On an overlap it
+ * truncated a sub sine that was still at full amplitude, and only the
+ * transient/punch lane rising in its place hid the hole. With PUNCH at 0%
+ * nothing filled it: the sub was ramped to digital silence in the 5 ms phase
+ * bridge and the output then sat at exact zero for ~30 ms. That is the
+ * retrigger click, and it is why the click scaled with SUB, vanished at SUB
+ * 0, needed an overlap, grew with decay, and was masked by punch.
+ *
+ * The fix is to let the new hit's tail curve rise FROM the level the tail was
+ * already at rather than from zero. The TRANSIENT lane is deliberately left
+ * alone: resuming the equal-power curve at the old position instead would
+ * attenuate the transient by the same amount, and because the position then
+ * ratchets upward hit after hit, a roll would lose its attack entirely.
+ *
+ * 0 on a fresh hit, so non-overlapping behaviour is bit-identical.
+ */
+static float ratchet_tail_handoff_floor = 0.0f;
+
+
 static void GetTransientTailCrossfade(
     float& transient_gain,
     float& tail_gain)
@@ -4094,6 +4115,20 @@ static void GetTransientTailCrossfade(
             t *
             1.57079632679f
         );
+
+
+    /*
+     * Never below where the previous hit's tail already was. Converges to the
+     * unmodified curve as it reaches 1, so the steady state is unchanged.
+     */
+    tail_gain =
+        ratchet_tail_handoff_floor +
+        (
+            1.0f -
+            ratchet_tail_handoff_floor
+        )
+        *
+        tail_gain;
 }
 
 
@@ -4104,6 +4139,32 @@ static void GetTransientTailCrossfade(
 static void TriggerKickAudio(uint8_t velocity)
 {
     ResetKickPhases();
+
+
+    /*
+     * Read the handoff the OLD hit had reached before its timeline is
+     * discarded, so the tail lane resumes from there instead of from zero.
+     * See ratchet_tail_handoff_floor.
+     */
+    if(kick_retrigger_active)
+    {
+        float live_transient_gain = 1.0f;
+        float live_tail_gain      = 0.0f;
+
+
+        GetTransientTailCrossfade(
+            live_transient_gain,
+            live_tail_gain
+        );
+
+
+        ratchet_tail_handoff_floor =
+            live_tail_gain;
+    }
+    else
+    {
+        ratchet_tail_handoff_floor = 0.0f;
+    }
 
 
     /*
@@ -4344,6 +4405,12 @@ static void StartTailAudio()
     tail_env.AttackThenDecayFromCurrent();
 
 
+    /*
+     * 5 ms was tried here on the theory that the sub reaching level more
+     * slowly would make less broadband energy at the onset. Rendered against
+     * 2.5 ms it is bit-identical on a single hit, so it bought nothing and
+     * only moved the attack/decay handover. Back to 2.5.
+     */
     tail_env.attack =
         0.0025f;
 
@@ -11613,11 +11680,22 @@ struct AddedPerformanceFx
 
 
         /*
-         * Kick performance chain deliberately ends here:
+         * The LPF object existed and was reset, but was never processed here,
+         * so CC34 moved a filter that nothing listened to and the control did
+         * nothing at all on the kick. Its external twin was always wired.
+         */
+        x =
+            macro_dj_lowpass.Process(
+                x
+            );
+
+
+        /*
+         * Kick performance chain:
          *
-         *     STUTTER -> HPF
+         *     STUTTER -> HPF -> LPF
          *
-         * LOOPER, LPF, pump and delay are external-input effects only.
+         * LOOPER, pump and delay remain external-input effects only.
          */
         return x;
     }
@@ -13605,27 +13683,27 @@ static bool HandleSixMacroCC(
            ==================================================== */
 
         case CC_MIX_LINE_GAIN:
-            param_line_gain = v * PARAM_LINE_GAIN_MAX;
+            param_line_gain_target = v * PARAM_LINE_GAIN_MAX;
             return true;
 
         case CC_MIX_MACKIE_GAIN:
-            param_mackie_gain = v * PARAM_MACKIE_GAIN_MAX;
+            param_mackie_gain_target = v * PARAM_MACKIE_GAIN_MAX;
             return true;
 
         case CC_MIX_SHERMAN_GAIN:
-            param_sherman_gain = v * PARAM_SHERMAN_GAIN_MAX;
+            param_sherman_gain_target = v * PARAM_SHERMAN_GAIN_MAX;
             return true;
 
         case CC_MIX_BPF_GAIN:
-            param_bpf_gain = v * PARAM_BPF_GAIN_MAX;
+            param_bpf_gain_target = v * PARAM_BPF_GAIN_MAX;
             return true;
 
         case CC_MIX_SUB_GAIN:
-            param_sub_gain = v * PARAM_SUB_GAIN_MAX;
+            param_sub_gain_target = v * PARAM_SUB_GAIN_MAX;
             return true;
 
         case CC_MIX_PUNCH_GAIN:
-            param_punch_gain = v * PARAM_PUNCH_GAIN_MAX;
+            param_punch_gain_target = v * PARAM_PUNCH_GAIN_MAX;
             return true;
 
 
@@ -14618,6 +14696,15 @@ static void AudioCallback(
      * Macro-4 BPF layer frequency smoothing/coefficient update.
      */
     macro_bpf_bank.Update();
+
+
+    /* Slew the mix gains toward their CC targets; see their declarations. */
+    param_line_gain    += (param_line_gain_target    - param_line_gain)    * PARAM_GAIN_SLEW;
+    param_mackie_gain  += (param_mackie_gain_target  - param_mackie_gain)  * PARAM_GAIN_SLEW;
+    param_sherman_gain += (param_sherman_gain_target - param_sherman_gain) * PARAM_GAIN_SLEW;
+    param_bpf_gain     += (param_bpf_gain_target     - param_bpf_gain)     * PARAM_GAIN_SLEW;
+    param_sub_gain     += (param_sub_gain_target     - param_sub_gain)     * PARAM_GAIN_SLEW;
+    param_punch_gain   += (param_punch_gain_target   - param_punch_gain)   * PARAM_GAIN_SLEW;
 
 
     /*
@@ -15676,6 +15763,9 @@ static void AudioCallback(
             );
 
 
+        prev_generated_kick_signal =
+            last_generated_kick_signal;
+
         last_generated_kick_signal =
             signal;
 
@@ -15988,15 +16078,18 @@ int main(void)
      */
     kick_retrigger_active = false;
 
+    ratchet_tail_handoff_floor = 0.0f;
+
     ratchet_phase_bridge_active = false;
-    ratchet_bridge_phase = 0.0f;
     ratchet_bridge_frequency = 55.0f;
-    ratchet_bridge_tail_gain = 0.0f;
-    ratchet_bridge_residual = 0.0f;
     ratchet_bridge_pos = 0;
     ratchet_bridge_samples = 1;
 
     last_generated_kick_signal = 0.0f;
+    prev_generated_kick_signal = 0.0f;
+    ratchet_bridge_k = 0.0f;
+    ratchet_bridge_y1 = 0.0f;
+    ratchet_bridge_y2 = 0.0f;
     current_clean_tail_gain_for_bridge = 0.0f;
     current_tail_frequency_for_bridge = 55.0f;
 
