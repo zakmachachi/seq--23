@@ -3890,20 +3890,42 @@ static float ProcessVelocityTailPitchRatio()
    came from.
  */
 
-/* Ramp lengths. Short enough to stay punchy, long enough to be silent. */
+/*
+ * Envelope ramp-in lengths. Short enough to stay punchy, long enough that the
+ * output leaves silence smoothly rather than stepping out of it.
+ */
 static constexpr float KICK_SWEEP_ATTACK_MS = 0.35f;
 static constexpr float KICK_SUB_ATTACK_MS   = 2.0f;
 
-/* How far above the note the sweep starts, at SHAPE 1. */
-static constexpr float KICK_SWEEP_MAX_RATIO = 16.0f;
+/*
+ * The sweep's CHARACTER is not defined here. Start frequency, fall time,
+ * level, drive, tone cutoff and length all come from the existing SHAPE
+ * curves, latched per hit by TriggerKickAudio into transient_start_frequency,
+ * transient_pitch_time, transient_shape_*_current and
+ * transient_handoff_*_ms_current. That is the ROUND -> PUNCH -> SNAP
+ * continuum people already know, and the laser at the top of the knob is the
+ * SNAP end of it: up to 3 kHz falling over 110 ms with a 115..165 ms body.
+ *
+ * An earlier version of this struct invented its own curves - 16x the note
+ * falling in 5 ms - which is not a laser, it is an impulse, and it clicked.
+ */
 
-/* Sweep pitch-fall time, SHAPE 0 -> SHAPE 1. */
-static constexpr float KICK_SWEEP_FALL_SLOW_MS = 42.0f;
-static constexpr float KICK_SWEEP_FALL_FAST_MS = 5.0f;
+/* SHAPE 0 must be NO punch, below where the old gain curve bottoms out. */
+static constexpr float KICK_SWEEP_MUTE_ZONE = 0.10f;
 
-/* Sweep amplitude decay, SHAPE 0 -> SHAPE 1. */
-static constexpr float KICK_SWEEP_DECAY_SLOW_MS = 90.0f;
-static constexpr float KICK_SWEEP_DECAY_FAST_MS = 26.0f;
+/*
+ * The sweep and the sub now sound TOGETHER, where the old anatomy crossfade
+ * ran them one at a time at equal power. Their peaks therefore add instead of
+ * alternating, which measured 1.45x hotter with SHAPE up and pushed the kick
+ * much further into OutputCeiling's knee. The sub lane is already level with
+ * the old engine (0.96x at SHAPE 0), so the trim belongs on the sweep alone.
+ *
+ * This is gain staging, not the old coupling: a fixed number, not a curve one
+ * lane drives from the other's timeline.
+ */
+static constexpr float KICK_SWEEP_SUM_TRIM = 0.75f;
+
+static inline float SoftClip(float x);
 
 
 static float ExpCoeffPerSample(float ms)
@@ -3930,10 +3952,17 @@ struct KickVoice
     float    sweep_pitch;          /* 1 -> 0, exponential */
     float    sweep_pitch_coeff;
     float    sweep_span_hz;        /* start frequency minus the note */
-    float    sweep_env;            /* 1 -> 0, exponential */
-    float    sweep_decay_coeff;
     float    sweep_level;          /* 0 at SHAPE 0 = no punch */
+    float    sweep_drive;
+    float    sweep_cutoff_hz;
+    float    handoff_start_ms;     /* the sweep's own body length */
+    float    handoff_end_ms;
     uint32_t sweep_attack_samples;
+
+    /* Per-voice filter memory, so a stolen voice keeps its own. */
+    float    tone_lp_state;
+    float    hf_guard_state_1;
+    float    hf_guard_state_2;
 
     /* SUB */
     float    sub_phase;
@@ -3953,10 +3982,16 @@ struct KickVoice
         sweep_pitch = 0.0f;
         sweep_pitch_coeff = 0.0f;
         sweep_span_hz = 0.0f;
-        sweep_env = 0.0f;
-        sweep_decay_coeff = 0.0f;
         sweep_level = 0.0f;
+        sweep_drive = 1.0f;
+        sweep_cutoff_hz = 6000.0f;
+        handoff_start_ms = 36.0f;
+        handoff_end_ms = 82.0f;
         sweep_attack_samples = 1;
+
+        tone_lp_state = 0.0f;
+        hf_guard_state_1 = 0.0f;
+        hf_guard_state_2 = 0.0f;
 
         sub_phase = 0.0f;
         sub_env = 0.0f;
@@ -3985,46 +4020,71 @@ struct KickVoice
         sub_phase = 0.0f;
 
         sweep_pitch = 1.0f;
-        sweep_env = 1.0f;
         sub_env = 1.0f;
 
         age = 0;
         active = true;
 
+        tone_lp_state = 0.0f;
+        hf_guard_state_1 = 0.0f;
+        hf_guard_state_2 = 0.0f;
 
-        /*
-         * SHAPE is the punch, end to end: at 0 the sweep is silent and the
-         * kick is the bass tone alone; at 1 it starts 16x above the note and
-         * lands in 5 ms, which is the laser.
-         */
-        sweep_level = shape;
+
+        /* ---- SWEEP: the existing SHAPE continuum, latched for this hit ---- */
 
         sweep_span_hz =
-            note_hz *
-            (
-                KICK_SWEEP_MAX_RATIO -
-                1.0f
-            )
-            *
-            shape;
+            transient_start_frequency -
+            note_hz;
+
+        if(sweep_span_hz < 0.0f)
+            sweep_span_hz = 0.0f;
+
 
         sweep_pitch_coeff =
             ExpCoeffPerSample(
-                KICK_SWEEP_FALL_SLOW_MS +
-                (
-                    KICK_SWEEP_FALL_FAST_MS -
-                    KICK_SWEEP_FALL_SLOW_MS
-                ) * shape
+                transient_pitch_time *
+                1000.0f
             );
 
-        sweep_decay_coeff =
-            ExpCoeffPerSample(
-                KICK_SWEEP_DECAY_SLOW_MS +
-                (
-                    KICK_SWEEP_DECAY_FAST_MS -
-                    KICK_SWEEP_DECAY_SLOW_MS
-                ) * shape
+
+        /*
+         * Old gain curve (ROUND 0.16 -> PUNCH 0.62 -> SNAP 1.00), taken to
+         * silence across the bottom of the knob so 0 really is no punch.
+         */
+        sweep_level =
+            transient_shape_gain_current *
+            SmoothstepAdded(
+                Clamp01Added(
+                    shape /
+                    KICK_SWEEP_MUTE_ZONE
+                )
             );
+
+
+        sweep_drive =
+            transient_shape_drive_current;
+
+
+        sweep_cutoff_hz =
+            ClampAdded(
+                transient_shape_cutoff_current,
+                500.0f,
+                12000.0f
+            );
+
+
+        /*
+         * The sweep's own length. This is the curve that used to be the
+         * transient/tail anatomy crossfade; it now shapes ONLY the sweep, so
+         * the sub no longer has its level dictated by the punch's timeline.
+         * That coupling is what made the tail drop out under a retrigger.
+         */
+        handoff_start_ms =
+            transient_handoff_start_ms_current;
+
+        handoff_end_ms =
+            transient_handoff_end_ms_current;
+
 
         sweep_attack_samples =
             static_cast<uint32_t>(
@@ -4037,7 +4097,8 @@ struct KickVoice
             sweep_attack_samples = 1;
 
 
-        /* K2 owns the bass tone's length, exactly as before. */
+        /* ---- SUB: K2 still owns the bass tone's length ---- */
+
         sub_decay_coeff =
             ExpCoeffPerSample(
                 MacroDecaySeconds(
@@ -4077,6 +4138,12 @@ struct KickVoice
 
         /* ---- SWEEP ---- */
 
+        float age_ms =
+            static_cast<float>(age) *
+            1000.0f /
+            SAMPLE_RATE;
+
+
         float sweep_hz =
             base_hz +
             sweep_span_hz *
@@ -4086,6 +4153,127 @@ struct KickVoice
         last_sweep_hz = sweep_hz;
 
 
+        /* The oscillator has always been bounded here; keep that bound. */
+        if(sweep_hz > 1200.0f)
+            sweep_hz = 1200.0f;
+
+        if(sweep_hz < 20.0f)
+            sweep_hz = 20.0f;
+
+
+        float osc =
+            sinf(
+                sweep_phase *
+                TWO_PI
+            );
+
+
+        sweep_phase += sweep_hz / SAMPLE_RATE;
+
+        while(sweep_phase >= 1.0f)
+            sweep_phase -= 1.0f;
+
+        sweep_pitch *= sweep_pitch_coeff;
+
+
+        /*
+         * Saturation fades in with the body rather than hitting the bare
+         * onset, exactly as before.
+         */
+        float onset_mix =
+            SmoothstepAdded(
+                Clamp01Added(
+                    (
+                        age_ms -
+                        PURE_SWEEP_ONLY_MS
+                    )
+                    /
+                    PURE_SWEEP_BODY_FADE_MS
+                )
+            );
+
+
+        float driven =
+            SoftClip(
+                osc *
+                sweep_drive
+            );
+
+
+        osc =
+            osc +
+            (
+                driven -
+                osc
+            ) *
+            onset_mix;
+
+
+        /* SHAPE tone control. */
+        float tone_a =
+            expf(
+                -TWO_PI *
+                sweep_cutoff_hz /
+                SAMPLE_RATE
+            );
+
+
+        tone_lp_state =
+            (1.0f - tone_a) * osc +
+            tone_a * tone_lp_state;
+
+        osc = tone_lp_state;
+
+
+        /*
+         * ULTRA-HF / LASER GUARD.
+         *
+         * Two cascaded one-poles opening from 3.2 kHz to 6.8 kHz over the
+         * first 16 ms. Leaving this out is what turned SHAPE into a click:
+         * a fast pitch fall is broadband, and without the guard the whole
+         * impulse reaches the output.
+         */
+        if(ENABLE_TRANSIENT_HF_GUARD)
+        {
+            float guard_cutoff =
+                TRANSIENT_HF_GUARD_INITIAL_HZ +
+                (
+                    TRANSIENT_HF_GUARD_FINAL_HZ -
+                    TRANSIENT_HF_GUARD_INITIAL_HZ
+                )
+                *
+                SmoothstepAdded(
+                    Clamp01Added(
+                        age_ms /
+                        TRANSIENT_HF_GUARD_OPEN_MS
+                    )
+                );
+
+
+            float guard_a =
+                expf(
+                    -TWO_PI *
+                    guard_cutoff /
+                    SAMPLE_RATE
+                );
+
+
+            hf_guard_state_1 =
+                (1.0f - guard_a) * osc +
+                guard_a * hf_guard_state_1;
+
+            hf_guard_state_2 =
+                (1.0f - guard_a) * hf_guard_state_1 +
+                guard_a * hf_guard_state_2;
+
+            osc = hf_guard_state_2;
+        }
+
+
+        /*
+         * Amplitude: smoothstep out of silence, then the SHAPE body curve
+         * that used to be the transient half of the anatomy crossfade.
+         */
         float sweep_attack =
             SmoothstepAdded(
                 Clamp01Added(
@@ -4095,25 +4283,38 @@ struct KickVoice
             );
 
 
+        float body_span =
+            handoff_end_ms -
+            handoff_start_ms;
+
+        if(body_span < 1.0f)
+            body_span = 1.0f;
+
+
+        float body =
+            cosf(
+                SmoothstepAdded(
+                    Clamp01Added(
+                        (
+                            age_ms -
+                            handoff_start_ms
+                        )
+                        /
+                        body_span
+                    )
+                )
+                *
+                1.57079632679f
+            );
+
+
         sweep_out =
-            sinf(
-                sweep_phase *
-                TWO_PI
-            )
-            *
+            osc *
             sweep_attack *
-            sweep_env *
+            body *
             sweep_level *
+            KICK_SWEEP_SUM_TRIM *
             KICK_TRANSIENT_GAIN;
-
-
-        sweep_phase += sweep_hz / SAMPLE_RATE;
-
-        while(sweep_phase >= 1.0f)
-            sweep_phase -= 1.0f;
-
-        sweep_pitch *= sweep_pitch_coeff;
-        sweep_env   *= sweep_decay_coeff;
 
 
         /* ---- SUB ---- */
@@ -4160,8 +4361,12 @@ struct KickVoice
 
         age++;
 
-        if(sweep_env < 0.000001f &&
-           sub_env   < 0.000001f)
+        /*
+         * The voice is done when the sub has decayed and the sweep body has
+         * closed. Only then can its state be reused.
+         */
+        if(sub_env < 0.000001f &&
+           age_ms > handoff_end_ms)
         {
             active = false;
         }
@@ -14407,16 +14612,21 @@ static void AudioCallback(
         }
 
 
-        kick_voice.Start(
-            kick_frequency
-        );
-
-
         /*
          * ORIGINAL fixed2 kick trigger.
+         *
+         * This is what latches this hit's SHAPE curves into
+         * transient_start_frequency, transient_pitch_time and the
+         * transient_shape and handoff currents, so it MUST run before
+         * KickVoice::Start() reads them.
          */
         TriggerKickAudio(
             last_velocity
+        );
+
+
+        kick_voice.Start(
+            kick_frequency
         );
 
 
