@@ -13,7 +13,6 @@ using namespace daisy;
 
 DaisySeed hw;
 UART_HandleTypeDef midi_uart;
-I2CHandle oled_i2c;
 
 
 /* ============================================================
@@ -1183,12 +1182,6 @@ static float MacroBpfFrequencyHz(float x)
 /* MIDI */
 
 static constexpr uint8_t MIDI_CHANNEL_KICK = 14; // MIDI ch 15
-static constexpr uint8_t MIDI_CHANNEL_LAYER = 15; // MIDI ch 16
-
-
-/* OLED */
-
-static constexpr uint8_t OLED_ADDRESS = 0x3C;
 
 
 /* ============================================================
@@ -1201,17 +1194,8 @@ static uint8_t midi_running_status = 0;
 static uint8_t midi_data[2];
 static uint8_t midi_data_count = 0;
 
-static uint8_t last_note = 36;
 static uint8_t last_velocity = 100;
 static bool note_gate = false;
-
-static uint32_t trigger_count = 0;
-
-
-/*
- * Gate duration is calculated when Note Off arrives.
- */
-static volatile float current_gate_ms = 80.0f;
 
 
 /* ============================================================
@@ -1219,14 +1203,6 @@ static volatile float current_gate_ms = 80.0f;
    ============================================================ */
 
 static volatile bool kick_trigger_pending = false;
-static volatile bool kick_release_pending = false;
-
-
-/*
- * Channel 16 character layer.
- */
-static volatile bool layer16_active = false;
-static volatile float layer16_level = 0.0f;
 
 
 /* ============================================================
@@ -1475,72 +1451,74 @@ static float ProcessFinalHfDynamicTamer(
 
 
 /* ============================================================
-   KICK VOICE — ONE SINE, PUNCH + SUB
+   CLICK ABLATION SWITCHES
    ============================================================
 
-   The whole generated kick is a single sine oscillator. Its phase resets
-   to zero on every trigger, so a given set of parameters renders the same
-   waveform every hit.
+   Each isolates one suspect for the remaining kick click. Defaults are the
+   normal instrument; flip one, rebuild, listen.
 
-   PITCH, one continuous curve:
+   KICK_DAC_KEEPALIVE
+       Adds a constant 2^-20 (about -120 dBFS, inaudible, AC-coupled away)
+       to the kick output so the codec never sees exact digital silence.
+       The sub now ends at exact zero between hits; a codec that mutes on
+       zero input pops every time it wakes, at any level, which matches a
+       click that appears the moment SUB leaves 0 %.
 
-       f(t) = base(t) * (1 + (R - 1) * sweep(t))
+   KICK_BYPASS_WET
+       Skips Mackie/Sherman, BPF, dirty-bus manager and the wet HPF, so
+       they are not even computed.
 
-       sweep(t)  1 -> 0 exponential decay, -60 dB after the punch sweep
-                 time. K6 / PUNCH (CC51) sets R and the sweep time:
-                     0   no punch, flat pitch
-                     64  3.8x over 88 ms
-                     127 laser, 30x over 110 ms
-       base(t)   MIDI note, gliding by the velocity movement once the sub
-                 starts: 1 = one octave down, 64 = flat, 127 = one octave up
-
-   AMPLITUDE, two envelopes on that one oscillator:
-
-       punch     starts at the trigger, dies with the pitch sweep
-       sub       starts at the trigger, or K3 / TAIL DELAY later when
-                 enabled, then decays over K2 / DECAY
-
-   Punch and sub are gains on the same oscillator, not two oscillators, so
-   they cannot beat against each other or sweep past one another.
-
-   A retrigger while the previous hit is still sounding hands the old voice
-   to a fading slot that keeps oscillating and fades out over 3 ms, while the
-   new voice starts from phase zero. Neither signal ever steps.
+   KICK_BYPASS_POST
+       Sends the dry voice straight to line gain and the output ceiling,
+       skipping reverse, master envelope, performance FX, headroom and
+       reverb. With this and KICK_BYPASS_WET, Out 1 is the bare sine.
    ============================================================ */
 
-/* Where PUNCH lands its landmarks: R = 30^(p^1.35) passes 3.8x at p=0.5. */
-static constexpr float PUNCH_MAX_START_RATIO = 30.0f;
-static constexpr float PUNCH_RATIO_CURVE     = 1.35f;
-static constexpr float PUNCH_START_CEILING_HZ = 3000.0f;
+static constexpr bool KICK_DAC_KEEPALIVE = false;
+static constexpr bool KICK_BYPASS_WET = false;
+static constexpr bool KICK_BYPASS_POST = false;
 
-static constexpr float PUNCH_SWEEP_MS_LOW  = 20.0f;
-static constexpr float PUNCH_SWEEP_MS_MID  = 88.0f;
-static constexpr float PUNCH_SWEEP_MS_HIGH = 110.0f;
+static constexpr float KICK_DAC_KEEPALIVE_OFFSET = 1.0f / 1048576.0f;
+
+
+/* ============================================================
+   KICK VOICE — ONE SINE, SUB ONLY
+   ============================================================
+
+   Rebuilt from nothing to find the click. The kick is one sine at the
+   MIDI note, with one amplitude envelope:
+
+       starts      at the trigger, or K3 / TAIL DELAY later when enabled
+       phase       0 at that start, so the sine always begins at a zero
+                   crossing, including when the start is delayed
+       attack      6 ms raised cosine
+       decay       (1 - u)^2 over K2 / DECAY, reaching exactly zero with
+                   zero slope at the DECAY time; K2 retimes it live
+                   because u only ever advances
+       level       CC57 SUB, slewed over 10 ms
+       movement    velocity glides the pitch once it starts:
+                   1 = one octave down, 64 = flat, 127 = one octave up
+
+   The punch (K6 pitch sweep, CC58) is parked; it lives in a2f26e3 and
+   comes back once this lane is proven clean.
+
+   A retrigger while the previous hit is still sounding hands the old voice
+   to a fading slot that keeps oscillating and fades out over 10 ms, while
+   the new one starts from phase zero. Nothing is ever cut.
+   ============================================================ */
+
+static constexpr float SUB_ATTACK_MS = 6.0f;
+static constexpr float RETRIGGER_FADE_MS = 10.0f;
+
+static constexpr float KICK_SUB_LEVEL = 0.59f;
 
 /*
- * The punch amplitude reaches -60 dB this many sweep times after the hit,
- * so it is mostly gone by the time the pitch lands.
- */
-static constexpr float PUNCH_AMP_DECAY_PER_SWEEP = 1.0f;
-
-/* Raised-cosine onsets. The sub's is longer because it may start mid-cycle. */
-static constexpr float PUNCH_ATTACK_MS = 0.5f;
-static constexpr float SUB_ATTACK_MS   = 3.0f;
-
-/* 0 = exponential, 1 = linear ramp; blends the sub decay between the two. */
-static constexpr float SUB_DECAY_LINEARITY = 0.55f;
-
-/* Level staging before the CC57 / CC58 mixer gains. */
-static constexpr float KICK_PUNCH_LEVEL = 0.32f;
-static constexpr float KICK_SUB_LEVEL   = 0.59f;
-
-/*
- * Mixer-gain slew, so a CC step on SUB/PUNCH does not step the output.
+ * Mixer-gain slew, so a CC step on SUB does not step the output.
  * 1 - expf(-1 / (10 ms * 48 kHz)).
  */
 static constexpr float KICK_GAIN_SMOOTH_A = 0.00208117f;
 
-/* Velocity -> sub movement. Centre is exactly flat. */
+static constexpr bool ENABLE_SUB_MOVEMENT = true;
 static constexpr uint8_t SUB_MOVE_CENTER_VELOCITY = 64;
 static constexpr float SUB_MOVE_DOWN_SEMITONES = -12.0f;
 static constexpr float SUB_MOVE_UP_SEMITONES   =  12.0f;
@@ -1548,45 +1526,20 @@ static constexpr float SUB_MOVE_GLIDE_MS       = 115.0f;
 static constexpr float SUB_MIN_FREQUENCY_HZ    = 12.0f;
 static constexpr float SUB_MAX_FREQUENCY_HZ    = 180.0f;
 
-static constexpr float RETRIGGER_FADE_MS = 3.0f;
-
 /*
  * MIDI cannot deliver note-ons closer than ~0.64 ms (running status at
- * 31250 baud), so no more than five fit in one fade. Four slots means a
- * fade is only ever cut short by a burst MIDI cannot produce.
+ * 31250 baud), so no more than sixteen fit in one fade, and sixteen slots
+ * never run out. If they somehow did, the slot furthest through its fade is
+ * reused.
  */
-static constexpr int KICK_FADING_SLOTS = 4;
-
-/* Below this the voice is silent and stops processing. */
-static constexpr float KICK_VOICE_SILENT = 0.0001f;
-
-
-static float PunchStartRatio(float p)
-{
-    p = Clamp01Added(p);
-
-    return expf(
-        logf(PUNCH_MAX_START_RATIO) *
-        powf(p, PUNCH_RATIO_CURVE)
-    );
-}
-
-
-static float PunchSweepMs(float p)
-{
-    p = Clamp01Added(p);
-
-    if(p <= 0.5f)
-        return PUNCH_SWEEP_MS_LOW +
-               (PUNCH_SWEEP_MS_MID - PUNCH_SWEEP_MS_LOW) * (p / 0.5f);
-
-    return PUNCH_SWEEP_MS_MID +
-           (PUNCH_SWEEP_MS_HIGH - PUNCH_SWEEP_MS_MID) * ((p - 0.5f) / 0.5f);
-}
+static constexpr int KICK_FADING_SLOTS = 16;
 
 
 static float VelocityToSubMoveSemitones(uint8_t velocity)
 {
+    if(!ENABLE_SUB_MOVEMENT)
+        return 0.0f;
+
     if(velocity < 1u)
         velocity = 1u;
 
@@ -1607,16 +1560,6 @@ static float VelocityToSubMoveSemitones(uint8_t velocity)
 }
 
 
-/* Coefficient that decays a value by 60 dB over `seconds`. */
-static inline float Decay60Coefficient(float seconds)
-{
-    if(seconds < 0.0001f)
-        seconds = 0.0001f;
-
-    return expf(-6.9078f / (seconds * SAMPLE_RATE));
-}
-
-
 static inline float RaisedCosine01(float t)
 {
     t = Clamp01Added(t);
@@ -1625,41 +1568,33 @@ static inline float RaisedCosine01(float t)
 }
 
 
+static inline uint32_t MsToSamples(float ms)
+{
+    if(ms < 0.0f)
+        ms = 0.0f;
+
+    return static_cast<uint32_t>(ms * 0.001f * SAMPLE_RATE);
+}
+
+
 struct KickVoice
 {
     bool active = false;
 
-    float phase = 0.0f;
     uint32_t age = 0;
+    uint32_t start = 0;
 
+    float phase = 0.0f;
     float base_hz = 55.0f;
 
-    /* Punch pitch sweep. */
-    float sweep_depth = 0.0f;   /* R - 1 */
-    float sweep = 0.0f;
-    float sweep_coefficient = 0.0f;
+    /* Decay progress 0 -> 1; the envelope is (1 - u)^2. */
+    float u = 0.0f;
+    float du = 0.0f;
 
-    /* Punch amplitude. */
-    float punch_env = 0.0f;
-    float punch_coefficient = 0.0f;
-    uint32_t punch_attack_samples = 1;
-
-    /* Sub amplitude. */
-    uint32_t sub_start = 0;
-    uint32_t sub_attack_samples = 1;
-    float sub_env = 0.0f;
-    float sub_decay_seconds = 0.5f;
-    float sub_coefficient = 0.0f;
-    float sub_linear_step = 0.0f;
-    bool sub_done = false;
-
-    /* Velocity movement, as a log-ratio glide after the sub starts. */
     float move_log_ratio = 0.0f;
-    uint32_t move_samples = 1;
 
-    /* Retrigger fade-out, used only by the fading slots. */
     uint32_t fade_age = 0;
-    uint32_t fade_samples = 1;
+    bool fading = false;
 
 
     void Reset()
@@ -1668,219 +1603,131 @@ struct KickVoice
     }
 
 
-    void SetSubDecay(float seconds)
+    void SetDecay(float seconds)
     {
-        sub_decay_seconds = seconds;
-        sub_coefficient = Decay60Coefficient(seconds);
-        sub_linear_step = 1.0f / (seconds * SAMPLE_RATE);
+        if(seconds < 0.001f)
+            seconds = 0.001f;
+
+        du = 1.0f / (seconds * SAMPLE_RATE);
     }
 
 
     void Trigger(float frequency,
-                 float punch,
                  uint8_t velocity,
-                 float sub_delay_ms,
+                 float delay_ms,
                  float decay_seconds)
     {
         active = true;
-        phase = 0.0f;
-        age = 0;
+        fading = false;
 
+        age = 0;
+        start = MsToSamples(delay_ms);
+
+        phase = 0.0f;
         base_hz = frequency;
 
-        float start_ratio = PunchStartRatio(punch);
-
-        if(base_hz * start_ratio > PUNCH_START_CEILING_HZ)
-            start_ratio = PUNCH_START_CEILING_HZ / base_hz;
-
-        if(start_ratio < 1.0f)
-            start_ratio = 1.0f;
-
-        float sweep_seconds = PunchSweepMs(punch) * 0.001f;
-
-        sweep_depth = start_ratio - 1.0f;
-        sweep = 1.0f;
-        sweep_coefficient = Decay60Coefficient(sweep_seconds);
-
-        punch_env = 1.0f;
-        punch_coefficient =
-            Decay60Coefficient(sweep_seconds * PUNCH_AMP_DECAY_PER_SWEEP);
-        punch_attack_samples =
-            static_cast<uint32_t>(PUNCH_ATTACK_MS * 0.001f * SAMPLE_RATE);
-
-        if(sub_delay_ms < 0.0f)
-            sub_delay_ms = 0.0f;
-
-        sub_start =
-            static_cast<uint32_t>(sub_delay_ms * 0.001f * SAMPLE_RATE);
-        sub_attack_samples =
-            static_cast<uint32_t>(SUB_ATTACK_MS * 0.001f * SAMPLE_RATE);
-        sub_env = 0.0f;
-        sub_done = false;
-        SetSubDecay(decay_seconds);
+        u = 0.0f;
+        SetDecay(decay_seconds);
 
         move_log_ratio =
             VelocityToSubMoveSemitones(velocity) * (0.69314718f / 12.0f);
-        move_samples =
-            static_cast<uint32_t>(SUB_MOVE_GLIDE_MS * 0.001f * SAMPLE_RATE);
-
-        if(punch_attack_samples < 1)
-            punch_attack_samples = 1;
-
-        if(sub_attack_samples < 1)
-            sub_attack_samples = 1;
-
-        if(move_samples < 1)
-            move_samples = 1;
     }
 
 
     /* Hand this voice to a fading slot: keep sounding, fade to zero. */
     void BeginFadeOut()
     {
+        fading = true;
         fade_age = 0;
-        fade_samples =
-            static_cast<uint32_t>(RETRIGGER_FADE_MS * 0.001f * SAMPLE_RATE);
-
-        if(fade_samples < 1)
-            fade_samples = 1;
     }
 
 
-    float BaseFrequency() const
+    float Frequency(uint32_t n) const
     {
-        if(move_log_ratio == 0.0f || age <= sub_start)
+        if(move_log_ratio == 0.0f)
             return base_hz;
 
         float t =
-            static_cast<float>(age - sub_start) /
-            static_cast<float>(move_samples);
+            static_cast<float>(n) /
+            static_cast<float>(MsToSamples(SUB_MOVE_GLIDE_MS));
 
-        float f = base_hz * expf(move_log_ratio * SmoothstepAdded(Clamp01Added(t)));
-
-        return ClampAdded(f, SUB_MIN_FREQUENCY_HZ, SUB_MAX_FREQUENCY_HZ);
+        return ClampAdded(
+            base_hz * expf(move_log_ratio * SmoothstepAdded(Clamp01Added(t))),
+            SUB_MIN_FREQUENCY_HZ,
+            SUB_MAX_FREQUENCY_HZ
+        );
     }
 
 
-    /* Advances one sample; returns the punch and sub layers separately. */
-    void Process(float punch_gain,
-                 float sub_gain,
-                 float& punch_out,
-                 float& sub_out)
+    float Process(float gain)
     {
-        punch_out = 0.0f;
-        sub_out = 0.0f;
-
         if(!active)
-            return;
+            return 0.0f;
 
-        float frequency =
-            BaseFrequency() *
-            (1.0f + sweep_depth * sweep);
-
-        float s = sinf(phase * TWO_PI);
-
-        /* Punch: raised-cosine onset, then exponential decay. */
-        float punch_amp = punch_env;
-
-        if(age < punch_attack_samples)
+        /* Silent until the start; the phase has not moved yet. */
+        if(age < start)
         {
-            punch_amp *=
-                RaisedCosine01(
-                    static_cast<float>(age) /
-                    static_cast<float>(punch_attack_samples)
-                );
+            age++;
+
+            if(fading)
+                return AdvanceFade(0.0f);
+
+            return 0.0f;
         }
 
-        /* Sub: silent until its start, raised-cosine onset, then K2 decay. */
-        float sub_amp = 0.0f;
+        uint32_t n = age - start;
 
-        if(!sub_done && age >= sub_start)
-        {
-            uint32_t sub_age = age - sub_start;
+        float remaining = 1.0f - u;
 
-            if(sub_age == 0)
-                sub_env = 1.0f;
+        float envelope =
+            remaining * remaining *
+            RaisedCosine01(
+                static_cast<float>(n) /
+                static_cast<float>(MsToSamples(SUB_ATTACK_MS))
+            );
 
-            sub_amp = sub_env;
+        float out =
+            sinf(phase * TWO_PI) *
+            envelope *
+            KICK_SUB_LEVEL *
+            gain;
 
-            if(sub_age < sub_attack_samples)
-            {
-                sub_amp *=
-                    RaisedCosine01(
-                        static_cast<float>(sub_age) /
-                        static_cast<float>(sub_attack_samples)
-                    );
-            }
-            else
-            {
-                float exponential = sub_env * sub_coefficient;
-                float linear = sub_env - sub_linear_step;
-
-                sub_env =
-                    exponential +
-                    (linear - exponential) * SUB_DECAY_LINEARITY;
-
-                if(sub_env < KICK_VOICE_SILENT)
-                {
-                    sub_env = 0.0f;
-                    sub_done = true;
-                }
-            }
-        }
-
-        punch_out = s * punch_amp * KICK_PUNCH_LEVEL * punch_gain;
-        sub_out = s * sub_amp * KICK_SUB_LEVEL * sub_gain;
-
-        /* Advance. */
-        float increment = frequency / SAMPLE_RATE;
-
-        if(increment > 0.45f)
-            increment = 0.45f;
-
-        phase += increment;
+        phase += Frequency(n) / SAMPLE_RATE;
 
         if(phase >= 1.0f)
             phase -= 1.0f;
 
-        sweep *= sweep_coefficient;
-        punch_env *= punch_coefficient;
+        u += du;
 
-        if(punch_env < KICK_VOICE_SILENT)
-            punch_env = 0.0f;
+        if(u >= 1.0f)
+            active = false;
 
         age++;
 
-        if(punch_env == 0.0f && sub_done)
-            active = false;
+        if(fading)
+            return AdvanceFade(out);
+
+        return out;
     }
 
 
-    /* Process() for a fading slot, scaled by the retrigger fade. */
-    void ProcessFading(float punch_gain,
-                       float sub_gain,
-                       float& punch_out,
-                       float& sub_out)
+    float AdvanceFade(float out)
     {
-        Process(punch_gain, sub_gain, punch_out, sub_out);
+        uint32_t samples = MsToSamples(RETRIGGER_FADE_MS);
 
-        if(!active)
-            return;
-
-        float fade =
+        out *=
             1.0f -
             RaisedCosine01(
                 static_cast<float>(fade_age) /
-                static_cast<float>(fade_samples)
+                static_cast<float>(samples)
             );
-
-        punch_out *= fade;
-        sub_out *= fade;
 
         fade_age++;
 
-        if(fade_age >= fade_samples)
+        if(fade_age >= samples)
             active = false;
+
+        return out;
     }
 };
 
@@ -1888,13 +1735,12 @@ struct KickVoice
 static KickVoice kick_voice;
 static KickVoice kick_voice_fading[KICK_FADING_SLOTS];
 
-static float kick_punch_gain_smoothed = 1.0f;
 static float kick_sub_gain_smoothed = 0.95f;
 
 
 /*
- * K3 / TAIL DELAY as the gap between the punch and the sub. Latched per hit,
- * so moving K3 changes the next kick rather than stepping the current one.
+ * K3 / TAIL DELAY as the gap before the sub starts. Latched per hit, so
+ * moving K3 changes the next kick rather than stepping the current one.
  */
 static float KickSubDelayMs()
 {
@@ -1933,7 +1779,6 @@ static void TriggerKickVoice(uint8_t velocity)
 
     kick_voice.Trigger(
         kick_frequency,
-        macro_kick_shape,
         velocity,
         KickSubDelayMs(),
         MacroDecaySeconds(macro_decay)
@@ -7403,783 +7248,6 @@ static AddedPerformanceFx added_performance_fx;
 
 
 /* ============================================================
-   OLED BUFFER
-   ============================================================ */
-
-static uint8_t oled_buffer[128 * 64 / 8];
-
-static uint8_t DMA_BUFFER_MEM_SECTION oled_dma_packet[129];
-static uint8_t DMA_BUFFER_MEM_SECTION oled_cmd_packet[2];
-
-
-enum class OledTransfer
-{
-    IDLE,
-    PAGE_ADDRESS,
-    COLUMN_LOW,
-    COLUMN_HIGH,
-    DATA
-};
-
-
-static OledTransfer oled_transfer =
-    OledTransfer::IDLE;
-
-
-static bool oled_dma_done = false;
-static bool oled_dma_error = false;
-static bool oled_dirty = false;
-
-static uint8_t oled_page = 0;
-
-
-/* ============================================================
-   OLED COMMANDS
-   ============================================================ */
-
-static void OledSendCommandBlocking(uint8_t command)
-{
-    uint8_t packet[2];
-
-    packet[0] = 0x00;
-    packet[1] = command;
-
-
-    oled_i2c.TransmitBlocking(
-        OLED_ADDRESS,
-        packet,
-        2,
-        100
-    );
-}
-
-
-static void OledSendCommand2Blocking(
-    uint8_t command,
-    uint8_t value)
-{
-    uint8_t packet[3];
-
-    packet[0] = 0x00;
-    packet[1] = command;
-    packet[2] = value;
-
-
-    oled_i2c.TransmitBlocking(
-        OLED_ADDRESS,
-        packet,
-        3,
-        100
-    );
-}
-
-
-/* ============================================================
-   OLED INITIALIZATION
-   ============================================================ */
-
-static void InitOled()
-{
-    I2CHandle::Config cfg;
-
-
-    cfg.periph =
-        I2CHandle::Config::Peripheral::I2C_1;
-
-
-    cfg.speed =
-        I2CHandle::Config::Speed::I2C_1MHZ;
-
-
-    cfg.mode =
-        I2CHandle::Config::Mode::I2C_MASTER;
-
-
-    cfg.pin_config.scl =
-        hw.GetPin(11);
-
-
-    cfg.pin_config.sda =
-        hw.GetPin(12);
-
-
-    oled_i2c.Init(cfg);
-
-
-    /*
-     * WORKING SSD1309 INITIALIZATION.
-     *
-     * DO NOT ADD:
-     *
-     *     0x20, 0x00
-     *
-     * Runtime updates use page addressing.
-     */
-
-    OledSendCommandBlocking(0xAE);
-
-    OledSendCommand2Blocking(0xD5, 0x80);
-
-    OledSendCommand2Blocking(0xA8, 0x3F);
-
-    OledSendCommand2Blocking(0xDA, 0x12);
-
-    OledSendCommand2Blocking(0xD3, 0x00);
-
-    OledSendCommandBlocking(0x40);
-
-    OledSendCommandBlocking(0xA6);
-
-    OledSendCommandBlocking(0xA4);
-
-    OledSendCommand2Blocking(0x8D, 0x14);
-
-    OledSendCommandBlocking(0xA1);
-
-    OledSendCommandBlocking(0xC8);
-
-    OledSendCommand2Blocking(0x81, 0x8F);
-
-    OledSendCommand2Blocking(0xD9, 0x25);
-
-    OledSendCommand2Blocking(0xDB, 0x34);
-
-    OledSendCommandBlocking(0xAF);
-
-
-    for(size_t i = 0;
-        i < sizeof(oled_buffer);
-        i++)
-    {
-        oled_buffer[i] = 0;
-    }
-
-
-    oled_dirty = true;
-}
-
-
-/* ============================================================
-   OLED DMA CALLBACK
-   ============================================================ */
-
-static void OledDmaCallback(
-    void*,
-    I2CHandle::Result result)
-{
-    if(result ==
-       I2CHandle::Result::OK)
-    {
-        oled_dma_done = true;
-    }
-    else
-    {
-        oled_dma_error = true;
-
-        oled_transfer =
-            OledTransfer::IDLE;
-    }
-}
-
-
-/* ============================================================
-   OLED DMA TRANSFERS
-   ============================================================ */
-
-static void StartOledPage(uint8_t page)
-{
-    oled_cmd_packet[0] = 0x00;
-    oled_cmd_packet[1] =
-        0xB0 | page;
-
-
-    oled_transfer =
-        OledTransfer::PAGE_ADDRESS;
-
-
-    oled_dma_done = false;
-    oled_dma_error = false;
-
-
-    oled_i2c.TransmitDma(
-        OLED_ADDRESS,
-        oled_cmd_packet,
-        2,
-        OledDmaCallback,
-        nullptr
-    );
-}
-
-
-static void StartOledData()
-{
-    oled_dma_packet[0] = 0x40;
-
-
-    for(int i = 0; i < 128; i++)
-    {
-        oled_dma_packet[i + 1] =
-            oled_buffer[
-                oled_page * 128 + i
-            ];
-    }
-
-
-    oled_transfer =
-        OledTransfer::DATA;
-
-
-    oled_i2c.TransmitDma(
-        OLED_ADDRESS,
-        oled_dma_packet,
-        129,
-        OledDmaCallback,
-        nullptr
-    );
-}
-
-
-/* ============================================================
-   OLED DMA SERVICE
-   ============================================================ */
-
-static void ServiceOledTransfer()
-{
-    if(oled_transfer ==
-       OledTransfer::IDLE)
-        return;
-
-
-    if(oled_dma_error)
-    {
-        oled_transfer =
-            OledTransfer::IDLE;
-
-        oled_dma_error = false;
-
-        return;
-    }
-
-
-    if(!oled_dma_done)
-        return;
-
-
-    oled_dma_done = false;
-
-
-    switch(oled_transfer)
-    {
-        case OledTransfer::PAGE_ADDRESS:
-        {
-            oled_cmd_packet[0] = 0x00;
-            oled_cmd_packet[1] = 0x00;
-
-
-            oled_transfer =
-                OledTransfer::COLUMN_LOW;
-
-
-            oled_i2c.TransmitDma(
-                OLED_ADDRESS,
-                oled_cmd_packet,
-                2,
-                OledDmaCallback,
-                nullptr
-            );
-
-            break;
-        }
-
-
-        case OledTransfer::COLUMN_LOW:
-        {
-            oled_cmd_packet[0] = 0x00;
-            oled_cmd_packet[1] = 0x10;
-
-
-            oled_transfer =
-                OledTransfer::COLUMN_HIGH;
-
-
-            oled_i2c.TransmitDma(
-                OLED_ADDRESS,
-                oled_cmd_packet,
-                2,
-                OledDmaCallback,
-                nullptr
-            );
-
-            break;
-        }
-
-
-        case OledTransfer::COLUMN_HIGH:
-        {
-            StartOledData();
-
-            break;
-        }
-
-
-        case OledTransfer::DATA:
-        {
-            oled_page++;
-
-
-            if(oled_page >= 8)
-            {
-                oled_page = 0;
-
-                oled_transfer =
-                    OledTransfer::IDLE;
-
-
-                /*
-                 * If another MIDI event changed the display
-                 * while we were transmitting, oled_dirty will
-                 * be set again.
-                 */
-                oled_dirty = false;
-            }
-            else
-            {
-                StartOledPage(oled_page);
-            }
-
-            break;
-        }
-
-
-        case OledTransfer::IDLE:
-        default:
-            break;
-    }
-}
-
-
-/* ============================================================
-   OLED FONT
-   ============================================================ */
-
-static const uint8_t font5x7[][5] =
-{
-    {0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36},
-    {0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C},
-    {0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01},
-    {0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F},
-    {0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01},
-    {0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40},
-    {0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F},
-    {0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06},
-    {0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46},
-    {0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01},
-    {0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F},
-    {0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63},
-    {0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43},
-
-    {0x3E,0x45,0x49,0x51,0x3E},
-    {0x00,0x21,0x7F,0x01,0x00},
-    {0x23,0x45,0x49,0x51,0x31},
-    {0x42,0x41,0x51,0x69,0x46},
-    {0x0C,0x14,0x24,0x7F,0x04},
-    {0x72,0x51,0x51,0x51,0x4E},
-    {0x1E,0x29,0x49,0x49,0x06},
-    {0x40,0x47,0x48,0x50,0x60},
-    {0x36,0x49,0x49,0x49,0x36},
-    {0x30,0x49,0x49,0x4A,0x3C},
-
-    {0x00,0x00,0x00,0x00,0x00},
-    {0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x36,0x36,0x00,0x00}
-};
-
-
-static int FontIndex(char c)
-{
-    if(c >= 'A' && c <= 'Z')
-        return c - 'A';
-
-    if(c >= '0' && c <= '9')
-        return 26 + c - '0';
-
-    if(c == ' ')
-        return 36;
-
-    if(c == '-')
-        return 37;
-
-    if(c == ':')
-        return 38;
-
-    return 36;
-}
-
-
-static void OledDrawChar(
-    uint8_t x,
-    uint8_t page,
-    char c)
-{
-    if(x > 122 || page > 7)
-        return;
-
-
-    int index =
-        FontIndex(c);
-
-
-    for(int i = 0; i < 5; i++)
-    {
-        oled_buffer[
-            page * 128 +
-            x + i
-        ] =
-            font5x7[index][i];
-    }
-}
-
-
-static void OledDrawString(
-    uint8_t x,
-    uint8_t page,
-    const char* text)
-{
-    while(*text && x < 123)
-    {
-        OledDrawChar(
-            x,
-            page,
-            *text
-        );
-
-        x += 6;
-        text++;
-    }
-}
-
-
-static void OledClear()
-{
-    for(size_t i = 0;
-        i < sizeof(oled_buffer);
-        i++)
-    {
-        oled_buffer[i] = 0;
-    }
-}
-
-
-/* ============================================================
-   OLED NUMBER / NOTE HELPERS
-   ============================================================ */
-
-static void NumberToString(
-    uint32_t value,
-    char* output,
-    int digits)
-{
-    for(int i = digits - 1;
-        i >= 0;
-        i--)
-    {
-        output[i] =
-            '0' +
-            value % 10;
-
-        value /= 10;
-    }
-
-
-    output[digits] = '\0';
-}
-
-
-static void NoteToString(
-    uint8_t note,
-    char* output)
-{
-    static const char* names[] =
-    {
-        "C", "C-", "D", "D-", "E", "F",
-        "F-", "G", "G-", "A", "A-", "B"
-    };
-
-
-    uint8_t n =
-        note % 12;
-
-
-    int octave =
-        static_cast<int>(
-            note / 12
-        ) - 1;
-
-
-    output[0] =
-        names[n][0];
-
-
-    if(names[n][1] == '-')
-    {
-        output[1] = '-';
-        output[2] =
-            '0' + octave;
-        output[3] = '\0';
-    }
-    else
-    {
-        output[1] =
-            '0' + octave;
-        output[2] = '\0';
-    }
-}
-
-
-/* ============================================================
-   OLED SCREEN
-   ============================================================ */
-
-static const char* MacroFxModeName()
-{
-    switch(macro_fx_mode)
-    {
-        case MacroFxMode::STUTTER:
-            return "CHOP";
-
-        case MacroFxMode::LOOPER:
-            return "LOOP";
-
-        case MacroFxMode::DELAY:
-            return "DLY";
-
-        case MacroFxMode::DJ_HPF:
-            return "HPF";
-
-        case MacroFxMode::DJ_LPF:
-            return "LPF";
-
-        case MacroFxMode::PUMP:
-            return "PUMP";
-
-        case MacroFxMode::COUNT:
-        default:
-            return "FX";
-    }
-}
-
-
-static void PrepareMidiScreen()
-{
-    OledClear();
-
-
-    if(midi_running)
-        OledDrawString(
-            0,
-            0,
-            "MIDI RUN"
-        );
-    else
-        OledDrawString(
-            0,
-            0,
-            "MIDI STOP"
-        );
-
-
-    /*
-     * Macro-1 selected FX page.
-     */
-    OledDrawString(
-        0,
-        1,
-        "FX:"
-    );
-
-
-    OledDrawString(
-        24,
-        1,
-        MacroFxModeName()
-    );
-
-
-    char text[16];
-
-
-    /*
-     * NOTE
-     */
-    char note_name[8];
-
-    NoteToString(
-        last_note,
-        note_name
-    );
-
-
-    OledDrawString(
-        0,
-        2,
-        "NOTE:"
-    );
-
-
-    OledDrawString(
-        36,
-        2,
-        note_name
-    );
-
-
-    /*
-     * MIDI NUMBER
-     */
-    NumberToString(
-        last_note,
-        text,
-        3
-    );
-
-
-    OledDrawString(
-        0,
-        3,
-        "NUM:"
-    );
-
-
-    OledDrawString(
-        30,
-        3,
-        text
-    );
-
-
-    /*
-     * VELOCITY
-     */
-    NumberToString(
-        last_velocity,
-        text,
-        3
-    );
-
-
-    OledDrawString(
-        0,
-        4,
-        "VEL:"
-    );
-
-
-    OledDrawString(
-        30,
-        4,
-        text
-    );
-
-
-    /*
-     * GATE
-     */
-    OledDrawString(
-        0,
-        5,
-        "GATE:"
-    );
-
-
-    if(note_gate)
-        OledDrawString(
-            36,
-            5,
-            "ON"
-        );
-    else
-        OledDrawString(
-            36,
-            5,
-            "OFF"
-        );
-
-
-    /*
-     * CHANNEL 16 LAYER
-     */
-    OledDrawString(
-        0,
-        6,
-        "L16:"
-    );
-
-
-    if(layer16_active)
-        OledDrawString(
-            30,
-            6,
-            "PAT"
-        );
-    else
-        OledDrawString(
-            30,
-            6,
-            "OFF"
-        );
-
-
-    /*
-     * Macro-4 / Macro-5 status.
-     */
-    OledDrawString(
-        0,
-        7,
-        "BPF:"
-    );
-
-
-    NumberToString(
-        macro_bpf_layer_count,
-        text,
-        1
-    );
-
-
-    OledDrawString(
-        30,
-        7,
-        text
-    );
-
-
-    OledDrawString(
-        42,
-        7,
-        macro_character_sherman
-        ? "SHER"
-        : "MACK"
-    );
-
-
-    oled_dirty = true;
-}
-
-
-/* ============================================================
    MIDI UART INITIALIZATION
    ============================================================ */
 
@@ -8301,7 +7369,6 @@ static void HandleKickNoteOn(
     uint8_t note,
     uint8_t velocity)
 {
-    last_note = note;
     last_velocity = velocity;
 
     /*
@@ -8347,14 +7414,11 @@ static void HandleKickNoteOn(
      * Gate starts now.
      */
     note_gate = true;
-    trigger_count++;
 
     /*
      * Kick starts immediately.
      */
     kick_trigger_pending = true;
-
-    PrepareMidiScreen();
 }
 
 
@@ -8369,73 +7433,6 @@ static void HandleKickNoteOff(
 
 
     note_gate = false;
-
-
-    PrepareMidiScreen();
-}
-
-
-/* ============================================================
-   CHANNEL 16 LAYER
-   ============================================================ */
-
-static void HandleLayer16NoteOn(
-    uint8_t note,
-    uint8_t velocity)
-{
-    (void)note;
-
-
-    if(velocity == 0)
-    {
-        layer16_active = false;
-        layer16_level = 0.0f;
-
-        PrepareMidiScreen();
-
-        return;
-    }
-
-
-    /*
-     * Channel 16 currently acts as the first secondary
-     * performance function:
-     *
-     * QUANTISED CHARACTER FILTER PATTERN
-     *
-     * It does not replace the kick.
-     *
-     * It adds the evolving character layer on top.
-     */
-    layer16_active = true;
-
-
-    /*
-     * Keep its level controlled.
-     */
-    layer16_level =
-        0.12f +
-        (
-            static_cast<float>(velocity)
-            / 127.0f
-        ) * 0.28f;
-
-
-    PrepareMidiScreen();
-}
-
-
-static void HandleLayer16NoteOff(
-    uint8_t note)
-{
-    (void)note;
-
-
-    layer16_active = false;
-    layer16_level = 0.0f;
-
-
-    PrepareMidiScreen();
 }
 
 
@@ -9000,8 +7997,6 @@ static void ServiceMacroFxButtonHold()
          * just have been reset to zero.
          */
         MacroFxBeginPickup();
-
-        PrepareMidiScreen();
     }
 }
 
@@ -9612,8 +8607,6 @@ static void ProcessMidiByte(uint8_t byte)
 
         hw.SetLed(true);
 
-        PrepareMidiScreen();
-
         return;
     }
 
@@ -9663,8 +8656,6 @@ static void ProcessMidiByte(uint8_t byte)
 
 
         hw.SetLed(false);
-
-        PrepareMidiScreen();
 
         return;
     }
@@ -9843,7 +8834,7 @@ static void ProcessMidiByte(uint8_t byte)
                    value
                ))
             {
-                PrepareMidiScreen();
+                /* Handled. */
             }
             else if(ENABLE_LEGACY_DIRECT_FX_CCS)
             {
@@ -9902,31 +8893,6 @@ static void ProcessMidiByte(uint8_t byte)
 
             return;
         }
-
-
-        /*
-         * ----------------------------------------------------
-         * CHANNEL 16 = SECONDARY CHARACTER LAYER
-         * ----------------------------------------------------
-         */
-        if(channel == MIDI_CHANNEL_LAYER)
-        {
-            if(type == 0x90)
-            {
-                HandleLayer16NoteOn(
-                    note,
-                    velocity
-                );
-            }
-            else
-            {
-                HandleLayer16NoteOff(
-                    note
-                );
-            }
-
-            return;
-        }
     }
 }
 
@@ -9950,8 +8916,8 @@ static void ServiceMidi()
     /*
      * RECEIVER ERROR RECOVERY — DO NOT REMOVE.
      *
-     * There is no FIFO and no DMA here, and this loop only runs between
-     * blocking OLED I2C transfers. A burst arriving while the control loop
+     * There is no FIFO and no DMA here, and this loop only runs when the
+     * control loop gets round to it. A burst arriving while the control loop
      * is busy therefore overruns the single receive register.
      *
      * An overrun latches ORE, and while ORE is set RXNE stops asserting:
@@ -10120,7 +9086,7 @@ static void AudioCallback(
          * The sub envelope multiplies its CURRENT level by the new
          * coefficient, so retiming never steps the amplitude.
          */
-        kick_voice.SetSubDecay(
+        kick_voice.SetDecay(
             MacroDecaySeconds(
                 macro_decay
             )
@@ -10215,52 +9181,30 @@ static void AudioCallback(
         out[KICK_OUTPUT_CHANNEL][i] = 0.0f;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = 0.0f;
         /* ====================================================
-           DRY: PUNCH + SUB FROM THE ONE SINE VOICE
+           DRY: THE SUB VOICE
            ==================================================== */
-
-        kick_punch_gain_smoothed +=
-            (param_punch_gain - kick_punch_gain_smoothed) *
-            KICK_GAIN_SMOOTH_A;
 
         kick_sub_gain_smoothed +=
             (param_sub_gain - kick_sub_gain_smoothed) *
             KICK_GAIN_SMOOTH_A;
 
 
-        float punch = 0.0f;
-        float sub = 0.0f;
-
-        kick_voice.Process(
-            kick_punch_gain_smoothed,
-            kick_sub_gain_smoothed,
-            punch,
-            sub
-        );
+        float dry =
+            kick_voice.Process(
+                kick_sub_gain_smoothed
+            );
 
 
         for(int v = 0; v < KICK_FADING_SLOTS; v++)
         {
-            if(!kick_voice_fading[v].active)
-                continue;
-
-            float fading_punch = 0.0f;
-            float fading_sub = 0.0f;
-
-            kick_voice_fading[v].ProcessFading(
-                kick_punch_gain_smoothed,
-                kick_sub_gain_smoothed,
-                fading_punch,
-                fading_sub
-            );
-
-            punch += fading_punch;
-            sub += fading_sub;
+            if(kick_voice_fading[v].active)
+            {
+                dry +=
+                    kick_voice_fading[v].Process(
+                        kick_sub_gain_smoothed
+                    );
+            }
         }
-
-
-        float dry =
-            punch +
-            sub;
 
 
         /* ====================================================
@@ -10272,64 +9216,69 @@ static void AudioCallback(
            wet processing, so the distorted sub never stacks on the dry one.
          */
 
-        /* Macro-4 broad BPF EQ is pushed INTO the distortion model. */
-        float wet_send =
-            dry +
-            macro_bpf_bank.ProcessDriveFeed(dry);
+        float wet = 0.0f;
 
-
-        float wet =
-            macro_character_processor.ProcessWet(wet_send);
-
-
-        /* Macro-4 additive BPF colour, excited by the dry kick and the wet. */
-        wet +=
-            macro_bpf_bank.Process(
+        if(!KICK_BYPASS_WET)
+        {
+            /* Macro-4 broad BPF EQ is pushed INTO the distortion model. */
+            float wet_send =
                 dry +
-                wet
-            );
+                macro_bpf_bank.ProcessDriveFeed(dry);
 
 
-        wet *=
-            1.0f -
-            separation * 0.13f;
+            wet =
+                macro_character_processor.ProcessWet(wet_send);
 
 
-        /*
-         * Amount-aware management begins around MID I and becomes
-         * increasingly assertive as Mackie/Sherman amount rises.
-         */
-        wet =
-            character_dirty_bus_manager.Process(
-                wet,
-                macro_character_processor.CurrentSmoothedAmount()
-            );
-
-
-        float dirty_post_gain =
-            DIRTY_POST_GAIN_DRY +
-            (
-                DIRTY_POST_GAIN_WET -
-                DIRTY_POST_GAIN_DRY
-            )
-            *
-            macro_character_processor.CurrentSmoothedAmount();
-
-
-        if(dirty_post_gain < 0.62f)
-            dirty_post_gain = 0.62f;
-
-
-        wet *=
-            dirty_post_gain;
-
-
-        wet =
-            kick_wet_highpass_2.Process(
-                kick_wet_highpass_1.Process(
+            /* Macro-4 additive BPF colour, excited by the dry kick and the wet. */
+            wet +=
+                macro_bpf_bank.Process(
+                    dry +
                     wet
+                );
+
+
+            wet *=
+                1.0f -
+                separation * 0.13f;
+
+
+            /*
+             * Amount-aware management begins around MID I and becomes
+             * increasingly assertive as Mackie/Sherman amount rises.
+             */
+            wet =
+                character_dirty_bus_manager.Process(
+                    wet,
+                    macro_character_processor.CurrentSmoothedAmount()
+                );
+
+
+            float dirty_post_gain =
+                DIRTY_POST_GAIN_DRY +
+                (
+                    DIRTY_POST_GAIN_WET -
+                    DIRTY_POST_GAIN_DRY
                 )
-            );
+                *
+                macro_character_processor.CurrentSmoothedAmount();
+
+
+            if(dirty_post_gain < 0.62f)
+                dirty_post_gain = 0.62f;
+
+
+            wet *=
+                dirty_post_gain;
+
+
+            wet =
+                kick_wet_highpass_2.Process(
+                    kick_wet_highpass_1.Process(
+                        wet
+                    )
+                );
+        }
 
 
         /* ====================================================
@@ -10341,22 +9290,25 @@ static void AudioCallback(
             wet;
 
 
-        /*
-         * MACRO 2 — whole-waveform reverse of the complete kick. External
-         * Digitakt audio is deliberately outside this buffer.
-         */
-        signal =
-            macro_whole_kick_reverse.Process(
-                signal
-            );
+        if(!KICK_BYPASS_POST)
+        {
+            /*
+             * MACRO 2 — whole-waveform reverse of the complete kick. External
+             * Digitakt audio is deliberately outside this buffer.
+             */
+            signal =
+                macro_whole_kick_reverse.Process(
+                    signal
+                );
 
 
-        /*
-         * Master de-click envelope, after every kick layer. External
-         * passthrough remains outside it.
-         */
-        signal *=
-            added_kick_master_envelope.Process();
+            /*
+             * Master de-click envelope, after every kick layer. External
+             * passthrough remains outside it.
+             */
+            signal *=
+                added_kick_master_envelope.Process();
+        }
 
 
         /* ====================================================
@@ -10389,47 +9341,55 @@ static void AudioCallback(
             param_line_gain;
 
 
-        /*
-         * Kept as a call for code continuity, but the feature is disabled
-         * by ENABLE_FINAL_HF_DYNAMIC_TAMER=false above.
-         */
-        kick_output =
-            ProcessFinalHfDynamicTamer(
-                kick_output
-            );
+        if(KICK_BYPASS_POST)
+        {
+            kick_output *=
+                KICK_OUTPUT_LINEAR_GAIN;
+        }
+        else
+        {
+            /*
+             * Kept as a call for code continuity, but the feature is disabled
+             * by ENABLE_FINAL_HF_DYNAMIC_TAMER=false above.
+             */
+            kick_output =
+                ProcessFinalHfDynamicTamer(
+                    kick_output
+                );
 
 
-        /*
-         * STUTTER / LOOPER / DJ HPF are the ONLY performance FX on the kick lane.
-         */
-        kick_output =
-            added_performance_fx.ProcessMaster(
-                kick_output
-            );
+            /*
+             * STUTTER / LOOPER / DJ HPF are the ONLY performance FX on the kick lane.
+             */
+            kick_output =
+                added_performance_fx.ProcessMaster(
+                    kick_output
+                );
 
 
-        /*
-         * Keep the kick post-FX chain linear. The old post-HPF HF guard
-         * plus absolute LPF formed another moving filter cascade after the
-         * HPF and could create a second onset transient.
-         */
-        kick_output =
-            ProcessPerformanceFilterHeadroom(
-                kick_output
-            );
+            /*
+             * Keep the kick post-FX chain linear. The old post-HPF HF guard
+             * plus absolute LPF formed another moving filter cascade after the
+             * HPF and could create a second onset transient.
+             */
+            kick_output =
+                ProcessPerformanceFilterHeadroom(
+                    kick_output
+                );
 
 
-        kick_output *=
-            KICK_OUTPUT_LINEAR_GAIN;
+            kick_output *=
+                KICK_OUTPUT_LINEAR_GAIN;
 
 
-        /* Sidechain reverb: last thing before the ceiling, so the tank
-         * hears the finished kick and the ceiling still bounds the sum. */
-        kick_output =
-            kick_reverb.Process(
-                kick_output,
-                param_reverb_amount
-            );
+            /* Sidechain reverb: last thing before the ceiling, so the tank
+             * hears the finished kick and the ceiling still bounds the sum. */
+            kick_output =
+                kick_reverb.Process(
+                    kick_output,
+                    param_reverb_amount
+                );
+        }
 
 
         /*
@@ -10458,6 +9418,10 @@ static void AudioCallback(
             OutputCeiling(
                 kick_output
             );
+
+
+        if(KICK_DAC_KEEPALIVE)
+            kick_output += KICK_DAC_KEEPALIVE_OFFSET;
 
 
         /* ----------------------------------------------------
@@ -10590,13 +9554,6 @@ int main(void)
 
 
     /* --------------------------------------------------------
-       OLED
-       -------------------------------------------------------- */
-
-    InitOled();
-
-
-    /* --------------------------------------------------------
        DSP INITIAL STATE
        -------------------------------------------------------- */
 
@@ -10683,12 +9640,6 @@ int main(void)
     emergency_combo_start_time = 0;
 
 
-    /*
-     * Initial OLED.
-     */
-    PrepareMidiScreen();
-
-
     /* --------------------------------------------------------
        AUDIO
        -------------------------------------------------------- */
@@ -10708,8 +9659,6 @@ int main(void)
          * ====================================================
          * MIDI FIRST
          * ====================================================
-         *
-         * Do not put blocking OLED operations here.
          */
         ServiceMidi();
 
@@ -10749,27 +9698,5 @@ int main(void)
         ServiceMacroFxButtonHold();
 
 
-        /*
-         * ====================================================
-         * OLED DMA
-         * ====================================================
-         */
-        ServiceOledTransfer();
-
-
-        /*
-         * Start a pending screen refresh only when the I2C
-         * peripheral is idle.
-         */
-        if(
-            oled_dirty &&
-            oled_transfer ==
-                OledTransfer::IDLE
-        )
-        {
-            oled_page = 0;
-
-            StartOledPage(0);
-        }
     }
 }
