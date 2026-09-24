@@ -42,7 +42,7 @@ static float macro_kick_shape = 0.0f;
 static float macro_tail_offset_ms = 0.0f;
 static float test_tail_attack_ms = 6.0f;
 static float test_sweep_time_scale = 1.0f;
-static float test_tail_mod_semitones = 0.0f;
+static float test_tail_mod = 0.0f;
 static float kick_frequency = 55.0f;
 #include "voice_extract.inc"
 
@@ -90,6 +90,8 @@ static float SlopeBound(const KickVoice& v, float pg, float sg)
 {
     if(!v.active) return 0.0f;
     float f = v.BaseFrequency(v.SubAge()) * (1.0f + v.sweep_depth * v.sweep);
+    /* A handoff glides from the old base pitch, plus its <= ~9 Hz correction. */
+    if(v.handoff) f += fabsf(v.handoff_drift) * SAMPLE_RATE + 10.0f;
     float w = TWO_PI * fminf(f, 0.45f * SAMPLE_RATE) / SAMPLE_RATE;
     float punch = v.punch_level_scale * pg;
     float sub = KICK_SUB_LEVEL * sg + (v.handoff ? v.handoff_level : 0.0f);
@@ -145,7 +147,7 @@ static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, 
             hit.decay_seconds = MacroDecaySeconds(macro_decay);
             hit.sub_attack_ms = test_tail_attack_ms;
             hit.sweep_time_scale = test_sweep_time_scale;
-            hit.tail_mod_semitones = test_tail_mod_semitones;
+            hit.tail_mod = test_tail_mod;
             voice.Trigger(hit, sounding);
             h++;
         }
@@ -302,11 +304,11 @@ int main(int argc, char** argv)
         float gains[][2] = {{1.0f, 0.95f}, {2.0f, 1.6f}, {1.0f, 0.0f}, {0.0f, 1.6f}};
         float worst_ratio = 0; char worst_desc[160] = "";
         struct Extra { float attack, scale, mod; };
-        const Extra extras[] = {{6, 1, 0}, {60, 0.25f, 24}, {6, 4, -24}, {30, 2, 12}};
+        const Extra extras[] = {{6, 1, 0}, {60, 0.25f, 1}, {6, 4, 0.5f}, {30, 2, 0.25f}};
         for(float sh : shapes) for(auto& g : gains) for(float dl : delays) for(float dc : decays) for(int vel : {1, 64, 127})
         for(const Extra& ex : extras)
         {
-            test_tail_attack_ms = ex.attack; test_sweep_time_scale = ex.scale; test_tail_mod_semitones = ex.mod;
+            test_tail_attack_ms = ex.attack; test_sweep_time_scale = ex.scale; test_tail_mod = ex.mod;
             macro_kick_shape = sh; kick_frequency = 55; macro_decay = dc; tail_delay_enabled = dl > 0; macro_tail_delay = dl;
             vector<pair<int, int>> hits = {{100, vel}, {100 + SR / 3, vel}, {100 + SR / 3 + 1234, vel},
                                             {100 + SR / 3 + 1234 + 97, vel}, {100 + SR / 3 + 9000, vel},
@@ -315,11 +317,11 @@ int main(int argc, char** argv)
             if(r.worst_step_ratio > worst_ratio)
             {
                 worst_ratio = r.worst_step_ratio;
-                snprintf(worst_desc, sizeof worst_desc, "shape %.2f punch %.1f sub %.1f delay %.2f decay %.2f vel %d attack %.0f scale %.2f mod %.0f",
+                snprintf(worst_desc, sizeof worst_desc, "shape %.2f punch %.1f sub %.1f delay %.2f decay %.2f vel %d attack %.0f scale %.2f mod %.2f",
                          sh, g[0], g[1], dl, dc, vel, ex.attack, ex.scale, ex.mod);
             }
         }
-        test_tail_attack_ms = 6; test_sweep_time_scale = 1; test_tail_mod_semitones = 0;
+        test_tail_attack_ms = 6; test_sweep_time_scale = 1; test_tail_mod = 0;
         printf("punch on: worst sample step over the smooth-sine bound %.3f (%s)\n", worst_ratio, worst_desc);
         Expect(worst_ratio <= 1.0f, "with the punch on, no hit or ratchet steps the waveform");
 
@@ -341,13 +343,91 @@ int main(int argc, char** argv)
 
     /* ---------------- v1.3.0 controls ---------------- */
     {
-        KickHitParams hit;
-        hit.frequency = 55; hit.velocity = 1; hit.decay_seconds = 1.0f; hit.tail_mod_semitones = 24.0f;
-        KickVoice v; v.Trigger(hit, false);
-        uint32_t glide = MsToSamples(SUB_MOVE_GLIDE_MS);
-        float f_glide = v.BaseFrequency(glide), f_end = v.BaseFrequency(glide + v.mod_samples);
-        printf("PITCH 1 + TAIL MOD +24: %.1f Hz -> %.1f Hz after the glide -> %.1f Hz at the end\n", 55.0f, f_glide, f_end);
-        Expect(fabsf(f_glide - 27.5f) < 0.1f && fabsf(f_end - 110.0f) < 0.2f, "PITCH down then TAIL MOD up is a down-then-up kick");
+        /* TAIL MOD: a wobble macro, +-2 st at most, faster as it rises. */
+        {
+            auto wobble = [&](float intensity, float& lo_st, float& hi_st, int& crossings){
+                KickHitParams hit; hit.frequency = 55; hit.velocity = 64; hit.decay_seconds = 1.0f; hit.tail_mod = intensity;
+                KickVoice v; v.Trigger(hit, false);
+                lo_st = 1e9f; hi_st = -1e9f; crossings = 0; float prev = 0;
+                for(uint32_t n = 0; n < (uint32_t)SR; n++){
+                    float st = 12.0f * log2f(v.BaseFrequency(n) / 55.0f);
+                    lo_st = fminf(lo_st, st); hi_st = fmaxf(hi_st, st);
+                    if(n > 0 && ((prev < 0) != (st < 0))) crossings++;
+                    prev = st;
+                }
+            };
+            float lo, hi; int c0, c_half, c_full;
+            wobble(0.0f, lo, hi, c0);
+            Expect(lo == 0.0f && hi == 0.0f, "TAIL MOD 0 leaves the pitch alone");
+            wobble(0.5f, lo, hi, c_half);
+            wobble(1.0f, lo, hi, c_full);
+            printf("TAIL MOD full: %.2f .. %+.2f st; wobble crossings in 1 s: half %d, full %d\n", lo, hi, c_half, c_full);
+            Expect(lo >= -2.0f - 1e-3f && hi <= 2.0f + 1e-3f && lo < -1.5f && hi > 1.5f,
+                   "full TAIL MOD wobbles both ways, within +-2 semitones");
+            Expect(c_full > 2 * c_half, "TAIL MOD wobbles faster as its intensity rises");
+            KickHitParams hit; hit.frequency = 55; hit.tail_mod = 1.0f; KickVoice v; v.Trigger(hit, false);
+            Expect(v.BaseFrequency(0) == 55.0f, "the wobble starts on the note");
+        }
+
+        /*
+         * A handoff across a big pitch gap (TAIL MOD took the old hit to the
+         * 440 Hz ceiling, the new one starts at 55 Hz) must glide between the
+         * two, never overshoot or run the sine backwards.
+         */
+        {
+            KickHitParams up; up.frequency = 55; up.punch = 0; up.velocity = 127;
+            up.decay_seconds = 1000000.0f; up.frequency = 130.0f;
+            KickVoice w; w.Trigger(up, false);
+            for(int n = 0; n < SR; n++){ KickVoiceOut o; w.Process(o); }
+            float f_old = w.last_increment * SAMPLE_RATE;
+            KickHitParams fresh = up; fresh.frequency = 55.0f; fresh.velocity = 64;
+            w.Trigger(fresh, true);
+            float lo = 1e9f, hi = -1e9f;
+            for(uint32_t n = 0; n < MsToSamples(RETRIGGER_HANDOFF_MS); n++)
+            {
+                KickVoiceOut o; w.Process(o);
+                float f = w.last_increment * SAMPLE_RATE;
+                if(f > 0.5f * SAMPLE_RATE) f -= SAMPLE_RATE; /* a backwards step wraps */
+                lo = fminf(lo, f); hi = fmaxf(hi, f);
+            }
+            printf("handoff %.0f Hz -> 55 Hz: frequency stayed within %.1f .. %.1f Hz\n", f_old, lo, hi);
+            Expect(f_old > 250.0f, "the handoff check really crosses a big pitch gap");
+            Expect(lo > 55.0f - 12.0f && hi < f_old + 12.0f, "a handoff across a big pitch gap glides between the two pitches");
+        }
+
+        /* WAVE: sine -> supersaw. */
+        {
+            auto render = [&](float wave, int n_samples, vector<pair<int,float>> hits_morph) {
+                KickVoice w; vector<float> y; size_t h = 0;
+                for(int n = 0; n < n_samples; n++){
+                    while(h < hits_morph.size() && hits_morph[h].first == n){
+                        KickHitParams hp; hp.frequency = 55; hp.punch = 0; hp.velocity = 64;
+                        hp.decay_seconds = 1000000.0f; hp.wave = hits_morph[h].second;
+                        w.Trigger(hp, w.Sounding()); h++;
+                    }
+                    KickVoiceOut o; w.Process(o); y.push_back(o.sub);
+                }
+                (void)wave; return y;
+            };
+            vector<float> sine = render(0, SR / 2, {{0, 0.0f}});
+            vector<float> saw1 = render(1, SR / 2, {{0, 1.0f}});
+            vector<float> saw2 = render(1, SR / 2, {{0, 1.0f}});
+            Expect(memcmp(saw1.data(), saw2.data(), saw1.size() * 4) == 0 && saw1[0] == 0.0f,
+                   "a fresh supersaw hit is always the same waveform, starting at zero");
+            double rs = 0, rw = 0;
+            for(int n = SR / 10; n < SR / 2; n++){ rs += sine[n] * sine[n]; rw += saw1[n] * saw1[n]; }
+            double level_db = 10 * log10(rw / rs);
+            double hf_sine = BandPeakDb(sine, 1000, SR / 10, SR / 2), hf_saw = BandPeakDb(saw1, 1000, SR / 10, SR / 2);
+            printf("WAVE 127 vs 0: level %+.1f dB, energy above 1 kHz %.1f dB vs %.1f dB\n", level_db, hf_saw, hf_sine);
+            Expect(fabs(level_db) < 3.0, "full supersaw sits within 3 dB of the sine's level");
+            Expect(hf_saw > hf_sine + 30.0, "the supersaw adds the harmonics a sine does not have");
+            /* Morph changed between two hits of a sounding kick: no step at the seam. */
+            vector<float> seam = render(1, SR / 2, {{0, 0.0f}, {SR / 4, 1.0f}});
+            float step = 0; for(int n = SR / 4 - 2; n < SR / 4 + 4; n++) step = fmaxf(step, fabsf(seam[n] - seam[n - 1]));
+            float slope = 0; for(int n = SR / 4 - 200; n < SR / 4 - 2; n++) slope = fmaxf(slope, fabsf(seam[n] - seam[n - 1]));
+            printf("morph 0 -> 127 across a retrigger: seam step %.4f vs the sine's own slope %.4f\n", step, slope);
+            Expect(step <= slope * 1.5f, "changing WAVE between retriggered hits does not step the waveform");
+        }
 
         KickVoice a, b; KickHitParams h1; h1.punch = 0.5f; KickHitParams h2 = h1; h2.sweep_time_scale = 2.0f;
         a.Trigger(h1, false); b.Trigger(h2, false);

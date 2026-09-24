@@ -607,12 +607,16 @@ static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
  *   CC60 TAIL OFFSET   Function + K3 turn: fine nudge of when the sub starts
  *   CC61 TAIL ATTACK   Function + K3 press, then turn: the sub's fade-in
  *   CC62 SWEEP TIME    Menu 1 pot 3 on the kick channel: punch sweep length
- *   CC63 TAIL MOD      Menu 1 pot 5 on the kick channel: second pitch sweep
+ *   CC63 TAIL MOD      Menu 1 pot 5 on the kick channel: a wobble macro on the
+                      sub, 0 = none, up to +-2 st, faster and more irregular
+                      as it rises
+ *   CC64 WAVE          Menu 1 pot 2 on the kick channel: sine -> supersaw
  */
 static constexpr uint8_t CC_TAIL_OFFSET             = 60;
 static constexpr uint8_t CC_TAIL_ATTACK             = 61;
 static constexpr uint8_t CC_PUNCH_SWEEP_TIME        = 62;
 static constexpr uint8_t CC_TAIL_MOD                = 63;
+static constexpr uint8_t CC_WAVE                    = 64;
 
 
 static constexpr uint8_t CC_BUTTON_FX_NEXT          = 100;
@@ -837,7 +841,8 @@ static volatile float macro_kick_shape = 0.50f;
 static volatile float macro_tail_offset_ms = 0.0f;
 static volatile float macro_tail_attack_ms = 6.0f;
 static volatile float macro_punch_time_scale = 1.0f;
-static volatile float macro_tail_mod_semitones = 0.0f;
+static volatile float macro_tail_mod = 0.0f;  /* 0..1 intensity */
+static volatile float macro_wave = 0.0f;
 
 
 /*
@@ -1728,7 +1733,39 @@ static constexpr float SUB_ATTACK_MS   = 6.0f;
 static constexpr float TAIL_OFFSET_STEP_MS = 0.5f;  /* per CC step, 64 = 0 */
 static constexpr float TAIL_ATTACK_MIN_MS = 6.0f;   /* the click-safe floor */
 static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
-static constexpr float TAIL_MOD_RANGE_SEMITONES = 24.0f;
+/*
+ * TAIL MOD is a macro: one intensity drives a pitch wobble on the sub.
+ *     depth       0 .. +-2 semitones, linear in intensity
+ *     rate        2 Hz drift at low intensity, 12 Hz wobble at full
+ *     irregular   a second, unrelated wobble (1.73x the rate) mixes in as
+ *                 intensity rises; the pair is normalised, so the total
+ *                 never passes the depth
+ * It starts on the note (both sines at phase 0) and fades in over the sub's
+ * first TAIL_MOD_FADE_IN_MS, so the punch is not smeared. Deterministic: the
+ * wobble restarts with every hit.
+ */
+static constexpr float TAIL_MOD_MAX_SEMITONES = 2.0f;
+static constexpr float TAIL_MOD_RATE_MIN_HZ = 2.0f;
+static constexpr float TAIL_MOD_RATE_MAX_HZ = 12.0f;
+static constexpr float TAIL_MOD_IRREGULAR = 0.6f;
+static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
+
+/*
+ * WAVE: the oscillator morphs from the sine to a five-saw supersaw on an
+ * equal-power curve. The saws are locked to the sine's pitch curve (sweep,
+ * PITCH, TAIL MOD, handoff glide) at small fixed detunes, PolyBLEP band-
+ * limited, and reset to fixed phases on a fresh hit so a hit is still always
+ * the same waveform. Their start phases are spread so they sum to zero.
+ */
+static constexpr int WAVE_SAWS = 5;
+static constexpr float WAVE_SAW_DETUNE[WAVE_SAWS] = {-0.012f, -0.006f, 0.0f, 0.006f, 0.012f};
+static constexpr float WAVE_SAW_START[WAVE_SAWS] = {0.1f, 0.3f, 0.5f, 0.7f, 0.9f};
+/*
+ * Five uncorrelated saws have ~1.29 RMS against the sine's 0.707, so 0.548 on
+ * paper; measured against the sine over a hit they came out 3.2 dB low (the
+ * slow detune keeps them correlated for most of it), hence 0.79.
+ */
+static constexpr float WAVE_SAW_NORMALISE = 0.79f;  /* measured: +3.2 dB on 0.548 */
 
 static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
 
@@ -1865,8 +1902,28 @@ struct KickHitParams
     float decay_seconds = 0.5f;
     float sub_attack_ms = 6.0f;        /* TAIL ATTACK */
     float sweep_time_scale = 1.0f;     /* SWEEP TIME */
-    float tail_mod_semitones = 0.0f;   /* TAIL MOD: the second sweep */
+    float tail_mod = 0.0f;             /* TAIL MOD: wobble intensity 0..1 */
+    float wave = 0.0f;                 /* WAVE: 0 sine .. 1 supersaw */
 };
+
+
+static inline float PolyBlepSaw(float phase, float dt)
+{
+    float y = 2.0f * phase - 1.0f;
+
+    if(phase < dt)
+    {
+        float t = phase / dt;
+        y -= t + t - t * t - 1.0f;
+    }
+    else if(phase > 1.0f - dt)
+    {
+        float t = (phase - 1.0f) / dt;
+        y -= t * t + t + t + 1.0f;
+    }
+
+    return y;
+}
 
 
 struct KickVoice
@@ -1880,11 +1937,17 @@ struct KickVoice
     float base_hz = 55.0f;
     float move_log_ratio = 0.0f;
 
-    /* TAIL MOD: a second glide across the decay, after the PITCH glide. */
-    float mod_log_ratio = 0.0f;
-    uint32_t mod_samples = 1;
+    /* TAIL MOD: the wobble, latched from its intensity at the trigger. */
+    float wobble_depth = 0.0f;       /* semitones */
+    float wobble_increment = 0.0f;   /* cycles per sample */
+    float wobble_irregular = 0.0f;
 
     uint32_t sub_attack_samples = 1;
+
+    /* WAVE: the supersaw, and how much of it this hit and a carried sub use. */
+    float saw_phase[WAVE_SAWS] = {};
+    float wave_morph = 0.0f;
+    float carried_morph = 0.0f;
 
     /* Punch pitch sweep. */
     float sweep_depth = 0.0f;   /* R - 1 */
@@ -1938,6 +2001,7 @@ struct KickVoice
     uint32_t handoff_age = 0;
     float handoff_offset = 0.0f;
     float handoff_drift = 0.0f;
+    float handoff_correction = 0.0f;
     float handoff_level = 0.0f;
     float handoff_slope = 0.0f;
 
@@ -1979,30 +2043,42 @@ struct KickVoice
 
 
     /*
-     * The note plus both movements, n samples after the sub starts: PITCH
-     * glides over the first SUB_MOVE_GLIDE_MS, then TAIL MOD over the rest
-     * of the decay. Down on one and up on the other is a down-then-up kick.
+     * The note plus both movements, n samples after the sub starts: the PITCH
+     * glide over the first SUB_MOVE_GLIDE_MS, and the TAIL MOD wobble.
      */
     float BaseFrequency(uint32_t n) const
     {
-        if(move_log_ratio == 0.0f && mod_log_ratio == 0.0f)
+        if(move_log_ratio == 0.0f && wobble_depth == 0.0f)
             return base_hz;
-
-        uint32_t glide = MsToSamples(SUB_MOVE_GLIDE_MS);
 
         float t1 =
             static_cast<float>(n) /
-            static_cast<float>(glide);
+            static_cast<float>(MsToSamples(SUB_MOVE_GLIDE_MS));
 
-        float t2 =
-            n > glide
-            ? static_cast<float>(n - glide) / static_cast<float>(mod_samples)
-            : 0.0f;
+        float semitones = 0.0f;
+
+        if(wobble_depth > 0.0f)
+        {
+            float cycles = wobble_increment * static_cast<float>(n);
+
+            float shape =
+                (sinf(cycles * TWO_PI) +
+                 wobble_irregular * sinf(cycles * (1.73f * TWO_PI) + 1.1f)) /
+                (1.0f + wobble_irregular);
+
+            float fade =
+                SmoothstepAdded(
+                    static_cast<float>(n) /
+                    static_cast<float>(MsToSamples(TAIL_MOD_FADE_IN_MS))
+                );
+
+            semitones = wobble_depth * fade * shape;
+        }
 
         return ClampAdded(
             base_hz *
             expf(move_log_ratio * SmoothstepAdded(Clamp01Added(t1)) +
-                 mod_log_ratio * SmoothstepAdded(Clamp01Added(t2))),
+                 semitones * (0.69314718f / 12.0f)),
             SUB_MIN_FREQUENCY_HZ,
             SUB_MAX_FREQUENCY_HZ
         );
@@ -2050,6 +2126,9 @@ struct KickVoice
         /* The new hit brings its own sweep; only the base pitch carries on. */
         float old_base_increment = old_increment - last_sweep_increment;
 
+        float old_morph = wave_morph;
+        wave_morph = Clamp01Added(hit.wave);
+
         active = true;
         fading = false;
         fading_punch_only = false;
@@ -2063,16 +2142,14 @@ struct KickVoice
         move_log_ratio =
             VelocityToSubMoveSemitones(hit.velocity) * (0.69314718f / 12.0f);
 
-        /*
-         * TAIL MOD runs over the audible rest of the decay: the old blended
-         * decay empties in about 60 % of K2's time. Capped so INF still moves.
-         */
-        mod_log_ratio = hit.tail_mod_semitones * (0.69314718f / 12.0f);
-        mod_samples =
-            MsToSamples(ClampAdded(0.6f * decay_seconds, 0.05f, 2.0f) * 1000.0f);
-
-        if(mod_samples < 1)
-            mod_samples = 1;
+        /* TAIL MOD: see TAIL_MOD_MAX_SEMITONES. */
+        float intensity = Clamp01Added(hit.tail_mod);
+        wobble_depth = TAIL_MOD_MAX_SEMITONES * intensity;
+        wobble_increment =
+            (TAIL_MOD_RATE_MIN_HZ +
+             (TAIL_MOD_RATE_MAX_HZ - TAIL_MOD_RATE_MIN_HZ) * intensity * intensity) /
+            SAMPLE_RATE;
+        wobble_irregular = TAIL_MOD_IRREGULAR * intensity;
 
         sub_attack_samples =
             MsToSamples(
@@ -2187,7 +2264,24 @@ struct KickVoice
         punch_sharp_attack = true;
 
         if(!hand_off || old_level <= KICK_VOICE_SILENT)
+        {
+            /*
+             * Fresh: the saws restart at their fixed phases too, seeded one
+             * step behind so the first sample lands on them.
+             */
+            for(int i = 0; i < WAVE_SAWS; i++)
+            {
+                float p =
+                    WAVE_SAW_START[i] -
+                    last_increment * (1.0f + WAVE_SAW_DETUNE[i]);
+                saw_phase[i] = p - floorf(p);
+            }
+
             return;
+        }
+
+        /* Handed off: the saws carry on, and the carried sub keeps its wave. */
+        carried_morph = old_morph;
 
         /*
          * Handed off, the punch starts on the old sine's phase, where a
@@ -2200,6 +2294,17 @@ struct KickVoice
         handoff_age = 0;
         handoff_offset = old_phase > 0.5f ? old_phase - 1.0f : old_phase;
         handoff_drift = old_base_increment - BaseFrequency(0) / SAMPLE_RATE;
+
+        /*
+         * The drift term fades out over the window and in doing so adds
+         * drift * N / 2 cycles; the correction brings the total to a whole
+         * number of cycles, shortest way round, so the handoff lands exactly
+         * on the new hit's phase. It is spread on a smoothstep, so it moves
+         * the pitch by at most half a cycle over the window (~9 Hz).
+         */
+        float n_total = static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS));
+        float landing = handoff_offset + handoff_drift * n_total * 0.5f;
+        handoff_correction = -(landing - floorf(landing + 0.5f));
         handoff_level = old_level;
         handoff_slope = old_slope;
 
@@ -2370,10 +2475,25 @@ struct KickVoice
                     static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS))
                 );
 
+            /*
+             * Frequency glides from the old base pitch to the new one: the
+             * drift decays along (1 - s), whose running sum over the window
+             * is N (u - u^3 + u^4 / 2) for a smoothstep s. The old form,
+             * (offset + drift * t) * (1 - s), undershot badly when the two
+             * pitches were far apart (TAIL MOD makes that common) and could
+             * run the sine backwards mid-window.
+             */
+            float u =
+                static_cast<float>(handoff_age) /
+                static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS));
+            float glide_sum =
+                static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS)) *
+                (u - u * u * u + 0.5f * u * u * u * u);
+
             total_phase +=
-                (handoff_offset +
-                 handoff_drift * static_cast<float>(handoff_age)) *
-                (1.0f - s);
+                handoff_offset +
+                handoff_drift * glide_sum +
+                handoff_correction * s;
 
             handoff_level += handoff_slope;
             handoff_slope *= LEVEL_SLOPE_BEND_A;
@@ -2394,14 +2514,45 @@ struct KickVoice
 
         float sine = sinf(total_phase * TWO_PI);
 
-        /* The punch filters run from its first sample so their state is real. */
-        float punch_out = ShapePunch(sine) * punch_level;
-        float sub_out = sine * sub_level;
-        float carried_out = sine * carried_level;
-        float open = WetOpen();
-
         float increment = total_phase - last_phase;
         increment -= floorf(increment);
+
+        /*
+         * WAVE. At 0 this is exactly the sine, bit for bit. The saws follow
+         * the sine's actual step (sweep, glides and handoff included), so
+         * they stay locked to its pitch.
+         */
+        float wave = sine;
+        float carried_wave = sine;
+
+        if(wave_morph > 0.0f || (handoff && carried_morph > 0.0f))
+        {
+            float saw = 0.0f;
+
+            for(int i = 0; i < WAVE_SAWS; i++)
+            {
+                float dt = increment * (1.0f + WAVE_SAW_DETUNE[i]);
+                saw_phase[i] += dt;
+                saw_phase[i] -= floorf(saw_phase[i]);
+                saw += PolyBlepSaw(saw_phase[i], fminf(dt, 0.45f));
+            }
+
+            saw *= WAVE_SAW_NORMALISE;
+
+            wave =
+                sine * cosf(wave_morph * 1.57079632679f) +
+                saw * sinf(wave_morph * 1.57079632679f);
+
+            carried_wave =
+                sine * cosf(carried_morph * 1.57079632679f) +
+                saw * sinf(carried_morph * 1.57079632679f);
+        }
+
+        /* The punch filters run from its first sample so their state is real. */
+        float punch_out = ShapePunch(wave) * punch_level;
+        float sub_out = wave * sub_level;
+        float carried_out = carried_wave * carried_level;
+        float open = WetOpen();
 
         last_increment = increment;
         last_phase = total_phase;
@@ -2595,7 +2746,8 @@ static void TriggerKickVoice(uint8_t velocity)
     hit.decay_seconds = MacroDecaySeconds(macro_decay);
     hit.sub_attack_ms = macro_tail_attack_ms;
     hit.sweep_time_scale = macro_punch_time_scale;
-    hit.tail_mod_semitones = macro_tail_mod_semitones;
+    hit.tail_mod = macro_tail_mod;
+    hit.wave = macro_wave;
 
     kick_voice.Trigger(hit, sounding);
 
@@ -9030,10 +9182,12 @@ static bool HandleSixMacroCC(
                 powf(2.0f, (static_cast<float>(value) - 64.0f) / 32.0f);
             return true;
 
+        case CC_WAVE:
+            macro_wave = v;
+            return true;
+
         case CC_TAIL_MOD:
-            macro_tail_mod_semitones =
-                ClampAdded((static_cast<float>(value) - 64.0f) / 63.0f, -1.0f, 1.0f) *
-                TAIL_MOD_RANGE_SEMITONES;
+            macro_tail_mod = v;
             return true;
 
 
