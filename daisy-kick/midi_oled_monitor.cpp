@@ -372,17 +372,6 @@ static constexpr float PERFORMANCE_FILTER_ONSET_Q = 0.72f;
    ============================================================ */
 
 /*
- * The master HPF/LPF live AFTER the generated-kick HF guard.
- * Therefore they can otherwise recreate a high-frequency onset spike.
- *
- * For the first few milliseconds of every kick, leave the already-HF-
- * guarded dry master signal alone, then fade the selected filter in.
- */
-static constexpr float PERFORMANCE_FILTER_DRY_HOLD_MS = 4.0f;
-static constexpr float PERFORMANCE_FILTER_FADE_IN_MS  = 12.0f;
-
-
-/*
  * Active-filter headroom.
  *
  * The output chain normally has END_OF_CHAIN_GAIN = 1.28 (+2.1 dB).
@@ -1502,15 +1491,47 @@ static constexpr float KICK_DAC_KEEPALIVE_OFFSET = 1.0f / 1048576.0f;
    The punch (K6 pitch sweep, CC58) is parked; it lives in a2f26e3 and
    comes back once this lane is proven clean.
 
-   A retrigger while the previous hit is still sounding hands the old voice
-   to a fading slot that keeps oscillating and fades out over 10 ms, while
-   the new one starts from phase zero. Nothing is ever cut.
+   RETRIGGER HANDOFF. A hit landing while the sub still sounds must not
+   crossfade two sines: they are at different phases, so their sum dips and
+   recovers inside the fade, which is heard as a tick that grows with SUB.
+   Instead the output carries on from the old sine's exact phase,
+   frequency and level, and glides onto the new hit's trajectory over
+   RETRIGGER_HANDOFF_MS:
+
+       phase = new phase + (offset + frequency_difference * t) * (1 - s)
+       level = old level * (1 - s) + new envelope * s
+
+   with s a smoothstep 0 -> 1. The old level keeps the slope it had and
+   bends flat over ~1 ms (LEVEL_SLOPE_BEND_A) rather than freezing, since a
+   hit landing mid-attack would otherwise kink it. Phase, frequency, level
+   and level slope are all continuous at the trigger, and once s reaches 1 the output is
+   bit-identical to a fresh hit, so every kick stays deterministic.
+
+   With TAIL DELAY on, the new sub is silent at the trigger, so there is
+   nothing to hand off to: the old sine keeps its phase and frequency and
+   fades to zero over the same window, and the new sub starts at phase 0.
    ============================================================ */
 
 static constexpr float SUB_ATTACK_MS = 6.0f;
-static constexpr float RETRIGGER_FADE_MS = 10.0f;
+static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
 
 static constexpr float KICK_SUB_LEVEL = 0.59f;
+
+/*
+ * Old sines fading into tail-delay gaps. A new one is needed at each hit
+ * that lands on a sounding sub, and a short TAIL DELAY lets hits come faster
+ * than one fade, so they get a pool. Past it, the quietest is reused.
+ */
+static constexpr int KICK_TAIL_SLOTS = 4;
+
+/*
+ * Per-sample decay of the carried-over level slope: expf(-1 / (1 ms * 48 kHz)).
+ * The level keeps rising or falling as it was and flattens over ~1 ms.
+ */
+static constexpr float LEVEL_SLOPE_BEND_A = 0.97938037f;
+
+/* Below this the old voice counts as silent and a retrigger starts fresh. */
+static constexpr float KICK_VOICE_SILENT = 0.0001f;
 
 /*
  * Mixer-gain slew, so a CC step on SUB does not step the output.
@@ -1525,15 +1546,6 @@ static constexpr float SUB_MOVE_UP_SEMITONES   =  12.0f;
 static constexpr float SUB_MOVE_GLIDE_MS       = 115.0f;
 static constexpr float SUB_MIN_FREQUENCY_HZ    = 12.0f;
 static constexpr float SUB_MAX_FREQUENCY_HZ    = 180.0f;
-
-/*
- * MIDI cannot deliver note-ons closer than ~0.64 ms (running status at
- * 31250 baud), so no more than sixteen fit in one fade, and sixteen slots
- * never run out. If they somehow did, the slot furthest through its fade is
- * reused.
- */
-static constexpr int KICK_FADING_SLOTS = 16;
-
 
 static float VelocityToSubMoveSemitones(uint8_t velocity)
 {
@@ -1577,6 +1589,54 @@ static inline uint32_t MsToSamples(float ms)
 }
 
 
+/* An old sine carrying on at its own phase and frequency, fading to zero. */
+struct KickTail
+{
+    bool active = false;
+    uint32_t age = 0;
+    float phase = 0.0f;
+    float increment = 0.0f;
+    float level = 0.0f;
+    float slope = 0.0f;
+
+
+    float Process()
+    {
+        if(!active)
+            return 0.0f;
+
+        level += slope;
+        slope *= LEVEL_SLOPE_BEND_A;
+
+        if(level < 0.0f)
+            level = 0.0f;
+
+        float s =
+            SmoothstepAdded(
+                static_cast<float>(age) /
+                static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS))
+            );
+
+        float out =
+            sinf(phase * TWO_PI) *
+            level *
+            (1.0f - s);
+
+        phase += increment;
+
+        if(phase >= 1.0f)
+            phase -= 1.0f;
+
+        age++;
+
+        if(s >= 1.0f)
+            active = false;
+
+        return out;
+    }
+};
+
+
 struct KickVoice
 {
     bool active = false;
@@ -1593,8 +1653,22 @@ struct KickVoice
 
     float move_log_ratio = 0.0f;
 
-    uint32_t fade_age = 0;
-    bool fading = false;
+    /* What the last output sample was, for a retrigger to continue from. */
+    float last_phase = 0.0f;
+    float last_increment = 0.0f;
+    float last_level = 0.0f;
+    float last_level_step = 0.0f;
+
+    /* Handoff onto the new trajectory. */
+    bool handoff = false;
+    uint32_t handoff_age = 0;
+    float handoff_offset = 0.0f;
+    float handoff_drift = 0.0f;
+    float handoff_level = 0.0f;
+    float handoff_slope = 0.0f;
+
+    /* Old sines fading into tail-delay gaps. */
+    KickTail tails[KICK_TAIL_SLOTS];
 
 
     void Reset()
@@ -1609,36 +1683,6 @@ struct KickVoice
             seconds = 0.001f;
 
         du = 1.0f / (seconds * SAMPLE_RATE);
-    }
-
-
-    void Trigger(float frequency,
-                 uint8_t velocity,
-                 float delay_ms,
-                 float decay_seconds)
-    {
-        active = true;
-        fading = false;
-
-        age = 0;
-        start = MsToSamples(delay_ms);
-
-        phase = 0.0f;
-        base_hz = frequency;
-
-        u = 0.0f;
-        SetDecay(decay_seconds);
-
-        move_log_ratio =
-            VelocityToSubMoveSemitones(velocity) * (0.69314718f / 12.0f);
-    }
-
-
-    /* Hand this voice to a fading slot: keep sounding, fade to zero. */
-    void BeginFadeOut()
-    {
-        fading = true;
-        fade_age = 0;
     }
 
 
@@ -1659,38 +1703,171 @@ struct KickVoice
     }
 
 
+    void Trigger(float frequency,
+                 uint8_t velocity,
+                 float delay_ms,
+                 float decay_seconds)
+    {
+        bool sounding =
+            active &&
+            age > start &&
+            last_level > KICK_VOICE_SILENT;
+
+        /* The old sine's next sample, had it carried on. */
+        float old_phase = last_phase + last_increment;
+        old_phase -= floorf(old_phase);
+
+        float old_increment = last_increment;
+        float old_level = last_level;
+        float old_slope = last_level_step;
+
+        active = true;
+
+        age = 0;
+        start = MsToSamples(delay_ms);
+
+        phase = 0.0f;
+        base_hz = frequency;
+
+        u = 0.0f;
+        SetDecay(decay_seconds);
+
+        move_log_ratio =
+            VelocityToSubMoveSemitones(velocity) * (0.69314718f / 12.0f);
+
+        /*
+         * Seed the history one step behind the first sample, so the first
+         * measured increment is the real one.
+         */
+        last_increment = Frequency(0) / SAMPLE_RATE;
+        last_phase = -last_increment;
+        last_level = 0.0f;
+        last_level_step = 0.0f;
+
+        handoff = false;
+
+        if(!sounding)
+            return;
+
+        if(start == 0)
+        {
+            /* Shortest way round: the offset is within half a cycle. */
+            handoff = true;
+            handoff_age = 0;
+            handoff_offset = old_phase > 0.5f ? old_phase - 1.0f : old_phase;
+            handoff_drift = old_increment - Frequency(0) / SAMPLE_RATE;
+            handoff_level = old_level;
+            handoff_slope = old_slope;
+
+            /* The first sample lands on old_phase; seed one step behind. */
+            last_phase = old_phase - old_increment;
+        }
+        else
+        {
+            /* A free slot, else the one furthest through its fade. */
+            int slot = 0;
+
+            for(int i = 0; i < KICK_TAIL_SLOTS; i++)
+            {
+                if(!tails[i].active)
+                {
+                    slot = i;
+                    break;
+                }
+
+                if(tails[i].age > tails[slot].age)
+                    slot = i;
+            }
+
+            tails[slot].active = true;
+            tails[slot].age = 0;
+            tails[slot].phase = old_phase;
+            tails[slot].increment = old_increment;
+            tails[slot].level = old_level;
+            tails[slot].slope = old_slope;
+        }
+    }
+
+
+    float ProcessTails()
+    {
+        float out = 0.0f;
+
+        for(int i = 0; i < KICK_TAIL_SLOTS; i++)
+            out += tails[i].Process();
+
+        return out;
+    }
+
+
     float Process(float gain)
     {
+        float out = ProcessTails();
+
         if(!active)
-            return 0.0f;
+            return out * KICK_SUB_LEVEL * gain;
 
         /* Silent until the start; the phase has not moved yet. */
         if(age < start)
         {
             age++;
 
-            if(fading)
-                return AdvanceFade(0.0f);
-
-            return 0.0f;
+            return out * KICK_SUB_LEVEL * gain;
         }
 
         uint32_t n = age - start;
 
         float remaining = 1.0f - u;
 
-        float envelope =
+        float level =
             remaining * remaining *
             RaisedCosine01(
                 static_cast<float>(n) /
                 static_cast<float>(MsToSamples(SUB_ATTACK_MS))
             );
 
-        float out =
-            sinf(phase * TWO_PI) *
-            envelope *
-            KICK_SUB_LEVEL *
-            gain;
+        float total_phase = phase;
+
+        if(handoff)
+        {
+            float s =
+                SmoothstepAdded(
+                    static_cast<float>(handoff_age) /
+                    static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS))
+                );
+
+            total_phase +=
+                (handoff_offset +
+                 handoff_drift * static_cast<float>(handoff_age)) *
+                (1.0f - s);
+
+            handoff_level += handoff_slope;
+            handoff_slope *= LEVEL_SLOPE_BEND_A;
+
+            if(handoff_level < 0.0f)
+                handoff_level = 0.0f;
+
+            level =
+                handoff_level * (1.0f - s) +
+                level * s;
+
+            handoff_age++;
+
+            if(s >= 1.0f)
+                handoff = false;
+        }
+
+        total_phase -= floorf(total_phase);
+
+        out += sinf(total_phase * TWO_PI) * level;
+
+        float increment = total_phase - last_phase;
+        increment -= floorf(increment);
+
+        last_increment = increment;
+        last_phase = total_phase;
+        last_level_step = level - last_level;
+        last_level = level;
 
         phase += Frequency(n) / SAMPLE_RATE;
 
@@ -1699,41 +1876,26 @@ struct KickVoice
 
         u += du;
 
+        /* The envelope is spent, but a handoff still fading must finish. */
         if(u >= 1.0f)
-            active = false;
+        {
+            u = 1.0f;
+
+            if(!handoff)
+            {
+                active = false;
+                last_level = 0.0f;
+            }
+        }
 
         age++;
 
-        if(fading)
-            return AdvanceFade(out);
-
-        return out;
-    }
-
-
-    float AdvanceFade(float out)
-    {
-        uint32_t samples = MsToSamples(RETRIGGER_FADE_MS);
-
-        out *=
-            1.0f -
-            RaisedCosine01(
-                static_cast<float>(fade_age) /
-                static_cast<float>(samples)
-            );
-
-        fade_age++;
-
-        if(fade_age >= samples)
-            active = false;
-
-        return out;
+        return out * KICK_SUB_LEVEL * gain;
     }
 };
 
 
 static KickVoice kick_voice;
-static KickVoice kick_voice_fading[KICK_FADING_SLOTS];
 
 static float kick_sub_gain_smoothed = 0.95f;
 
@@ -1753,30 +1915,6 @@ static float KickSubDelayMs()
 
 static void TriggerKickVoice(uint8_t velocity)
 {
-    if(kick_voice.active)
-    {
-        /* A free slot, else the one furthest through its fade. */
-        int slot = 0;
-
-        for(int i = 0; i < KICK_FADING_SLOTS; i++)
-        {
-            if(!kick_voice_fading[i].active)
-            {
-                slot = i;
-                break;
-            }
-
-            if(kick_voice_fading[i].fade_age >
-               kick_voice_fading[slot].fade_age)
-            {
-                slot = i;
-            }
-        }
-
-        kick_voice_fading[slot] = kick_voice;
-        kick_voice_fading[slot].BeginFadeOut();
-    }
-
     kick_voice.Trigger(
         kick_frequency,
         velocity,
@@ -2829,51 +2967,6 @@ static bool PerformanceMasterFilterActive()
     return
         PERF_DJ_HPF_ENABLED &&
         macro_fx_value_hpf > 0.005f;
-}
-
-
-/*
- * KICK-ONLY HPF ONSET GUARD.
- *
- * The HPF itself runs from sample one so its internal state follows the
- * waveform continuously. Only its AUDIBLE contribution is held dry for a
- * few milliseconds, then crossfaded in. This prevents the differentiating
- * high-pass response from turning the kick's rising edge into a brittle
- * digital click. External-input HPF does not use this kick-onset guard.
- */
-static float PerformanceFilterKickOnsetBlend()
-{
-    float age_ms =
-        static_cast<float>(
-            kick_age_samples
-        )
-        *
-        1000.0f /
-        SAMPLE_RATE;
-
-
-    if(age_ms <=
-       PERFORMANCE_FILTER_DRY_HOLD_MS)
-    {
-        return 0.0f;
-    }
-
-
-    float t =
-        (
-            age_ms -
-            PERFORMANCE_FILTER_DRY_HOLD_MS
-        )
-        /
-        PERFORMANCE_FILTER_FADE_IN_MS;
-
-
-    return
-        SmoothstepAdded(
-            Clamp01Added(
-                t
-            )
-        );
 }
 
 
@@ -5259,8 +5352,7 @@ struct AddedDjHighpass
 
 
     float Process(
-        float input,
-        bool protect_kick_onset = false)
+        float input)
     {
         bool requested =
             PERF_DJ_HPF_ENABLED &&
@@ -5399,29 +5491,6 @@ struct AddedDjHighpass
                 requested,
                 35.0f
             );
-
-
-        /*
-         * A high-pass naturally emphasizes a kick's step-like onset. On
-         * the generated kick that reads as a brittle click. Keep the SVF
-         * running from sample one so its state is settled, but hold the
-         * audible kick path dry briefly and crossfade into the HPF.
-         */
-        if(protect_kick_onset)
-        {
-            float onset_mix =
-                PerformanceFilterKickOnsetBlend();
-
-
-            filtered =
-                input +
-                (
-                    filtered -
-                    input
-                )
-                *
-                onset_mix;
-        }
 
 
         return filtered;
@@ -7196,8 +7265,7 @@ struct AddedPerformanceFx
 
         x =
             external_dj_hpf.Process(
-                x,
-                false
+                x
             );
 
 
@@ -7226,8 +7294,7 @@ struct AddedPerformanceFx
 
         x =
             dj_hpf.Process(
-                x,
-                true
+                x
             );
 
 
@@ -9038,7 +9105,7 @@ static void AudioCallback(
 
         /*
          * One sine voice, phase reset to zero. A voice still sounding is
-         * handed to a fading slot rather than cut.
+         * handed off rather than cut.
          */
         TriggerKickVoice(
             last_velocity
@@ -9193,18 +9260,6 @@ static void AudioCallback(
             kick_voice.Process(
                 kick_sub_gain_smoothed
             );
-
-
-        for(int v = 0; v < KICK_FADING_SLOTS; v++)
-        {
-            if(kick_voice_fading[v].active)
-            {
-                dry +=
-                    kick_voice_fading[v].Process(
-                        kick_sub_gain_smoothed
-                    );
-            }
-        }
 
 
         /* ====================================================
@@ -9510,8 +9565,6 @@ static void ResetAudioDspState()
 {
     kick_voice.Reset();
 
-    for(int i = 0; i < KICK_FADING_SLOTS; i++)
-        kick_voice_fading[i].Reset();
 
     kick_wet_highpass_1.Reset();
     kick_wet_highpass_2.Reset();

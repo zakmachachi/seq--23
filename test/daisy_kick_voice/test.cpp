@@ -58,36 +58,40 @@ static double ClickDb(const vector<float>& y)
     return 20 * log10(fmax(hf, 1e-12) / peak);
 }
 
-/* The firmware's trigger + per-sample loop, with the same slot pool. */
+/* The firmware's trigger + per-sample loop. */
 static vector<float> Run(const vector<pair<int, int>>& hits, int length, float gain)
 {
-    KickVoice voice, fading[KICK_FADING_SLOTS];
+    KickVoice voice;
     vector<float> y;
     size_t h = 0;
     for(int n = 0; n < length; n++)
     {
         while(h < hits.size() && hits[h].first == n)
         {
-            if(voice.active)
-            {
-                int slot = 0;
-                for(int i = 0; i < KICK_FADING_SLOTS; i++)
-                {
-                    if(!fading[i].active) { slot = i; break; }
-                    if(fading[i].fade_age > fading[slot].fade_age) slot = i;
-                }
-                fading[slot] = voice;
-                fading[slot].BeginFadeOut();
-            }
             float delay = (tail_delay_enabled && macro_tail_delay > 0.005f) ? MacroTailDelayMs(macro_tail_delay) : 0.0f;
             voice.Trigger(kick_frequency, (uint8_t)hits[h].second, delay, MacroDecaySeconds(macro_decay));
             h++;
         }
-        float s = voice.Process(gain);
-        for(auto& f : fading) if(f.active) s += f.Process(gain);
-        y.push_back(s);
+        y.push_back(voice.Process(gain));
     }
     return y;
+}
+
+/*
+ * Peak above fc inside [lo, hi), relative to the whole render's peak. The
+ * filter runs over the whole render so the window has no edges of its own.
+ */
+static double BandPeakDb(const vector<float>& y, double fc, int lo, int hi)
+{
+    Biquad a(fc, 0.54119610), b(fc, 1.30656296);
+    double peak = 1e-12, hf = 0;
+    for(int n = 0; n < (int)y.size(); n++)
+    {
+        double v = b.Process(a.Process(y[n]));
+        peak = fmax(peak, fabs(y[n]));
+        if(n >= lo && n < hi) hf = fmax(hf, fabs(v));
+    }
+    return 20 * log10(fmax(hf, 1e-12) / peak);
 }
 
 static void WriteWav(const char* path, const vector<float>& y)
@@ -160,14 +164,39 @@ int main(int argc, char** argv)
         Expect(db > CLICK_LIMIT_DB + 30, "the measure catches a real click");
     }
 
+    /*
+     * DECAY INF: every hit lands on a full-level sine. With the same note the
+     * handoff has nothing to change but the phase, so each band must stay
+     * within a few dB of an uninterrupted sine, the floor of this measure.
+     */
+    {
+        kick_frequency = 55; macro_decay = 0.99f; tail_delay_enabled = false;
+        vector<float> sine(SR);
+        for(int n = 0; n < SR; n++) sine[n] = sinf(TWO_PI * 55.0f * n / SAMPLE_RATE);
+        double worst_excess = -999; int worst_offset = 0; double worst_fc = 0;
+        for(int k = 0; k < 24; k++)  /* retrigger at 24 phases of the old sine */
+        {
+            int t2 = SR / 3 + k * 36;
+            vector<float> y = Run({{100, 64}, {t2, 64}}, SR, 0.95f);
+            for(double fc : {150.0, 300.0, 1000.0})
+            {
+                double excess = BandPeakDb(y, fc, t2 - 240, t2 + 4800) - BandPeakDb(sine, fc, t2 - 240, t2 + 4800);
+                if(excess > worst_excess) { worst_excess = excess; worst_offset = k; worst_fc = fc; }
+            }
+        }
+        printf("DECAY INF retrigger: worst band excess over a plain sine %.1f dB (>%.0f Hz, phase step %d/24)\n",
+               worst_excess, worst_fc, worst_offset);
+        Expect(worst_excess <= 6.0, "a retrigger at DECAY INF is within 6 dB of an uninterrupted sine in every band");
+    }
+
     /* Determinism. */
     kick_frequency = 55; macro_decay = 0.6f; tail_delay_enabled = true; macro_tail_delay = 0.4f;
     vector<float> a = Run({{0, 90}}, SR, 0.95f);
     vector<float> b = Run({{0, 20}, {7777, 90}}, 7777 + SR, 0.95f);
     vector<float> c = Run({{0, 90}}, SR, 0.95f);
     float diff = 0;
-    for(int n = MsToSamples(RETRIGGER_FADE_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(a[n] - b[7777 + n]));
-    Expect(diff == 0.0f, "a ratcheted hit is bit-identical to a fresh one once the fade is over");
+    for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(a[n] - b[7777 + n]));
+    Expect(diff == 0.0f, "a ratcheted hit is bit-identical to a fresh one once the handoff is over");
     Expect(memcmp(a.data(), c.data(), SR * 4) == 0, "two fresh hits are bit-identical");
 
     /* Length: the sub lasts exactly DECAY after its start, and ends at zero. */
