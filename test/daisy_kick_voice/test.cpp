@@ -54,11 +54,16 @@ struct Biquad
     double Process(double x) { double y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
 };
 
-/* Peak above 1 kHz relative to the signal peak, in dB. */
+/*
+ * Peak above 1 kHz in dB, relative to the signal peak or a full-level sub,
+ * whichever is louder. Relative to the peak alone, a render that is nearly
+ * silent (DECAY at minimum under the old anatomy) turns its own rounding
+ * into a "click".
+ */
 static double ClickDb(const vector<float>& y)
 {
     Biquad a(1000, 0.54119610), b(1000, 1.30656296);
-    double peak = 1e-12, hf = 0;
+    double peak = KICK_SUB_LEVEL * 0.95, hf = 0;
     /* Renders may end mid-note; only the render itself is analysed. */
     for(float s : y) { peak = fmax(peak, fabs(s)); hf = fmax(hf, fabs(b.Process(a.Process(s)))); }
     return 20 * log10(fmax(hf, 1e-12) / peak);
@@ -85,7 +90,7 @@ static float SlopeBound(const KickVoice& v, float pg, float sg)
     float sub = KICK_SUB_LEVEL * sg + (v.handoff ? v.handoff_level : 0.0f);
     float drive = KICK_PUNCH_OLD_DRIVE ? fmaxf(1.0f, v.punch_drive) : 1.0f;
     return punch * drive * w + sub * w +
-           punch * PI / (2.0f * v.punch_attack_samples) +
+           punch * (v.punch_sharp_attack ? 6.9078f : PI / 2.0f) / v.punch_attack_samples +
            KICK_SUB_LEVEL * sg * PI / (2.0f * MsToSamples(SUB_ATTACK_MS)) +
            (punch + sub) * 1.5f / MsToSamples(RETRIGGER_HANDOFF_MS) +
            (punch + sub) * 1.6f / (v.anatomy_end - v.anatomy_start);
@@ -133,9 +138,10 @@ static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, 
         }
         float bound = SlopeBound(voice, pg, sg) + 1e-5f;
         for(auto& f : fading) bound += SlopeBound(f, pg, sg);
-        float punch_sum = 0.0f;
-        float y = voice.Process(pg, sg, punch_sum);
-        for(auto& f : fading) if(f.active) y += f.Process(pg, sg, punch_sum);
+        KickVoiceOut out;
+        voice.Process(out);
+        for(auto& f : fading) if(f.active) f.Process(out);
+        float y = out.punch * pg + out.sub * sg;
         float ratio = fabsf(y - prev) / bound;
         if(ratio > r.worst_step_ratio) { r.worst_step_ratio = ratio; r.worst_step_at = n; }
         prev = y;
@@ -318,14 +324,21 @@ int main(int argc, char** argv)
     Expect(diff == 0.0f, "a ratcheted hit is bit-identical to a fresh one once the handoff is over");
     Expect(memcmp(a.data(), c.data(), SR * 4) == 0, "two fresh hits are bit-identical");
 
-    /* Length: the sub lasts exactly DECAY after its start, and ends at zero. */
+    /*
+     * Length. (1 - u)^2 lasts exactly DECAY; the old blended decay empties
+     * in about 60 % of it. Either way it must land on zero.
+     */
     kick_frequency = 55; macro_decay = 0.34f; tail_delay_enabled = false;
     vector<float> d = Run({{0, 64}}, SR, 0.95f);
     int last = 0;
     for(int n = 0; n < SR; n++) if(d[n] != 0.0f) last = n;
     float expected = MacroDecaySeconds(0.34f) * SAMPLE_RATE;
     printf("decay %.0f ms: sound ends at %.1f ms\n", MacroDecaySeconds(0.34f) * 1000, last / 48.0);
-    Expect(fabsf(last - expected) < 2.0f, "the sub ends exactly at the DECAY time");
+    if(KICK_OLD_SUB_DECAY)
+        Expect(last > 0.5f * expected && last < 0.7f * expected, "the old sub decay empties in about 60 % of the DECAY time");
+    else
+        Expect(fabsf(last - expected) < 2.0f, "the sub ends exactly at the DECAY time");
+    Expect(fabsf(d[last]) < 1e-5f, "the sub lands on zero rather than stepping off");
 
     if(wav)
     {
