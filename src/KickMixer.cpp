@@ -4,8 +4,8 @@
 
 namespace {
 constexpr uint8_t CC[] = {53,54,55,56,57,58};
-const char* const SHORT_NAMES[] = {"LINE","MACK","SHRM","BPF","SUB","PUNCH"};
-const char* const LONG_NAMES[] = {"LINE OUT","MACKIE","SHERMAN","BPF MIX","SUB","PUNCH VOL"};
+const char* const SHORT_NAMES[] = {"LINE","MACK","TUBE","BPF","SUB","PUNCH"};
+const char* const LONG_NAMES[] = {"LINE OUT","MACKIE","TUBE","BPF MIX","SUB","PUNCH VOL"};
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr int LEFT = 4, RIGHT = 123;
 void label(Adafruit_SH1106G& d, int x, int y, const char* text, uint8_t size = 1){

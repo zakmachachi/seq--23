@@ -10,9 +10,9 @@ All performance CCs use MIDI **channel 15** (status `0xBE`).
 | --- | --- | --- |
 | K1 / B1 | Selected FX: STUT 30, LOOP 31, DLY 32, HPF 33, LPF 34, PUMP 35, REV 36 | Short release cycles FX locally. Hold 500 ms resets only CC30–34 and CC36 to zero, once; no page advance. |
 | K2 / B2 | DECAY 40 | REVERSE 41: 0 / 127 |
-| K3 / B3 | TAIL DELAY 42 | TAIL ENABLE 43: 0 / 127 |
+| K3 / B3 | TAIL DELAY 42. **FUNCTION + K3**: TAIL OFFSET 60 (64 = on the delay, 0.5 ms per step) or TAIL ATTACK 61 (6–60 ms) | TAIL ENABLE 43: 0 / 127. **FUNCTION + B3**: switch FUNCTION + K3 between offset and attack |
 | K4 / B4 | BPF1 44, BPF2 45, BPF3 46 | Layer count 47: 0 / 42 / 85 / 127 |
-| K5 / B5 | MACKIE 48 or SHERMAN 49, independently remembered | MODEL 50: 0 / 127 |
+| K5 / B5 | MACKIE 48 or TUBE 49, independently remembered | MODEL 50: 0 / 127 (Mackie / Tube) |
 | K6 / B6 | SHAPE 51 | PUMP ENABLE 52: 0 / 127 |
 
 BPF count 0 stages L1; counts 1, 2, 3 edit L1, L2, L3 respectively. Changing count sends no frequency. Changing character model sends no amount. Pump and tail enable buttons retain their amounts. REV is a plain 0..127 amount displayed as a percentage, OFF at zero. B1's reset preserves pump amount/enable and all K2–K6 state. Its OLED2 overlay lasts 700 ms.
@@ -21,7 +21,13 @@ FX lanes are not all the same. STUT processes both the kick and the Digitakt ret
 
 While the transport is running, TAIL ENABLE and B1's reset are applied by the Daisy on the next quarter-note pulse rather than on receipt, so both land on the beat. With the transport stopped there is no pulse to wait for and both apply immediately; a STOP arriving with either still pending applies it there and then rather than swallowing it. The controller's display and CC output are unchanged — the deferral happens entirely on the Daisy, which already tracks MIDI clock.
 
-One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Saving the patch stores all performance and mix values in EEPROM; boot restores them and re-sends every CC through the same pending mechanism, since the Daisy has no persistence. Without a saved patch these deterministic defaults stand. There are no CC100/101–105 commands or shared CC20–25 controls.
+One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=0; CC44=35; CC45=65; CC46=95; CC47–50=0; CC51=64; CC52=0; CC60=64; CC61=0. Re-entering Menu 2 retains values and seeds fresh physical angle references. Saving the patch stores all performance and mix values in EEPROM; boot restores them and re-sends every CC through the same pending mechanism, since the Daisy has no persistence. Without a saved patch these deterministic defaults stand. There are no CC100/101–105 commands or shared CC20–25 controls.
+
+## Tail fine controls (v1.3.0)
+
+FUNCTION + K3 does not edit the TAIL amount: it edits one of two fine controls, and FUNCTION + B3 switches which. TAIL OFFSET moves the sub's start either side of the K3 delay in 0.5 ms steps (it cannot go before the hit). TAIL ATTACK sets the sub's fade-in from 6 ms, the click-safe minimum, to 60 ms. OLED2 shows whichever is active. They are not provisional: they stay when FUNCTION is released, are never recorded as a motion lane, and are saved with the patch separately from the rest of the page. The overview's K3 cell shows the offset next to ON/OFF when it is not zero.
+
+Two per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 3 is SWEEP (CC62, the punch sweep time, 0.25x–4x SHAPE's own) and pot 5 is TMOD (CC63, a second pitch sweep of up to ±24 semitones across the decay); pot 6's velocity is shown as PITCH, in semitones. Both CCs are sent from the step engine just before each kick note, only when they change.
 
 ## Motion lane
 

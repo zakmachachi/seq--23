@@ -14,6 +14,7 @@
  *   mackamt=<0..1>  tubeamt=<0..1> (K5 character amount, CC48 / CC49)
  *   model=<0|1>                    (K5 model, CC50: 0 Mackie, 1 tube)
  *   taildelay=<0..1>               (K3, CC42; also enables it, CC43)
+ *   tailoffset tailattack sweeptime tailmod=<0..1>   (v1.3.0, CC60..63)
  *   tail=<ms of silence after the last hit>  vel=<1..127, default 100>
  */
 
@@ -186,6 +187,10 @@ int main(int argc, char** argv)
     maybe("hpf",     CC_MACRO_FX_HPF);
     maybe("lpf",     CC_MACRO_FX_LPF);
     maybe("mackamt", CC_MACKIE_AMOUNT);
+    maybe("tailoffset", CC_TAIL_OFFSET);
+    maybe("tailattack", CC_TAIL_ATTACK);
+    maybe("sweeptime", CC_PUNCH_SWEEP_TIME);
+    maybe("tailmod", CC_TAIL_MOD);
     maybe("taildelay", CC_TAIL_DELAY_ABSOLUTE);
     if(ArgOr(argc, argv, "taildelay", -1.0) >= 0.0)
         SendCC(MIDI_CHANNEL_KICK, CC_TAIL_DELAY_STATE, 127);

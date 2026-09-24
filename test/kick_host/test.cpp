@@ -34,10 +34,26 @@ int main(int argc, char** argv){
  (void)argv;
  // Initialization, backpressure and no repeated sync on page entry/render.
  {Harness h;h.k=K{};h.ready=false;h.k.begin(Harness::send,&h);assert(h.midi.empty());h.ready=true;h.k.service(1);
- const int cc[]={30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
- const int val[]={0,0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0};assert(h.midi.size()==20);
- for(int i=0;i<20;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
- h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==20);}
+ const int cc[]={30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,60,61};
+ const int val[]={0,0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0,64,0};assert(h.midi.size()==22);
+ for(int i=0;i<22;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
+ h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==22);}
+ // v1.3.0: Function + K3 edits the tail fine controls, Function + B3 switches
+ // between them, and neither touches the TAIL amount or the tail enable.
+ {Harness h;h.set(2,40);h.k.takeUserEditedParameter();h.midi.clear();h.k.setFunctionHeld(true);
+ h.k.adjust(2,5);assert(h.k.fine_.tailOffset==69&&h.sent(60,69)&&h.k.state_.tailDelayAmount==40&&h.k.fineFocused());
+ assert(h.k.takeUserEditedParameter()==K::PARAM_COUNT); // fine edits are never lane-recorded
+ h.midi.clear();h.click(2);assert(h.k.fine_.attackMode&&!h.k.state_.tailDelayEnabled&&h.midi.empty());
+ h.k.adjust(2,20);assert(h.k.fine_.tailAttack==20&&h.sent(61,20)&&h.k.fine_.tailOffset==69);
+ h.k.adjust(2,-100);assert(h.k.fine_.tailAttack==0); // clamps at the limit, no wrap
+ Adafruit_SH1106G a,b;h.k.drawOverview(a);h.k.drawFocus(b,120);assert(b.has("TAIL ATTACK"));
+ h.k.setFunctionHeld(false);assert(!h.k.fineFocused());
+ h.midi.clear();h.k.adjust(2,3);assert(h.k.state_.tailDelayAmount==43&&h.sent(42,43)&&h.k.fine_.tailAttack==0);
+ h.click(2);assert(h.k.state_.tailDelayEnabled);
+ // Sticky: restoring the provisional snapshot leaves the fine state alone.
+ K::ControllerState snap;h.k.saveTo(snap);h.k.setFunctionHeld(true);h.click(2);h.k.adjust(2,-9);
+ h.k.restoreFrom(snap);assert(h.k.fine_.tailOffset==60&&h.sent(60,60));
+ K::FineState f;f.tailOffset=200;f.tailAttack=90;h.k.restoreFine(f);assert(h.k.fine_.tailOffset==64&&h.k.fine_.tailAttack==90);}
  // Relative FX edits resume stored values immediately; page selection sends no amount.
  {Harness h;h.page(K::DELAY);h.set(0,114);h.midi.clear();h.page(K::HPF);
  assert(h.k.state_.hpf==0&&h.midi.empty());h.k.adjust(0,3);assert(h.k.state_.hpf==3&&h.sent(33,3));
@@ -70,7 +86,7 @@ int main(int argc, char** argv){
  // D: repeat session survives changing FX page, return retains its relative value.
  {Harness h;h.set(0,4);auto before=h.k.state_.stutter;h.page(K::HPF);h.midi.clear();h.page(K::STUT);assert(h.k.state_.stutter.on&&h.k.state_.stutter.division==before.division&&h.k.state_.stutter.activationPosition==before.activationPosition&&h.midi.empty());}
  // E: separate character memories; model buttons send only absolute CC50.
- {Harness h;h.set(4,102);h.click(4);h.set(4,32);h.midi.clear();h.click(4);assert(h.k.state_.mackieAmount==102&&h.k.state_.shermanAmount==32&&h.midi.size()==1&&h.sent(50,0));h.click(4);assert(h.k.state_.shermanAmount==32&&h.sent(50,127));}
+ {Harness h;h.set(4,102);h.click(4);h.set(4,32);h.midi.clear();h.click(4);assert(h.k.state_.mackieAmount==102&&h.k.state_.tubeAmount==32&&h.midi.size()==1&&h.sent(50,0));h.click(4);assert(h.k.state_.tubeAmount==32&&h.sent(50,127));}
  // F: all BPF memories persist across repeated count cycles, per-layer edits.
  {Harness h;h.set(3,37);h.click(3);h.click(3);h.set(3,71);h.click(3);h.set(3,99);h.midi.clear();for(int i=0;i<12;++i)h.click(3);assert(h.k.state_.bpfFrequencyValue[0]==37&&h.k.state_.bpfFrequencyValue[1]==71&&h.k.state_.bpfFrequencyValue[2]==99);for(auto&m:h.midi)assert(m.first==47);}
  // G / H: absolute toggles, no held repeats, sticky focus/dirty-only max25FPS.
@@ -104,8 +120,8 @@ int main(int argc, char** argv){
  h.k.sampleAngle(0,Harness::angle(h.anglePosition[0]));assert(h.midi.empty());}
  // Every virtual parameter clamps, emits no duplicate at the limit, and reverses.
  {Harness h;for(int p=0;p<K::PARAM_COUNT;++p){
- int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;
- h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;
+ int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::TUBE?4:5;
+ h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::TUBE;
  for(int i=0;i<50;++i)h.k.adjust(knob,20);assert(h.k.position((K::Parameter)p)==127);
  h.midi.clear();h.k.adjust(knob,20);assert(h.midi.empty());h.k.adjust(knob,-3);assert(h.k.position((K::Parameter)p)==124);
  for(int i=0;i<50;++i)h.k.adjust(knob,-20);assert(h.k.position((K::Parameter)p)==0);
@@ -119,7 +135,7 @@ int main(int argc, char** argv){
  // J: enable/disable preserves amount.
  {Harness h;h.page(K::PUMP);h.set(0,89);h.midi.clear();for(int i=0;i<3;++i)h.click(5);assert(h.k.state_.pumpAmount==89&&h.k.state_.pumpEnabled&&h.midi.size()==3);for(auto&m:h.midi)assert(m.first==52);}
  // Every parameter at every possible value fits on the panels; draws never send MIDI.
- {Harness h;Adafruit_SH1106G a,b;for(int p=0;p<K::PARAM_COUNT;++p)for(int v=0;v<128;++v){int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::SHERMAN?4:5;h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::SHERMAN;h.k.position((K::Parameter)p)=v;h.k.focus_.knob=knob;h.k.drawOverview(a);h.k.drawFocus(b,300);assert(!b.has("PICK"));}assert(h.midi.empty());
+ {Harness h;Adafruit_SH1106G a,b;for(int p=0;p<K::PARAM_COUNT;++p)for(int v=0;v<128;++v){int knob=p<=K::REVERB?0:p==K::DECAY?1:p==K::TAIL?2:p<=K::BPF3?3:p<=K::TUBE?4:5;h.k.state_.selectedFx=p<=K::REVERB?p:0;h.k.state_.editedBpfLayer=p>=K::BPF1&&p<=K::BPF3?p-K::BPF1:0;h.k.state_.selectedCharacterModel=p==K::TUBE;h.k.position((K::Parameter)p)=v;h.k.focus_.knob=knob;h.k.drawOverview(a);h.k.drawFocus(b,300);assert(!b.has("PICK"));}assert(h.midi.empty());
  h.k.state_.selectedFx=K::STUT;h.k.state_.stutter.on=true;h.k.state_.stutter.division=3;h.k.state_.stutter.randomStart=0;h.k.state_.stutter.direction=-1;h.k.focus_.knob=0;h.k.drawOverview(a);h.k.drawFocus(b,120);if(argc>1){a.save("overview.svg");b.save("stutter.svg");}
  h.k.focus_.knob=3;h.k.state_.bpfLayerCount=2;h.k.state_.editedBpfLayer=1;h.k.drawFocus(b,120);if(argc>1)b.save("bpf.svg");
  h.k.focus_.knob=5;h.k.drawFocus(b,120);if(argc>1)b.save("shape.svg");}

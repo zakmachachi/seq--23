@@ -7,7 +7,7 @@
 // state, physical input, focus and outgoing MIDI are separate.
 class KickMixer {
 public:
-  enum Control : uint8_t { LINE, MACK, SHRM, BPF, SUB, PUNCH, CONTROL_COUNT };
+  enum Control : uint8_t { LINE, MACK, TUBE, BPF, SUB, PUNCH, CONTROL_COUNT };
   // Flat POD so the patch can persist the page without touching privates.
   struct SavedState {
     uint8_t value[CONTROL_COUNT] = {89,65,80,64,75,64};

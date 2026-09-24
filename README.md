@@ -11,6 +11,35 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## What's new in v1.3.0
+
+**The kick has been rebuilt from scratch, and the click is gone.** It is now a single sine whose pitch sweep (the punch) and bass tone (the sub) are two envelopes on the same oscillator, so they can no longer beat against each other. A hit that lands while the last one is still ringing picks up exactly where the old sine is and glides onto the new hit, instead of cutting it off.
+
+**Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
+- **SWEEP** (pot 3) sets how long the punch sweep takes, from a quarter to four times SHAPE's own length. SHAPE still sets how deep it goes
+- **TMOD** (pot 5) sweeps the pitch across the rest of the decay, up to two octaves down or up. Its button snaps it back to the centre. Record it under FUNCTION like any Notes-page knob and it moves per step
+- **PITCH** (pot 6, formerly velocity) is the quick glide at the start of the tail. PITCH down with TMOD up gives a down-then-up kick
+- Gate is gone for the kick: the Daisy never used it
+- Screen 2 draws the kick you are about to hear: its pitch over time on top, and the punch and sub levels underneath
+
+**Fine-tune the tail delay.** On the kick page, **FUNCTION + K3** nudges exactly when the sub comes in, in half-millisecond steps either side of the K3 delay. **FUNCTION + B3** switches K3 to the sub's fade-in instead, from a sharp 6 ms up to a 60 ms swell. Unlike other FUNCTION edits, these stay when FUNCTION is released.
+
+**Tube replaces Sherman.** K5's second distortion is now a two-stage tube preamp: it compresses and sags on loud hits, adds warmth underneath, and rolls off gently at the top. It sits at the same level Sherman did, on the same knob, button and mixer slot.
+
+**The kick**
+- Mackie sounds the way it did before the rebuild, and turning it up no longer eats the low end
+- The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
+- Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
+- The Daisy's unused on-board screen code is gone, along with its per-note redraws
+
+**Fixed**
+- A loud click whenever the kick's HPF was engaged: at the start of every hit it switched back to the unfiltered kick in a single sample
+- A tick on every hit when the tail was still sounding, getting louder as SUB went up
+
+Saved patches from v1.2.0 load as before; the new controls start at their centre settings.
+
+---
+
 ## What's new in v1.2.0
 
 **Knob movements can now be recorded and looped.** Hold **FUNCTION**, move a knob, then press **step 2**: that movement becomes a loop, replayed one value per step and quantised to the sequencer. Press step 2 again after moving a different knob and the two run together; **step 3** clears them. Grabbing a knob hands that parameter straight back, so a loop can always be caught by hand.
