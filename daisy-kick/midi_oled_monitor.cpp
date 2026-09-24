@@ -302,6 +302,25 @@ static constexpr float PROTECTED_HIGH_REGION_HZ = 95.0f;
  * Start progressively controlling the dirty branch around the point at
  * which the character stack moves beyond its base stage into MID I.
  */
+/*
+ * v1.3.0 K5 curve, for Mackie and Tube alike. The old curve kept driving
+ * harder past 25 % and handed the bus to the dirty-bus manager from 28 %,
+ * whose compression and static trim are what dulled MID I..III. Now:
+ *
+ *   0 .. 50 %    BASE DRIVE, stretched: drive rises to what the old curve
+ *                reached at 25 % (x2.25) while the wet level climbs from
+ *                nothing to K5_BASE_WET_MAX, four times the old 25 % level.
+ *   50 .. 100 %  the drive holds and the BPF's Q rises instead, up to
+ *                K5_BPF_Q_BOOST_MAX times, so the top half sharpens the
+ *                filter feeding the model rather than squashing it.
+ *
+ * The dirty-bus manager no longer engages at all (DIRTY_MANAGER_START_AMOUNT
+ * is out of reach).
+ */
+static constexpr float K5_BASE_DRIVE_MAX = 1.25f;   /* drive = 1 + this at 50 % */
+static constexpr float K5_BASE_WET_MAX = 1.0f;
+static constexpr float K5_BPF_Q_BOOST_MAX = 4.0f;
+
 static constexpr float DIRTY_MANAGER_START_AMOUNT = 0.28f;
 
 /*
@@ -2906,8 +2925,8 @@ struct Biquad
             q = 0.3f;
 
 
-        if(q > 8.0f)
-            q = 8.0f;
+        if(q > 32.0f)
+            q = 32.0f;
 
 
         float w0 =
@@ -6494,6 +6513,9 @@ struct MacroBpfBank
         }
     }
 
+    /* K5's top half raises the Q (K5QBoost); set once per block. */
+    float q_boost = 1.0f;
+
     void Update()
     {
         for(int i = 0; i < 3; ++i)
@@ -6546,6 +6568,9 @@ struct MacroBpfBank
 
             if(return_q > 8.00f)
                 return_q = 8.00f;
+
+            return_q *= q_boost;
+            drive_q *= 1.0f + (q_boost - 1.0f) * 0.5f;
 
             /*
              * Tilt toward the top of the band. A layer parked low sits on
@@ -6941,6 +6966,17 @@ struct MacroTubeProcessor
 };
 
 
+/* The v1.3.0 K5 curve; see K5_BASE_DRIVE_MAX. */
+static inline float K5BaseAmount(float amount)
+{
+    return Clamp01Added(amount * 2.0f);
+}
+
+static inline float K5QBoost(float amount)
+{
+    return 1.0f + (K5_BPF_Q_BOOST_MAX - 1.0f) * Clamp01Added(amount * 2.0f - 1.0f);
+}
+
 struct MacroCharacterProcessor
 {
     MacroMackieProcessor mackie;
@@ -7019,28 +7055,28 @@ struct MacroCharacterProcessor
         {
             float target = Clamp01Added(macro_tube_amount);
             tube_amount_smoothed = SmoothAmount(tube_amount_smoothed, target);
-            float drive =
-                1.0f + tube_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+            float base = K5BaseAmount(tube_amount_smoothed);
+            float drive = 1.0f + base * K5_BASE_DRIVE_MAX;
             float wet = tube.Process(input * drive, tube_amount_smoothed);
             if(!AudioValueSafe(wet))
             {
                 PrepareTube();
                 return 0.0f;
             }
-            return wet * tube_amount_smoothed;
+            return wet * base * K5_BASE_WET_MAX;
         }
 
         float target = Clamp01Added(macro_mackie_amount);
         mackie_amount_smoothed = SmoothAmount(mackie_amount_smoothed, target);
-        float drive =
-            1.0f + mackie_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+        float base = K5BaseAmount(mackie_amount_smoothed);
+        float drive = 1.0f + base * K5_BASE_DRIVE_MAX;
         float wet = mackie.Process(input * drive, mackie_amount_smoothed);
         if(!AudioValueSafe(wet))
         {
             PrepareMackie();
             return 0.0f;
         }
-        return wet * mackie_amount_smoothed;
+        return wet * base * K5_BASE_WET_MAX;
     }
 
     float ProcessWet(float input)
@@ -10095,6 +10131,8 @@ static void AudioCallback(
     /*
      * Macro-4 BPF layer frequency smoothing/coefficient update.
      */
+    macro_bpf_bank.q_boost =
+        K5QBoost(macro_character_processor.CurrentSmoothedAmount());
     macro_bpf_bank.Update();
 
 
@@ -10183,10 +10221,17 @@ static void AudioCallback(
 
         if(!KICK_BYPASS_WET)
         {
-            /* Macro-4 broad BPF EQ is pushed INTO the distortion model. */
+            /*
+             * Macro-4 BPF, all of it BEFORE the model now: the broad bank and
+             * the resonant one (excited by the punch, as before) both feed
+             * the distortion. The resonant bank used to be added after it.
+             */
+            float bpf_colour = macro_bpf_bank.Process(voices.bpf_punch);
+
             float wet_send =
                 voices.send +
-                macro_bpf_bank.ProcessDriveFeed(voices.send);
+                macro_bpf_bank.ProcessDriveFeed(voices.send) +
+                bpf_colour;
 
 
             wet =
@@ -10206,15 +10251,6 @@ static void AudioCallback(
                 );
 
 
-            /*
-             * Macro-4 additive BPF colour, excited by the punch and the
-             * return; the sub stays out of it, as before.
-             */
-            wet +=
-                macro_bpf_bank.Process(
-                    voices.bpf_punch +
-                    wet
-                );
 
 
             wet *=
@@ -10223,13 +10259,14 @@ static void AudioCallback(
 
 
             /*
-             * Amount-aware management begins around MID I and becomes
-             * increasingly assertive as Mackie/Tube amount rises.
+             * The dirty-bus manager's compression is what dulled the upper
+             * K5 range, so it is held off (see K5_BASE_DRIVE_MAX); it still
+             * runs, at zero strength, so re-enabling it cannot jump.
              */
             wet =
                 character_dirty_bus_manager.Process(
                     wet,
-                    macro_character_processor.CurrentSmoothedAmount()
+                    0.0f
                 );
 
 

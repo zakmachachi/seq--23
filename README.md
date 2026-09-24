@@ -28,6 +28,8 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 **One distortion dial.** On the mix page, **DIST** (pot 2) sets the Mackie and Tube levels together.
 
+**K5 keeps the good part of the drive.** The first half of K5 is the base drive you liked, stretched out and much louder; the old upper settings, which squashed and dulled it, are gone. The second half holds the drive and sharpens the filter bank instead. The filter bank now sits entirely before the distortion, feeding it, so it is heard through Mackie or Tube rather than on its own.
+
 **Tube replaces Sherman.** K5's second distortion is now a two-stage tube preamp: it compresses and sags on loud hits, adds warmth underneath, and rolls off gently at the top. It sits at the same level Sherman did, on the same knob, button and mixer slot.
 
 **The kick**
