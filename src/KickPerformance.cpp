@@ -4,7 +4,7 @@
 #include <string.h>
 
 namespace {
-constexpr uint8_t CC[] = {30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,60,61};
+constexpr uint8_t CC[] = {30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
 constexpr uint8_t CC_SLOTS = sizeof(CC);
 constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51};
 constexpr uint8_t STUT_VALUES[] = {16,48,80,112};
@@ -113,49 +113,6 @@ void KickPerformance::snapshot(){
   queue(47, COUNT_VALUES[state_.bpfLayerCount]);
   queue(50, state_.selectedCharacterModel ? 127 : 0);
   queue(52, state_.pumpEnabled ? 127 : 0);
-  queue(60, fine_.tailOffset);
-  queue(61, fine_.tailAttack);
-}
-void KickPerformance::setFunctionHeld(bool held){
-  if (functionHeld_ == held) return;
-  functionHeld_ = held;
-  // Letting go of Function hands K3 straight back to the TAIL amount.
-  if (!held && fineFocus_){ fineFocus_ = false; dirty_ = true; }
-}
-void KickPerformance::restoreFine(const FineState& in){
-  fine_ = in;
-  if (fine_.tailOffset > 127) fine_.tailOffset = 64;
-  if (fine_.tailAttack > 127) fine_.tailAttack = 0;
-  queue(60, fine_.tailOffset);
-  queue(61, fine_.tailAttack);
-  flushMidi();
-  dirty_ = true;
-}
-uint8_t& KickPerformance::fineValue(){
-  return fine_.attackMode ? fine_.tailAttack : fine_.tailOffset;
-}
-// Plain values, never lane-recorded, and not part of the provisional
-// snapshot, so they stay where they were left when Function is released.
-void KickPerformance::adjustFine(int delta){
-  focusControl(2);
-  fineFocus_ = true;
-  uint8_t& v = fineValue();
-  uint8_t next = (uint8_t)constrain((int)v + delta,0,127);
-  if (next == v) return;
-  v = next;
-  queue(fine_.attackMode ? 61 : 60, v);
-  flushMidi();
-}
-void KickPerformance::fineText(char* out, size_t size, bool compact) const {
-  if (fine_.attackMode){
-    // Must track TAIL_ATTACK_MIN_MS / _MAX_MS on the Daisy.
-    float ms = 6.f * powf(10.f, fine_.tailAttack/127.f);
-    snprintf(out,size,compact ? "A%.0fM" : "%.0f ms",ms);
-  } else {
-    float ms = ((int)fine_.tailOffset - 64) * .5f;
-    if (fine_.tailOffset == 64) snprintf(out,size,compact ? "+0" : "0.0 ms");
-    else snprintf(out,size,compact ? "%+.1f" : "%+.1f ms",ms);
-  }
 }
 void KickPerformance::saveTo(ControllerState& out) const { out = state_; }
 void KickPerformance::restoreFrom(const ControllerState& in){
@@ -199,7 +156,6 @@ void KickPerformance::setActive(bool active){
 }
 void KickPerformance::focusControl(uint8_t knob){
   focus_.knob = knob;
-  fineFocus_ = false;
   // A new deliberate action may dismiss an older transient status.
   focus_.resetOverlay = false;
   dirty_ = true;
@@ -222,12 +178,6 @@ void KickPerformance::buttonEdge(uint8_t button, bool pressed, uint32_t now){
         state_.reverseEnabled = !state_.reverseEnabled;
         queue(41, state_.reverseEnabled ? 127 : 0); break;
       case 2:
-        if (functionHeld_){
-          // Function + B3: K3 switches between the start offset and fade-in.
-          fine_.attackMode = !fine_.attackMode;
-          fineFocus_ = true;
-          break;
-        }
         state_.tailDelayEnabled = !state_.tailDelayEnabled;
         queue(43, state_.tailDelayEnabled ? 127 : 0); break;
       case 3: {
@@ -308,8 +258,7 @@ void KickPerformance::sampleAngle(uint8_t knob, float angle){
     pot.accumulated = 0;
     return;
   }
-  bool fine = knob == 2 && functionHeld_;
-  uint8_t value = fine ? fineValue() : position(assignment(knob));
+  uint8_t value = position(assignment(knob));
   // At a limit discard any outward fractional remainder on reversal. There
   // is no accumulated overshoot to unwind, even after many extra revolutions.
   if ((value == 127 && movement < 0 && pot.accumulated > 0) ||
@@ -322,12 +271,11 @@ void KickPerformance::sampleAngle(uint8_t knob, float angle){
   int ticks = (int)pot.accumulated;
   pot.accumulated -= ticks;
   adjust(knob,ticks);
-  value = fine ? fineValue() : position(assignment(knob));
+  value = position(assignment(knob));
   if (value == 0 || value == 127) pot.accumulated = 0;
 }
 void KickPerformance::adjust(uint8_t knob, int delta){
   if (!active_ || knob >= 6 || delta == 0) return;
-  if (knob == 2 && functionHeld_){ adjustFine(delta); return; }
   focusControl(knob);
   Parameter p = assignment(knob);
   uint8_t current = position(p);
@@ -459,10 +407,7 @@ void KickPerformance::drawOverview(Adafruit_SH1106G& d){
       snprintf(secondary,sizeof(secondary),"R %s",state_.reverseEnabled ? "ON" : "OFF");
     } else if (k == 2){
       snprintf(title,sizeof(title),"TAIL");
-      if (fine_.tailOffset == 64)
-        snprintf(secondary,sizeof(secondary),"%s",state_.tailDelayEnabled ? "ON" : "OFF");
-      else
-        snprintf(secondary,sizeof(secondary),"%s%+.1f",state_.tailDelayEnabled ? "ON" : "OF",((int)fine_.tailOffset-64)*.5f);
+      snprintf(secondary,sizeof(secondary),"%s",state_.tailDelayEnabled ? "ON" : "OFF");
     } else if (k == 3){
       snprintf(title,sizeof(title),"BPF %u",state_.bpfLayerCount);
       snprintf(secondary,sizeof(secondary),"%sL%u",state_.bpfLayerCount ? "EDIT " : "NXT ",state_.editedBpfLayer+1);
@@ -568,29 +513,6 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
   if (focus_.resetOverlay){
     label(d,16,19,"FX RESET",2); label(d,7,45,"STUT..LPF REV OFF");
-    d.setTextWrap(true); d.display(); return;
-  }
-  if (fineFocus_ && focus_.knob == 2){
-    char value[22], footer[22];
-    fineText(value,sizeof(value),false);
-    label(d,0,0,fine_.attackMode ? "TAIL ATTACK" : "TAIL OFFSET");
-    label(d,0,11,value,2);
-    label(d,2,28,fine_.attackMode ? "SUB FADE-IN" : "START VS K3 DELAY");
-    // Offset: a marker either side of the K3 start. Attack: the fade-in ramp.
-    d.drawFastHLine(LEFT,GRAPH_BOTTOM,RIGHT-LEFT+1,SH110X_WHITE);
-    int mid = (LEFT+RIGHT)/2;
-    if (fine_.attackMode){
-      int w = 6 + (int)(fine_.tailAttack*50/127);
-      d.drawLine(mid-w,GRAPH_BOTTOM,mid,GRAPH_TOP,SH110X_WHITE);
-      d.drawFastHLine(mid,GRAPH_TOP,RIGHT-mid,SH110X_WHITE);
-    } else {
-      for (int py = GRAPH_TOP; py < GRAPH_BOTTOM; py += 3) d.drawPixel(mid,py,SH110X_WHITE);
-      int mx = mid + ((int)fine_.tailOffset-64)*(RIGHT-LEFT)/128;
-      d.drawFastVLine(mx,GRAPH_TOP,GRAPH_BOTTOM-GRAPH_TOP,SH110X_WHITE);
-      d.fillTriangle(mx-2,GRAPH_TOP,mx+2,GRAPH_TOP,mx,GRAPH_TOP+3,SH110X_WHITE);
-    }
-    snprintf(footer,sizeof(footer),"FN+B3: %s",fine_.attackMode ? "OFFSET" : "ATTACK");
-    label(d,2,56,footer);
     d.setTextWrap(true); d.display(); return;
   }
   Parameter p = assignment(focus_.knob);

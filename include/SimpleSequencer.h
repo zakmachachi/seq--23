@@ -499,11 +499,13 @@ class SimpleSequencer {
       KickMixer::SavedState savedKickMixer;
       // v1.3.0 (v14). Appended after the v12/v13 kick block for the same
       // reason: every older offset is unchanged, so a v13 image still loads.
-      KickPerformance::FineState savedKickFine;
+      uint8_t savedV14Reserved[3];   // v14/v15: Function + K3's fine state
       uint8_t savedKickSweepTime[NUM_CHANNELS];
       uint8_t savedKickTailMod[NUM_CHANNELS];
       // v15: TAIL MOD became a 0..127 wobble intensity and WAVE was added.
       uint8_t savedKickWave[NUM_CHANNELS];
+      // v16: the mix page's third slot is TAIL ATTACK (was the Tube gain);
+      // no new fields, only a new meaning for an old one.
     };
     static_assert(sizeof(SaveData) <= E2END + 1, "SaveData exceeds EEPROM");
     void saveState();

@@ -57,10 +57,18 @@ int main(int argc, char** argv){
   struct Case { const char* name; KickShapeInputs in; };
   Case cases[5];
   cases[0].name = "default";
-  cases[1].name = "laser_tail_delay"; cases[1].in.shape = 127; cases[1].in.tailOn = true; cases[1].in.tailAmount = 90; cases[1].in.tailOffset = 80; cases[1].in.decay = 80;
+  cases[1].name = "tail_delay_gap"; cases[1].in.shape = 64; cases[1].in.tailOn = true; cases[1].in.tailAmount = 90; cases[1].in.decay = 80;
   cases[2].name = "pitch_down_tmod";  cases[2].in.velocity = 10; cases[2].in.tailMod = 100; cases[2].in.decay = 90;
   cases[3].name = "round_long";       cases[3].in.shape = 0; cases[3].in.decay = 110; cases[3].in.sweepTime = 110;
   cases[4].name = "punchy_short";     cases[4].in.shape = 90; cases[4].in.decay = 30; cases[4].in.wave = 127; cases[4].in.sweepTime = 30;
+  {
+    // The WAVE icon across its range, as screen 1 shows it.
+    FakeOled d;
+    const uint8_t waves[] = {0, 32, 64, 96, 127};
+    for (int i = 0; i < 5; i++) drawWaveIcon(d, 2 + i * 25, 28, 22, 9, waves[i], 1);
+    char path[512]; snprintf(path, sizeof(path), "%s/wave_icons.pbm", dir); d.save(path);
+    printf("%s\n", path);
+  }
   for (auto& c : cases){
     FakeOled d; drawKickShape(d, c.in, 1, 2);
     char path[512]; snprintf(path, sizeof(path), "%s/%s.pbm", dir, c.name); d.save(path);

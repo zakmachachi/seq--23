@@ -34,26 +34,10 @@ int main(int argc, char** argv){
  (void)argv;
  // Initialization, backpressure and no repeated sync on page entry/render.
  {Harness h;h.k=K{};h.ready=false;h.k.begin(Harness::send,&h);assert(h.midi.empty());h.ready=true;h.k.service(1);
- const int cc[]={30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,60,61};
- const int val[]={0,0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0,64,0};assert(h.midi.size()==22);
- for(int i=0;i<22;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
- h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==22);}
- // v1.3.0: Function + K3 edits the tail fine controls, Function + B3 switches
- // between them, and neither touches the TAIL amount or the tail enable.
- {Harness h;h.set(2,40);h.k.takeUserEditedParameter();h.midi.clear();h.k.setFunctionHeld(true);
- h.k.adjust(2,5);assert(h.k.fine_.tailOffset==69&&h.sent(60,69)&&h.k.state_.tailDelayAmount==40&&h.k.fineFocused());
- assert(h.k.takeUserEditedParameter()==K::PARAM_COUNT); // fine edits are never lane-recorded
- h.midi.clear();h.click(2);assert(h.k.fine_.attackMode&&!h.k.state_.tailDelayEnabled&&h.midi.empty());
- h.k.adjust(2,20);assert(h.k.fine_.tailAttack==20&&h.sent(61,20)&&h.k.fine_.tailOffset==69);
- h.k.adjust(2,-100);assert(h.k.fine_.tailAttack==0); // clamps at the limit, no wrap
- Adafruit_SH1106G a,b;h.k.drawOverview(a);h.k.drawFocus(b,120);assert(b.has("TAIL ATTACK"));
- h.k.setFunctionHeld(false);assert(!h.k.fineFocused());
- h.midi.clear();h.k.adjust(2,3);assert(h.k.state_.tailDelayAmount==43&&h.sent(42,43)&&h.k.fine_.tailAttack==0);
- h.click(2);assert(h.k.state_.tailDelayEnabled);
- // Sticky: restoring the provisional snapshot leaves the fine state alone.
- K::ControllerState snap;h.k.saveTo(snap);h.k.setFunctionHeld(true);h.click(2);h.k.adjust(2,-9);
- h.k.restoreFrom(snap);assert(h.k.fine_.tailOffset==60&&h.sent(60,60));
- K::FineState f;f.tailOffset=200;f.tailAttack=90;h.k.restoreFine(f);assert(h.k.fine_.tailOffset==64&&h.k.fine_.tailAttack==90);}
+ const int cc[]={30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
+ const int val[]={0,0,0,0,0,0,0,64,0,0,0,35,65,95,0,0,0,0,64,0};assert(h.midi.size()==20);
+ for(int i=0;i<20;++i)assert(h.midi[i]==std::make_pair(cc[i],val[i]));
+ h.k.begin(Harness::send,&h);h.k.setActive(true);h.k.setActive(false);h.k.setActive(true);h.k.service(200);assert(h.midi.size()==20);}
  // Relative FX edits resume stored values immediately; page selection sends no amount.
  {Harness h;h.page(K::DELAY);h.set(0,114);h.midi.clear();h.page(K::HPF);
  assert(h.k.state_.hpf==0&&h.midi.empty());h.k.adjust(0,3);assert(h.k.state_.hpf==3&&h.sent(33,3));

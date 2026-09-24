@@ -31,23 +31,8 @@ public:
     uint8_t kickShape = 64;
     bool pumpEnabled = false;
   };
-  // Function + K3's tail fine controls. Kept out of ControllerState on
-  // purpose: they stick when Function is released instead of reverting with
-  // the provisional snapshot, and the saved patch stores them separately.
-  struct FineState {
-    uint8_t tailOffset = 64; // CC60: 64 = on the K3 delay, 0.5 ms per step
-    uint8_t tailAttack = 0;  // CC61: 0 = 6 ms (click-safe) .. 127 = 60 ms
-    bool attackMode = false; // Function + B3 toggles which one K3 edits
-  };
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
-  // While held, K3 edits the tail fine controls and B3 switches between them.
-  void setFunctionHeld(bool held);
-  const FineState& fineState() const { return fine_; }
-  void restoreFine(const FineState& in);
-  // True while screen 2 shows the tail fine controls, so a Function-held
-  // motion recording does not capture the TAIL amount underneath them.
-  bool fineFocused() const { return fineFocus_; }
   void setActive(bool active);
   void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
   void buttonEdge(uint8_t button, bool pressed, uint32_t now);
@@ -88,12 +73,10 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[24] = {};
-    uint8_t value[24] = {};
+    bool pending[20] = {};
+    uint8_t value[20] = {};
   };
   ControllerState state_;
-  FineState fine_;
-  bool functionHeld_ = false, fineFocus_ = false;
   PhysicalPot physical_[6];
   ButtonState buttons_[6];
   FocusState focus_;
@@ -112,9 +95,6 @@ private:
   void focusControl(uint8_t knob);
   void reassign(uint8_t knob);
   void adjust(uint8_t knob, int delta);
-  void adjustFine(int delta);
-  uint8_t& fineValue();
-  void fineText(char* out, size_t size, bool compact) const;
   void updateRepeat(RepeatState& repeat, bool loop, uint8_t value);
   static void clampRepeat(RepeatState& repeat, uint8_t divisions);
   void resetFx(uint32_t now);

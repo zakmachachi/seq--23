@@ -20,14 +20,14 @@ struct KickShapeInputs {
   uint8_t decay = 64;         // K2 DECAY
   bool tailOn = false;        // B3
   uint8_t tailAmount = 0;     // K3
-  uint8_t tailOffset = 64;    // FUNCTION + K3
-  uint8_t tailAttack = 0;     // FUNCTION + B3, then K3
+  uint8_t tailAttack = 0;     // mix page pot 3
   uint32_t bpm = 120;
 };
 
 struct KickShape {
   float f0 = 55, ratio = 1, sweepMs = 88, holdMs = 36, endMs = 82;
   float decayS = .5f, delayMs = 0, pitchSt = 0, attackMs = 6, totalMs = 300;
+  float gapHoldMs = 82;   // TAIL DELAY: full through the punch, then a gap
   float wobbleDepth = 0, wobbleHz = 2, wobbleIrregular = 0;
   bool inf = false;
 
@@ -53,12 +53,11 @@ struct KickShape {
     inf = x >= .99f;
     decayS = inf ? 2.f : .035f * powf(171.428571f, x);
     delayMs = 0;
-    if (in.tailOn){
+    if (in.tailOn && in.tailAmount > 0){
       float quarter = 60000.f / (in.bpm ? in.bpm : 120);
-      if (in.tailAmount > 0) delayMs = quarter * .5f * powf(in.tailAmount / 127.f, 1.7f);
-      delayMs += ((int)in.tailOffset - 64) * .5f;
-      if (delayMs < 0) delayMs = 0;
+      delayMs = quarter * .5f * powf(in.tailAmount / 127.f, 1.7f);
     }
+    gapHoldMs = endMs;
     uint8_t v = in.velocity < 1 ? 1 : in.velocity;
     pitchSt = v <= 64 ? -12.f * (1.f - (v - 1) / 63.f) : 12.f * (v - 64) / 63.f;
     float intensity = in.tailMod / 127.f;
@@ -68,16 +67,25 @@ struct KickShape {
     attackMs = 6.f * powf(10.f, in.tailAttack / 127.f);
     // The old blended sub decay empties in ~61 % of the DECAY time.
     float subMs = inf ? 1200.f : .61f * decayS * 1000.f;
-    float end = delayMs + subMs;
+    float end = subMs > delayMs + 60.f ? subMs : delayMs + 60.f;
     if (end < endMs) end = endMs;
     totalMs = end < 150.f ? 150.f : (end > 1200.f ? 1200.f : end);
+  }
+
+  // TAIL DELAY: the whole kick's level, t ms after the hit (the Daisy's
+  // KickVoice::GapLevel).
+  float gapLevel(float t) const {
+    if (delayMs <= 0 || t < gapHoldMs) return 1.f;
+    float down = 1.f - smooth((t - gapHoldMs) / 6.f);
+    float up = t < delayMs ? 0.f : smooth((t - delayMs) / attackMs);
+    return 1.f - (1.f - down) * (1.f - up);
   }
 
   // Pitch relative to the note, in semitones, t ms after the hit.
   float pitchSemitones(float t) const {
     float st = 0;
-    if (t > delayMs){
-      float ts = t - delayMs;
+    {
+      float ts = t;
       st += pitchSt * smooth(ts / 115.f);
       if (wobbleDepth > 0){
         float c = wobbleHz * ts / 1000.f;
@@ -95,14 +103,11 @@ struct KickShape {
   // Punch and sub levels, 0..1, t ms after the hit (the old anatomy).
   void levels(float t, float& punch, float& sub) const {
     float a = t <= holdMs ? 0.f : smooth((t - holdMs) / (endMs - holdMs));
-    punch = cosf(a * 1.5707963f);
-    sub = 0;
-    if (t >= delayMs){
-      float ts = t - delayMs;
-      float env = inf ? 1.f : 1.177f * expf(-3.1085f * ts / (decayS * 1000.f)) - .177f;
-      if (env < 0) env = 0;
-      sub = sinf(a * 1.5707963f) * env * smooth(ts / attackMs);
-    }
+    float g = gapLevel(t);
+    punch = cosf(a * 1.5707963f) * g;
+    float env = inf ? 1.f : 1.177f * expf(-3.1085f * t / (decayS * 1000.f)) - .177f;
+    if (env < 0) env = 0;
+    sub = sinf(a * 1.5707963f) * env * smooth(t / 6.f) * g;
   }
 };
 
@@ -114,6 +119,26 @@ inline float kickShapeDisplaySt(float st){
   if (st > 30.f) st = 30.f;
   if (st < -14.f) st = -14.f;
   return st;
+}
+
+// WAVE as a picture: two cycles of the sine morphing towards a saw, w x h
+// pixels at (x, y). Mirrors the Daisy's "sine + saw harmonics" blend.
+template <class D>
+void drawWaveIcon(D& d, int x, int y, int w, int h, uint8_t wave, uint16_t white){
+  float m = wave / 127.f;
+  int prev = -1;
+  for (int i = 0; i < w; i++){
+    float p = 2.f * i / (w - 1);                        // two cycles
+    float ph = p - floorf(p);
+    float sine = sinf(ph * 6.2831853f);
+    float q = ph + .5f; q -= floorf(q);
+    float saw = 2.f * q - 1.f;                          // rising, in phase
+    float harmonics = saw * 1.5707963f - sine;          // saw minus its fundamental
+    float v = sine + harmonics * m;                     // peak ~1 .. ~1.57
+    int yy = y + h / 2 - (int)lroundf(v / 1.6f * (h / 2));
+    if (prev >= 0) d.drawLine(x + i - 1, prev, x + i, yy, white);
+    prev = yy;
+  }
 }
 
 // Draws the 128x64 kick view. D is any Adafruit_GFX-like display with
@@ -130,8 +155,7 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
   // Header: the kick channel's Menu 1 knobs, in pot order, in fixed
   // six-character columns so they never run into each other.
   char text[12];
-  snprintf(text, sizeof(text), "WAV%3d", (int)(in.wave * 100 + 63) / 127);
-  d.setCursor(0, 0); d.print(text);
+  drawWaveIcon(d, 0, 0, 36, 8, in.wave, white);
   snprintf(text, sizeof(text), "SWP%.1f", powf(2.f, ((int)in.sweepTime - 64) / 32.f));
   d.setCursor(46, 0); d.print(text);
   snprintf(text, sizeof(text), "TMD%3d", (int)(in.tailMod * 100 + 63) / 127);
@@ -179,7 +203,7 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
     d.drawPixel(x, 63, inverse);
   }
 
-  // Where the sub starts, when the tail is delayed.
+  // Where the kick comes back, when the tail is delayed.
   if (k.delayMs > 0){
     int x = (int)lroundf(k.delayMs / k.totalMs * 127.f);
     d.fillTriangle(x - 2, 36, x + 2, 36, x, 38, white);

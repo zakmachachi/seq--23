@@ -961,7 +961,6 @@ void SimpleSequencer::readEncoders(){
   const unsigned long POT_BTN_DEBOUNCE_MS = 10;
 
   kickPerformance.setActive(kickCCPage());
-  kickPerformance.setFunctionHeld(isFunctionHeld());
   kickMixer.setActive(kickMixPage());
 
   // Scan pot buttons (active LOW)
@@ -1264,6 +1263,13 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // --- GLOBAL MODIFIER: Function + Pot 3 (encoder 3) = melody contour bias ---
   // Clockwise -> ascending bias, anti-clockwise -> descending. Applied on the
   // next pattern generation. Shown as an arrow on the Menu 1 screen 2.
+  // On Menu 1's KICK channel, Function + pot 3 snaps SWEEP back to 1.00x
+  // instead (a kick has no melodic contour).
+  if (pot == 2 && isFunctionHeld() && activeMenu == 1 && isKickChannel(selectedChannel)){
+    kickSweepTime[selectedChannel] = 64;
+    Serial.println("KICK SWEEP TIME=64 (1.00x)");
+    return;
+  }
   if (pot == 2 && isFunctionHeld() && activeMenu != 6){
     int v = (int)contourBias[selectedChannel] + ticks * 8; // ~8% per detent
     if (v < -100) v = -100;
@@ -1384,8 +1390,20 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         if (isKickChannel(ch)){
           // v1.3.0 kick channel: the Daisy's punch sweep time (CC62), sent
           // with the next hit. 64 = SHAPE's own time, 0.25x..4x.
-          // 4 per click = an eighth of an octave of sweep time.
-          kickSweepTime[ch] = (uint8_t)constrain((int)kickSweepTime[ch] + ticks * 4, 0, 127);
+          // 4 per click = an eighth of an octave of sweep time, with a
+          // detent at 1.00x: crossing it stops there, and it takes a couple
+          // more clicks in the same direction to move off it.
+          static int8_t detentHold = 0;
+          int cur = kickSweepTime[ch], next = constrain(cur + ticks * 4, 0, 127);
+          if (cur == 64){
+            detentHold = (int8_t)constrain(detentHold + ticks, -3, 3);
+            if (abs(detentHold) < 3) next = 64;
+            else detentHold = 0;
+          } else if ((cur < 64 && next > 64) || (cur > 64 && next < 64)){
+            next = 64;
+            detentHold = 0;
+          }
+          kickSweepTime[ch] = (uint8_t)next;
           Serial.print("KICK SWEEP TIME="); Serial.println(kickSweepTime[ch]);
           break;
         }
@@ -1734,14 +1752,17 @@ static const uint32_t SAVE_MAGIC_V13 = 13572479;
 // image's tail mod (then a centre-64 sweep) is not carried over.
 static const uint32_t SAVE_MAGIC_V14 = 13572480;
 static const uint32_t SAVE_MAGIC_V15 = 13572481;
+// v16: the mix page's Tube gain slot became TAIL ATTACK, so an older image's
+// value there is not carried over (it would be a ~26 ms attack out of nowhere).
+static const uint32_t SAVE_MAGIC_V16 = 13572482;
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = SAVE_MAGIC_V15;
+  data.magicNumber = SAVE_MAGIC_V16;
   data.savedBpm = bpm;
   kickPerformance.saveTo(data.savedKickPerformance);
   kickMixer.saveTo(data.savedKickMixer);
-  data.savedKickFine = kickPerformance.fineState();
+  for (uint8_t i = 0; i < 3; i++) data.savedV14Reserved[i] = 0;
 
   for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
     data.savedNoteLenIdx[c] = noteLenIdx[c];
@@ -1796,7 +1817,8 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14 ||
+  if (data.magicNumber == SAVE_MAGIC_V16 ||
+      data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14 ||
       data.magicNumber == SAVE_MAGIC_V13 || data.magicNumber == SAVE_MAGIC_V12 ||
       data.magicNumber == SAVE_MAGIC_V11) {
     bpm = data.savedBpm;
@@ -1844,15 +1866,17 @@ void SimpleSequencer::loadState() {
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
-    if (data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14 ||
-        data.magicNumber == SAVE_MAGIC_V13) {
+    if (data.magicNumber == SAVE_MAGIC_V16 || data.magicNumber == SAVE_MAGIC_V15 ||
+        data.magicNumber == SAVE_MAGIC_V14 || data.magicNumber == SAVE_MAGIC_V13) {
       // Restoring re-sends both pages; the Daisy boots to its own defaults.
+      KickMixer::SavedState mix = data.savedKickMixer;
+      if (data.magicNumber != SAVE_MAGIC_V16) mix.value[KickMixer::TAIL_ATTACK] = 0;
       kickPerformance.restoreFrom(data.savedKickPerformance);
-      kickMixer.restoreFrom(data.savedKickMixer);
+      kickMixer.restoreFrom(mix);
     }
-    if (data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14) {
-      kickPerformance.restoreFine(data.savedKickFine);
-      bool v15 = data.magicNumber == SAVE_MAGIC_V15;
+    if (data.magicNumber == SAVE_MAGIC_V16 || data.magicNumber == SAVE_MAGIC_V15 ||
+        data.magicNumber == SAVE_MAGIC_V14) {
+      bool v15 = data.magicNumber != SAVE_MAGIC_V14;
       for (uint8_t c = 0; c < NUM_CHANNELS; c++){
         kickSweepTime[c] = data.savedKickSweepTime[c] <= 127 ? data.savedKickSweepTime[c] : 64;
         kickTailMod[c]   = (v15 && data.savedKickTailMod[c] <= 127) ? data.savedKickTailMod[c] : 0;
@@ -2393,7 +2417,7 @@ void SimpleSequencer::serviceKickLane(){
     laneStepDirty = false;
     uint8_t step = laneStepPending;
     if (step < NUM_STEPS){
-      if (laneRecording && kickCCPage() && !kickPerformance.fineFocused()){
+      if (laneRecording && kickCCPage()){
         KickPerformance::Parameter p = kickPerformance.focusedParameter();
         if (KickPerformance::parameterIsLaneable(p)){
           // Reaching for a different knob starts a fresh gesture rather than
@@ -4407,11 +4431,8 @@ void SimpleSequencer::drawNotesView(){
   display.setCursor(colX[0], valY1);
   display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
   display.setCursor(colX[1], valY1);
-  if (kick){
-    if (kickWave[ch] == 0) display.print("SINE");
-    else if (kickWave[ch] == 127) display.print("SAW");
-    else { display.print((kickWave[ch] * 100 + 63) / 127); display.print("%"); }
-  } else display.print(scaleNames[sm]);
+  if (kick) drawWaveIcon(display, colX[1], valY1 - 1, 38, 9, kickWave[ch], SH110X_WHITE);
+  else display.print(scaleNames[sm]);
   display.setCursor(colX[2], valY1);
   if (kick){
     char sw[8]; snprintf(sw, sizeof(sw), "%.2fx", powf(2.f, ((int)kickSweepTime[ch] - 64) / 32.f));
@@ -4810,7 +4831,6 @@ static void drawMachineIcon(Adafruit_SH1106G& d, int cx, int cy, uint8_t machine
 void SimpleSequencer::drawKickShapeView(){
   uint8_t ch = (heldChannel >= 0) ? (uint8_t)heldChannel : selectedChannel;
   const KickPerformance::ControllerState& ks = kickPerformance.state();
-  const KickPerformance::FineState& fine = kickPerformance.fineState();
   KickShapeInputs in;
   in.note = channelPitch[ch];
   in.shape = ks.kickShape;
@@ -4821,8 +4841,7 @@ void SimpleSequencer::drawKickShapeView(){
   in.decay = ks.decay;
   in.tailOn = ks.tailDelayEnabled;
   in.tailAmount = ks.tailDelayAmount;
-  in.tailOffset = fine.tailOffset;
-  in.tailAttack = fine.tailAttack;
+  in.tailAttack = kickMixer.tailAttack();
   in.bpm = bpm;
   drawKickShape(display2, in, SH110X_WHITE, SH110X_INVERSE);
   display2.display();

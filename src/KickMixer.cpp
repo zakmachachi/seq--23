@@ -3,9 +3,13 @@
 #include <stdio.h>
 
 namespace {
-constexpr uint8_t CC[] = {53,54,55,56,57,58};
-const char* const SHORT_NAMES[] = {"LINE","MACK","TUBE","BPF","SUB","PUNCH"};
-const char* const LONG_NAMES[] = {"LINE OUT","MACKIE","TUBE","BPF MIX","SUB","PUNCH VOL"};
+// One CC per control, plus CC55: DIST sends Mackie (54) and Tube (55) together.
+constexpr uint8_t CC[] = {53,54,61,56,57,58,55};
+constexpr uint8_t CC_SLOTS = sizeof(CC);
+const char* const SHORT_NAMES[] = {"LINE","DIST","T.ATK","BPF","SUB","PUNCH"};
+const char* const LONG_NAMES[] = {"LINE OUT","DISTORTION","TAIL ATTACK","BPF MIX","SUB","PUNCH VOL"};
+// DIST keeps the Mackie/Tube balance their separate defaults had (65 / 80).
+constexpr float TUBE_PER_DIST = 80.f / 65.f;
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr int LEFT = 4, RIGHT = 123;
 void label(Adafruit_SH1106G& d, int x, int y, const char* text, uint8_t size = 1){
@@ -21,7 +25,7 @@ void KickMixer::begin(SendCC send, void* context){
   flushMidi();
 }
 void KickMixer::queue(uint8_t cc, uint8_t value){
-  for (uint8_t i = 0; i < CONTROL_COUNT; ++i){
+  for (uint8_t i = 0; i < CC_SLOTS; ++i){
     if (CC[i] != cc) continue;
     midi_.value[i] = value;
     midi_.pending[i] = true;
@@ -30,14 +34,21 @@ void KickMixer::queue(uint8_t cc, uint8_t value){
 }
 void KickMixer::flushMidi(){
   if (!midi_.send) return;
-  for (uint8_t i = 0; i < CONTROL_COUNT; ++i){
+  for (uint8_t i = 0; i < CC_SLOTS; ++i){
     if (!midi_.pending[i]) continue;
     if (!midi_.send(midi_.context, CC[i], midi_.value[i])) return;
     midi_.pending[i] = false;
   }
 }
+void KickMixer::queueControl(uint8_t c){
+  queue(CC[c], value_[c]);
+  if (c == DIST){
+    int tube = (int)lroundf(value_[c] * TUBE_PER_DIST);
+    queue(55, (uint8_t)(tube > 127 ? 127 : tube));
+  }
+}
 void KickMixer::snapshot(){
-  for (uint8_t c = 0; c < CONTROL_COUNT; ++c) queue(CC[c], value_[c]);
+  for (uint8_t c = 0; c < CONTROL_COUNT; ++c) queueControl(c);
 }
 void KickMixer::saveTo(SavedState& out) const {
   for (uint8_t c = 0; c < CONTROL_COUNT; ++c) out.value[c] = value_[c];
@@ -118,18 +129,23 @@ void KickMixer::adjust(uint8_t knob, int delta){
   uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
   if (next == current) return; // No wrap and no repeated MIDI at the limits.
   value_[knob] = next;
-  queue(CC[knob],next);
+  queueControl(knob);
   flushMidi();
 }
 
 uint8_t KickMixer::percent(uint8_t v){ return ((unsigned)v * 100 + 63) / 127; }
+void KickMixer::valueText(uint8_t c, char* out, size_t size) const {
+  // Must track TAIL_ATTACK_MIN_MS / _MAX_MS on the Daisy.
+  if (c == TAIL_ATTACK) snprintf(out,size,"%.0fms",6.f * powf(10.f, value_[c]/127.f));
+  else snprintf(out,size,"%u%%",percent(value_[c]));
+}
 
 void KickMixer::drawOverview(Adafruit_SH1106G& d){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
   for (uint8_t k = 0; k < 6; ++k){
     int x = (k % 3) * 43, y = (k / 3) * 32;
     char value[12];
-    snprintf(value,sizeof(value),"%u%%",percent(value_[k]));
+    valueText(k,value,sizeof(value));
     if (focusKnob_ == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
     label(d,x+3,y+3,SHORT_NAMES[k]); label(d,x+3,y+13,value);
   }
@@ -141,7 +157,7 @@ void KickMixer::drawFocus(Adafruit_SH1106G& d){
   label(d,0,0,"MIX");
   uint8_t v = value_[focusKnob_];
   char value[16];
-  snprintf(value,sizeof(value),"%u%%",percent(v));
+  valueText(focusKnob_,value,sizeof(value));
   label(d,0,13,LONG_NAMES[focusKnob_]);
   label(d,0,26,value,3);
   d.drawRect(LEFT,52,RIGHT-LEFT+1,10,SH110X_WHITE);

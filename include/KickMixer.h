@@ -7,10 +7,13 @@
 // state, physical input, focus and outgoing MIDI are separate.
 class KickMixer {
 public:
-  enum Control : uint8_t { LINE, MACK, TUBE, BPF, SUB, PUNCH, CONTROL_COUNT };
+  // v1.3.0: DIST drives both distortion gains (Mackie CC54, Tube CC55 at
+  // their old default ratio), and the slot that was the Tube gain is the
+  // TAIL ATTACK (CC61), how fast the kick comes back after a TAIL DELAY gap.
+  enum Control : uint8_t { LINE, DIST, TAIL_ATTACK, BPF, SUB, PUNCH, CONTROL_COUNT };
   // Flat POD so the patch can persist the page without touching privates.
   struct SavedState {
-    uint8_t value[CONTROL_COUNT] = {89,65,80,64,75,64};
+    uint8_t value[CONTROL_COUNT] = {89,65,0,64,75,64};
   };
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
@@ -20,6 +23,7 @@ public:
   void service(uint32_t now);
   void render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus, uint32_t now);
   void saveTo(SavedState& out) const;
+  uint8_t tailAttack() const { return value_[TAIL_ATTACK]; }
   void restoreFrom(const SavedState& in);
 private:
   struct PhysicalPot {
@@ -31,10 +35,12 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[CONTROL_COUNT] = {};
-    uint8_t value[CONTROL_COUNT] = {};
+    bool pending[CONTROL_COUNT + 1] = {};   // + the Tube half of DIST
+    uint8_t value[CONTROL_COUNT + 1] = {};
   };
-  uint8_t value_[CONTROL_COUNT] = {89,65,80,64,75,64};
+  uint8_t value_[CONTROL_COUNT] = {89,65,0,64,75,64};
+  void queueControl(uint8_t control);
+  void valueText(uint8_t control, char* out, size_t size) const;
   PhysicalPot physical_[6];
   bool buttonDown_[6] = {};
   uint8_t focusKnob_ = 0;
