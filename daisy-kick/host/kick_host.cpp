@@ -11,7 +11,9 @@
  *   bpm=185  hits=4  decay=<0..1>  sub=<0..1>  punch=<0..1>
  *   line=<0..1>  mackie=<0..1>  sherman=<0..1>  bpf=<0..1>
  *   hpf=<0..1>   lpf=<0..1>     (DJ filter position; hpf enables itself)
- *   tail=<ms of silence after the last hit>
+ *   mackamt=<0..1>  shrmamt=<0..1> (K5 character amount, CC48 / CC49)
+ *   taildelay=<0..1>               (K3, CC42; also enables it, CC43)
+ *   tail=<ms of silence after the last hit>  vel=<1..127, default 100>
  */
 
 #include <stdint.h>
@@ -182,16 +184,23 @@ int main(int argc, char** argv)
     maybe("shape",   CC_KICK_SHAPE_ABSOLUTE);
     maybe("hpf",     CC_MACRO_FX_HPF);
     maybe("lpf",     CC_MACRO_FX_LPF);
+    maybe("mackamt", CC_MACKIE_AMOUNT);
+    maybe("taildelay", CC_TAIL_DELAY_ABSOLUTE);
+    if(ArgOr(argc, argv, "taildelay", -1.0) >= 0.0)
+        SendCC(MIDI_CHANNEL_KICK, CC_TAIL_DELAY_STATE, 127);
+    maybe("shrmamt", CC_SHERMAN_AMOUNT);
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);
 
     const double step_ms = 60000.0 / bpm / 4.0; /* sixteenths */
     const uint8_t note   = 36;
+    const uint8_t velocity =
+        static_cast<uint8_t>(ArgOr(argc, argv, "vel", 100.0));
 
     for(int h = 0; h < hits; h++)
     {
-        NoteOn(MIDI_CHANNEL_KICK, note, 100);
+        NoteOn(MIDI_CHANNEL_KICK, note, velocity);
         Render(static_cast<size_t>(note_ms * kSampleRate / 1000.0) / kBlock
                * kBlock);
         NoteOff(MIDI_CHANNEL_KICK, note);

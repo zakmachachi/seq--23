@@ -68,29 +68,43 @@ struct Render
 {
     vector<float> y;
     float worst_step_ratio = 0.0f;  /* largest |dy| over the smooth-sine bound */
+    int worst_step_at = -1;
 };
 
-/* One voice's per-sample slope bound: level times angular frequency. */
+/*
+ * One voice's per-sample slope bound: each path's level times angular
+ * frequency, the punch scaled by its drive (SoftClip's slope is at most the
+ * drive), plus the fastest raised-cosine onset or smoothstep fade it can run.
+ */
 static float SlopeBound(const KickVoice& v, float pg, float sg)
 {
     if(!v.active) return 0.0f;
     float f = v.BaseFrequency(v.SubAge()) * (1.0f + v.sweep_depth * v.sweep);
-    float level = KICK_PUNCH_LEVEL * pg + KICK_SUB_LEVEL * sg + (v.handoff ? v.handoff_level : 0.0f);
-    return level * TWO_PI * fminf(f, 0.45f * SAMPLE_RATE) / SAMPLE_RATE;
-}
-
-/* Allowance for the raised-cosine onsets and the smoothstep fades. */
-static float EnvelopeAllowance(float pg, float sg)
-{
-    return KICK_PUNCH_LEVEL * pg * PI / (2.0f * MsToSamples(PUNCH_ATTACK_MS)) +
+    float w = TWO_PI * fminf(f, 0.45f * SAMPLE_RATE) / SAMPLE_RATE;
+    float punch = v.punch_level_scale * pg;
+    float sub = KICK_SUB_LEVEL * sg + (v.handoff ? v.handoff_level : 0.0f);
+    float drive = KICK_PUNCH_OLD_DRIVE ? fmaxf(1.0f, v.punch_drive) : 1.0f;
+    return punch * drive * w + sub * w +
+           punch * PI / (2.0f * v.punch_attack_samples) +
            KICK_SUB_LEVEL * sg * PI / (2.0f * MsToSamples(SUB_ATTACK_MS)) +
-           (KICK_PUNCH_LEVEL * pg + KICK_SUB_LEVEL * sg) * 1.5f / MsToSamples(RETRIGGER_HANDOFF_MS);
+           (punch + sub) * 1.5f / MsToSamples(RETRIGGER_HANDOFF_MS) +
+           (punch + sub) * 1.6f / (v.anatomy_end - v.anatomy_start);
 }
 
 /* The firmware's TriggerKickVoice() and per-sample loop. */
 static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, float sg)
 {
     KickVoice voice, fading[KICK_FADING_SLOTS];
+    auto free_slot = [&]() -> KickVoice&
+    {
+        int slot = 0;
+        for(int i = 0; i < KICK_FADING_SLOTS; i++)
+        {
+            if(!fading[i].active) return fading[i];
+            if(fading[i].fade_age > fading[slot].fade_age) slot = i;
+        }
+        return fading[slot];
+    };
     Render r;
     size_t h = 0;
     float prev = 0.0f;
@@ -100,27 +114,30 @@ static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, 
         {
             float delay = (tail_delay_enabled && macro_tail_delay > 0.005f) ? MacroTailDelayMs(macro_tail_delay) : 0.0f;
             bool sounding = voice.Sounding();
-            if(sounding && delay > 0.0f)
+            if(delay > 0.0f && (sounding || voice.PunchSounding()))
             {
-                int slot = 0;
-                for(int i = 0; i < KICK_FADING_SLOTS; i++)
-                {
-                    if(!fading[i].active) { slot = i; break; }
-                    if(fading[i].fade_age > fading[slot].fade_age) slot = i;
-                }
-                fading[slot] = voice;
-                fading[slot].BeginFadeOut();
+                KickVoice& slot = free_slot();
+                slot = voice;
+                slot.BeginFadeOut(false);
                 sounding = false;
+            }
+            else if(voice.PunchSounding())
+            {
+                KickVoice& slot = free_slot();
+                slot = voice;
+                slot.BeginFadeOut(true);
             }
             voice.Trigger(kick_frequency, macro_kick_shape, (uint8_t)hits[h].second, delay,
                           MacroDecaySeconds(macro_decay), sounding);
             h++;
         }
-        float bound = SlopeBound(voice, pg, sg) + EnvelopeAllowance(pg, sg) + 1e-5f;
-        for(auto& f : fading) bound += SlopeBound(f, pg, sg) + EnvelopeAllowance(pg, sg);
-        float y = voice.Process(pg, sg);
-        for(auto& f : fading) if(f.active) y += f.Process(pg, sg);
-        r.worst_step_ratio = fmaxf(r.worst_step_ratio, fabsf(y - prev) / bound);
+        float bound = SlopeBound(voice, pg, sg) + 1e-5f;
+        for(auto& f : fading) bound += SlopeBound(f, pg, sg);
+        float punch_sum = 0.0f;
+        float y = voice.Process(pg, sg, punch_sum);
+        for(auto& f : fading) if(f.active) y += f.Process(pg, sg, punch_sum);
+        float ratio = fabsf(y - prev) / bound;
+        if(ratio > r.worst_step_ratio) { r.worst_step_ratio = ratio; r.worst_step_at = n; }
         prev = y;
         r.y.push_back(y);
     }
@@ -171,6 +188,7 @@ static void Expect(bool ok, const char* what) { printf("%s %s\n", ok ? "PASS" : 
 
 int main(int argc, char** argv)
 {
+    printf("---- punch profile stage %d ----\n", KICK_PUNCH_PROFILE_STAGE);
     bool wav = argc > 1 && strcmp(argv[1], "wav") == 0;
     const int SR = 48000;
 
@@ -279,7 +297,13 @@ int main(int argc, char** argv)
         vector<float> again = RunFull({{0, 64}, {7777, 64}}, 7777 + SR, 1.0f, 0.95f).y;
         float diff = 0;
         for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(fresh[n] - again[7777 + n]));
-        Expect(diff == 0.0f, "with the punch on at DECAY INF, a retriggered hit is bit-identical to a fresh one after the handoff");
+        /*
+         * Within 1e-6 (-120 dB) rather than bit-identical: the punch path's
+         * filters saw the handoff's bent phase, and their memory of it
+         * decays over a few samples rather than vanishing exactly.
+         */
+        printf("punched ratchet vs fresh hit after the handoff: max diff %g\n", diff);
+        Expect(diff <= 1e-6f, "with the punch on at DECAY INF, a retriggered hit matches a fresh one after the handoff");
         Expect(fresh[0] == 0.0f, "a punched hit starts at exactly zero");
         macro_kick_shape = 0.0f;
     }

@@ -1483,6 +1483,128 @@ static constexpr float KICK_DAC_KEEPALIVE_OFFSET = 1.0f / 1048576.0f;
 
 
 /* ============================================================
+   PUNCH PROFILE — ITERATIVE ABLATION
+   ============================================================
+
+   The old engine's punch was stronger for reasons that are all envelope
+   and tone, not oscillator count. Each stage below restores one of its
+   elements on top of the ones before, in the order they are likely to
+   matter. Bump KICK_PUNCH_PROFILE_STAGE, rebuild, listen. Any single one
+   can also be forced on or off by editing its line.
+
+   0  current punch: decays from the first sample, sub full from 6 ms
+   1  OLD ANATOMY: the punch is HELD at full, then hands over to the sub on
+      an equal-power crossfade across the SHAPE window (20-52 ms at 0,
+      36-82 ms at 64, 115-165 ms at 127); the sub is quiet under the sweep
+      and fades in across the same window. Old per-SHAPE punch attack
+      (2.5 / 1.35 / 0.75 ms).
+   2  OLD LEVEL: per-SHAPE punch level 0.52 x (0.16 / 0.62 / 1.0), tapered
+      by 10 % over the top 10 % of the knob, instead of a fixed 0.32.
+   3  OLD DRIVE: SoftClip(sine x 1.02 / 1.36 / 1.82) on the punch path,
+      faded in from 20 to 30 ms as it was; the first 20 ms stay a pure sine.
+   4  OLD TONE: one-pole low-pass on the punch path, 1.1k / 3.6k / 9.5k.
+   5  OLD HF GUARD: two one-poles on the punch path opening 3.2 -> 6.8 kHz
+      over the first 16 ms.
+
+   Every value is the 3af0e35 curve (ShapeThreePoint across ROUND / PUNCH /
+   SNAP). All of it acts on the punch path of the one oscillator; the sub
+   path stays a clean sine.
+   ============================================================ */
+
+static constexpr int KICK_PUNCH_PROFILE_STAGE = 1;
+
+static constexpr bool KICK_PUNCH_OLD_ANATOMY  = KICK_PUNCH_PROFILE_STAGE >= 1;
+static constexpr bool KICK_PUNCH_OLD_LEVEL    = KICK_PUNCH_PROFILE_STAGE >= 2;
+static constexpr bool KICK_PUNCH_OLD_DRIVE    = KICK_PUNCH_PROFILE_STAGE >= 3;
+static constexpr bool KICK_PUNCH_OLD_TONE     = KICK_PUNCH_PROFILE_STAGE >= 4;
+static constexpr bool KICK_PUNCH_OLD_HF_GUARD = KICK_PUNCH_PROFILE_STAGE >= 5;
+
+/* 3af0e35 SHAPE landmarks: ROUND (0), PUNCH (64), SNAP (127). */
+static constexpr float SHAPE_ROUND_TRANSIENT_GAIN = 0.16f;
+static constexpr float SHAPE_PUNCH_TRANSIENT_GAIN = 0.62f;
+static constexpr float SHAPE_SNAP_TRANSIENT_GAIN  = 1.00f;
+static constexpr float SHAPE_TAPER_START = 0.90f;
+static constexpr float SHAPE_TAPER_DEPTH = 0.10f;
+static constexpr float OLD_TRANSIENT_LEVEL = 0.52f;
+
+static constexpr float SHAPE_ROUND_DRIVE = 1.02f;
+static constexpr float SHAPE_PUNCH_DRIVE = 1.36f;
+static constexpr float SHAPE_SNAP_DRIVE  = 1.82f;
+static constexpr float OLD_DRIVE_PURE_MS = 20.0f;
+static constexpr float OLD_DRIVE_FADE_MS = 10.0f;
+
+static constexpr float SHAPE_ROUND_CUTOFF_HZ = 1100.0f;
+static constexpr float SHAPE_PUNCH_CUTOFF_HZ = 3600.0f;
+static constexpr float SHAPE_SNAP_CUTOFF_HZ  = 9500.0f;
+
+static constexpr float SHAPE_ROUND_ATTACK_MS = 2.50f;
+static constexpr float SHAPE_PUNCH_ATTACK_MS = 1.35f;
+static constexpr float SHAPE_SNAP_ATTACK_MS  = 0.75f;
+
+static constexpr float SHAPE_ROUND_HANDOFF_START_MS = 20.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_START_MS = 36.0f;
+static constexpr float SHAPE_SNAP_HANDOFF_START_MS  = 115.0f;
+static constexpr float SHAPE_ROUND_HANDOFF_END_MS = 52.0f;
+static constexpr float SHAPE_PUNCH_HANDOFF_END_MS = 82.0f;
+static constexpr float SHAPE_SNAP_HANDOFF_END_MS  = 165.0f;
+
+static constexpr float OLD_HF_GUARD_INITIAL_HZ = 3200.0f;
+static constexpr float OLD_HF_GUARD_FINAL_HZ   = 6800.0f;
+static constexpr float OLD_HF_GUARD_OPEN_MS    = 16.0f;
+
+
+static float ShapeThreePoint(
+    float x,
+    float round_value,
+    float punch_value,
+    float snap_value)
+{
+    x = Clamp01Added(x);
+
+    if(x <= 0.50f)
+        return round_value +
+               (punch_value - round_value) * SmoothstepAdded(x / 0.50f);
+
+    return punch_value +
+           (snap_value - punch_value) * SmoothstepAdded((x - 0.50f) / 0.50f);
+}
+
+
+static float OldPunchLevel(float x)
+{
+    float gain =
+        ShapeThreePoint(
+            x,
+            SHAPE_ROUND_TRANSIENT_GAIN,
+            SHAPE_PUNCH_TRANSIENT_GAIN,
+            SHAPE_SNAP_TRANSIENT_GAIN
+        );
+
+    x = Clamp01Added(x);
+
+    if(x > SHAPE_TAPER_START)
+    {
+        gain *=
+            1.0f -
+            (x - SHAPE_TAPER_START) / (1.0f - SHAPE_TAPER_START) *
+            SHAPE_TAPER_DEPTH;
+    }
+
+    return OLD_TRANSIENT_LEVEL * gain;
+}
+
+
+static inline float SoftClip(float x)
+{
+    /*
+     * Fast, smooth saturation.
+     */
+    return x /
+           (1.0f + fabsf(x));
+}
+
+
+/* ============================================================
    KICK VOICE — ONE SINE, PUNCH + SUB
    ============================================================
 
@@ -1510,20 +1632,28 @@ static constexpr float KICK_DAC_KEEPALIVE_OFFSET = 1.0f / 1048576.0f;
                  reaching exactly zero with zero slope at the DECAY time.
                  K2 retimes it live because u only ever advances.
 
-   RETRIGGER, NO TAIL DELAY: HANDOFF. A hit landing while the kick still
+   The voice renders two paths from that one sine: the PUNCH path (level,
+   and optionally the old drive / tone / HF guard; see PUNCH PROFILE) and the
+   SUB path, which stays a clean sine.
+
+   RETRIGGER, NO TAIL DELAY: HANDOFF. A hit landing while the sub still
    sounds must not crossfade two sines: at different phases their sum dips
    and recovers inside the fade, heard as a tick that grows with SUB. The
-   output instead carries on from the old sine's exact phase and level and
-   glides onto the new hit's trajectory over RETRIGGER_HANDOFF_MS:
+   sub path instead carries on from the old sine's exact phase and level
+   and glides onto the new hit's trajectory over RETRIGGER_HANDOFF_MS:
 
        phase = new phase + (offset + base_drift * t) * (1 - s)
-       level = old level * (1 - s) + new sub * s + new punch
+       sub   = old sub * (1 - s) + new sub * s
+
+   The old punch path is not a plain sine once it is driven or filtered, so
+   it is not carried: the old voice finishes its punch on its own in a
+   fading slot, exactly continuing, while the new punch starts from zero.
 
    with s a smoothstep 0 -> 1. The old level keeps the slope it had and
    bends flat over ~1 ms (LEVEL_SLOPE_BEND_A) instead of freezing. The
    waveform, its level and the base pitch are continuous; only the punch
-   sweep jumps in, which is the punch. Once s reaches 1 the output is
-   bit-identical to a fresh hit.
+   sweep jumps in, which is the punch. Once s reaches 1 and the old punch
+   has faded, the output is bit-identical to a fresh hit.
 
    RETRIGGER WITH TAIL DELAY: the new sub is silent at the trigger, so there
    is no sub to hand off to. The old voice carries on along its own
@@ -1669,23 +1799,43 @@ struct KickVoice
     float base_hz = 55.0f;
     float move_log_ratio = 0.0f;
 
-    /* Punch pitch sweep and level. */
+    /* Punch pitch sweep. */
     float sweep_depth = 0.0f;   /* R - 1 */
     float sweep = 0.0f;
     float sweep_coefficient = 0.0f;
-    float punch_env = 0.0f;
+
+    /* Punch level, latched from SHAPE at the trigger. */
+    float punch_env = 0.0f;           /* profile 0: exponential decay */
     float punch_coefficient = 0.0f;
+    float punch_level_scale = KICK_PUNCH_LEVEL;
+    uint32_t punch_attack_samples = 1;
+    uint32_t anatomy_start = 0;       /* profile 1+: handoff window */
+    uint32_t anatomy_end = 1;
+    bool punch_done = false;
+
+    /* Punch path tone, latched from SHAPE; per voice so a copy keeps its own. */
+    float punch_drive = 1.0f;
+    float tone_a = 0.0f;
+    float tone_state = 0.0f;
+    float guard_state_1 = 0.0f;
+    float guard_state_2 = 0.0f;
 
     /* Sub decay progress 0 -> 1; the envelope is (1 - u)^2. */
     float u = 0.0f;
     float du = 0.0f;
     bool sub_done = false;
 
-    /* What the last output sample was, for a retrigger to continue from. */
+    /*
+     * The last output sample's SUB-path sine, for a retrigger to continue
+     * from. The punch path is not a plain sine once it is driven or
+     * filtered, so it is never carried; the caller hands it to a fading
+     * slot instead.
+     */
     float last_phase = 0.0f;
     float last_increment = 0.0f;
     float last_level = 0.0f;
     float last_level_step = 0.0f;
+    float last_punch = 0.0f;
 
     /* The punch sweep's share of the last increment, above the base pitch. */
     float last_sweep_increment = 0.0f;
@@ -1700,6 +1850,7 @@ struct KickVoice
 
     /* Fade-out, used only by the fading slots. */
     bool fading = false;
+    bool fading_punch_only = false;
     uint32_t fade_age = 0;
 
 
@@ -1709,9 +1860,17 @@ struct KickVoice
     }
 
 
+    /* The sub path is sounding, so a retrigger can hand it off. */
     bool Sounding() const
     {
         return active && last_level > KICK_VOICE_SILENT;
+    }
+
+
+    /* The punch path still has something to finish. */
+    bool PunchSounding() const
+    {
+        return active && !punch_done;
     }
 
 
@@ -1748,9 +1907,22 @@ struct KickVoice
     }
 
 
+    /* Profile 1+: 0 -> 1 across the SHAPE handoff window, smoothstepped. */
+    float AnatomyPosition() const
+    {
+        if(age <= anatomy_start)
+            return 0.0f;
+
+        return SmoothstepAdded(
+            static_cast<float>(age - anatomy_start) /
+            static_cast<float>(anatomy_end - anatomy_start)
+        );
+    }
+
+
     /*
-     * hand_off: carry on from the previous hit's waveform. Only valid with
-     * no tail delay; the caller fades the old voice out instead otherwise.
+     * hand_off: carry the previous hit's sub on. Only valid with no tail
+     * delay; the caller fades the old voice out instead otherwise.
      */
     void Trigger(float frequency,
                  float punch,
@@ -1759,7 +1931,7 @@ struct KickVoice
                  float decay_seconds,
                  bool hand_off)
     {
-        /* The old sine's next sample, had it carried on. */
+        /* The old sub's next sample, had it carried on. */
         float old_phase = last_phase + last_increment;
         old_phase -= floorf(old_phase);
 
@@ -1772,6 +1944,7 @@ struct KickVoice
 
         active = true;
         fading = false;
+        fading_punch_only = false;
 
         age = 0;
         start = MsToSamples(delay_ms);
@@ -1799,6 +1972,66 @@ struct KickVoice
         punch_env = 1.0f;
         punch_coefficient =
             Decay60Coefficient(sweep_seconds * PUNCH_AMP_DECAY_PER_SWEEP);
+        punch_done = false;
+
+        punch_level_scale =
+            KICK_PUNCH_OLD_LEVEL
+            ? OldPunchLevel(punch)
+            : KICK_PUNCH_LEVEL;
+
+        punch_attack_samples =
+            MsToSamples(
+                KICK_PUNCH_OLD_ANATOMY
+                ? ShapeThreePoint(punch,
+                                  SHAPE_ROUND_ATTACK_MS,
+                                  SHAPE_PUNCH_ATTACK_MS,
+                                  SHAPE_SNAP_ATTACK_MS)
+                : PUNCH_ATTACK_MS
+            );
+
+        anatomy_start =
+            MsToSamples(
+                ShapeThreePoint(punch,
+                                SHAPE_ROUND_HANDOFF_START_MS,
+                                SHAPE_PUNCH_HANDOFF_START_MS,
+                                SHAPE_SNAP_HANDOFF_START_MS));
+
+        anatomy_end =
+            MsToSamples(
+                ShapeThreePoint(punch,
+                                SHAPE_ROUND_HANDOFF_END_MS,
+                                SHAPE_PUNCH_HANDOFF_END_MS,
+                                SHAPE_SNAP_HANDOFF_END_MS));
+
+        if(punch_attack_samples < 1)
+            punch_attack_samples = 1;
+
+        if(anatomy_end <= anatomy_start)
+            anatomy_end = anatomy_start + 1;
+
+        punch_drive =
+            ShapeThreePoint(punch,
+                            SHAPE_ROUND_DRIVE,
+                            SHAPE_PUNCH_DRIVE,
+                            SHAPE_SNAP_DRIVE);
+
+        tone_a =
+            expf(
+                -TWO_PI *
+                ClampAdded(
+                    ShapeThreePoint(punch,
+                                    SHAPE_ROUND_CUTOFF_HZ,
+                                    SHAPE_PUNCH_CUTOFF_HZ,
+                                    SHAPE_SNAP_CUTOFF_HZ),
+                    500.0f,
+                    12000.0f) /
+                SAMPLE_RATE
+            );
+
+        /* The punch path starts at zero, so its filters may too. */
+        tone_state = 0.0f;
+        guard_state_1 = 0.0f;
+        guard_state_2 = 0.0f;
 
         u = 0.0f;
         sub_done = false;
@@ -1814,6 +2047,7 @@ struct KickVoice
         last_level = 0.0f;
         last_level_step = 0.0f;
         last_sweep_increment = 0.0f;
+        last_punch = 0.0f;
 
         handoff = false;
 
@@ -1833,28 +2067,99 @@ struct KickVoice
     }
 
 
-    /* Hand this voice to a fading slot: carry on, fade to zero. */
-    void BeginFadeOut()
+    /*
+     * Hand this voice to a fading slot: carry on, fade to zero. punch_only
+     * silences its sub path, for when the new hit carries the sub on.
+     */
+    void BeginFadeOut(bool punch_only)
     {
         fading = true;
+        fading_punch_only = punch_only;
         fade_age = 0;
     }
 
 
+    /* Punch path level at this age, before the path's tone shaping. */
+    float PunchLevel()
+    {
+        if(punch_done)
+            return 0.0f;
+
+        float attack =
+            RaisedCosine01(
+                static_cast<float>(age) /
+                static_cast<float>(punch_attack_samples)
+            );
+
+        if(KICK_PUNCH_OLD_ANATOMY)
+        {
+            /* Held, then the equal-power fade-out half of the handoff. */
+            return attack * cosf(AnatomyPosition() * 1.57079632679f);
+        }
+
+        /* Offset by the silence floor so it lands on zero rather than stepping. */
+        return attack *
+               fmaxf(0.0f, punch_env - KICK_VOICE_SILENT) /
+               (1.0f - KICK_VOICE_SILENT);
+    }
+
+
+    /* The punch path's tone chain, on the unit sine, as the old engine had. */
+    float ShapePunch(float s)
+    {
+        if(KICK_PUNCH_OLD_DRIVE)
+        {
+            float age_ms =
+                static_cast<float>(age) * 1000.0f / SAMPLE_RATE;
+
+            float mix =
+                SmoothstepAdded(
+                    Clamp01Added(
+                        (age_ms - OLD_DRIVE_PURE_MS) / OLD_DRIVE_FADE_MS
+                    )
+                );
+
+            s += (SoftClip(s * punch_drive) - s) * mix;
+        }
+
+        if(KICK_PUNCH_OLD_TONE)
+        {
+            tone_state = (1.0f - tone_a) * s + tone_a * tone_state;
+            s = tone_state;
+        }
+
+        if(KICK_PUNCH_OLD_HF_GUARD)
+        {
+            float age_ms =
+                static_cast<float>(age) * 1000.0f / SAMPLE_RATE;
+
+            float cutoff =
+                OLD_HF_GUARD_INITIAL_HZ +
+                (OLD_HF_GUARD_FINAL_HZ - OLD_HF_GUARD_INITIAL_HZ) *
+                SmoothstepAdded(Clamp01Added(age_ms / OLD_HF_GUARD_OPEN_MS));
+
+            float a = expf(-TWO_PI * cutoff / SAMPLE_RATE);
+
+            guard_state_1 = (1.0f - a) * s + a * guard_state_1;
+            guard_state_2 = (1.0f - a) * guard_state_1 + a * guard_state_2;
+            s = guard_state_2;
+        }
+
+        return s;
+    }
+
+
+    /* Returns punch + sub; also adds this voice's punch path to punch_sum. */
     float Process(float punch_gain,
-                  float sub_gain)
+                  float sub_gain,
+                  float& punch_sum)
     {
         if(!active)
             return 0.0f;
 
-        /* Punch: raised-cosine onset, then exponential decay. */
         float punch_level =
-            punch_env *
-            RaisedCosine01(
-                static_cast<float>(age) /
-                static_cast<float>(MsToSamples(PUNCH_ATTACK_MS))
-            ) *
-            KICK_PUNCH_LEVEL *
+            PunchLevel() *
+            punch_level_scale *
             punch_gain;
 
         /* Sub: silent until its start, raised-cosine onset, then decay. */
@@ -1872,9 +2177,12 @@ struct KickVoice
                 ) *
                 KICK_SUB_LEVEL *
                 sub_gain;
+
+            /* Profile 1+: the fade-in half of the handoff. */
+            if(KICK_PUNCH_OLD_ANATOMY)
+                sub_level *= sinf(AnatomyPosition() * 1.57079632679f);
         }
 
-        float level = punch_level + sub_level;
         float total_phase = phase;
 
         if(handoff)
@@ -1896,10 +2204,9 @@ struct KickVoice
             if(handoff_level < 0.0f)
                 handoff_level = 0.0f;
 
-            level =
+            sub_level =
                 handoff_level * (1.0f - s) +
-                sub_level * s +
-                punch_level;
+                sub_level * s;
 
             handoff_age++;
 
@@ -1909,15 +2216,20 @@ struct KickVoice
 
         total_phase -= floorf(total_phase);
 
-        float out = sinf(total_phase * TWO_PI) * level;
+        float sine = sinf(total_phase * TWO_PI);
+
+        /* The punch filters run from its first sample so their state is real. */
+        float punch_out = ShapePunch(sine) * punch_level;
+        float sub_out = sine * sub_level;
 
         float increment = total_phase - last_phase;
         increment -= floorf(increment);
 
         last_increment = increment;
         last_phase = total_phase;
-        last_level_step = level - last_level;
-        last_level = level;
+        last_level_step = sub_level - last_level;
+        last_level = sub_level;
+        last_punch = punch_out;
 
         /* Advance the one oscillator. */
         float base_frequency = BaseFrequency(SubAge());
@@ -1943,8 +2255,12 @@ struct KickVoice
         sweep *= sweep_coefficient;
         punch_env *= punch_coefficient;
 
-        if(punch_env < KICK_VOICE_SILENT)
-            punch_env = 0.0f;
+        if(KICK_PUNCH_OLD_ANATOMY
+           ? age >= anatomy_end
+           : punch_env < KICK_VOICE_SILENT)
+        {
+            punch_done = true;
+        }
 
         if(age >= start && !sub_done)
         {
@@ -1959,16 +2275,11 @@ struct KickVoice
 
         age++;
 
-        /* Done once both envelopes are spent and no handoff is fading. */
-        if(sub_done && punch_env == 0.0f && !handoff)
-        {
-            active = false;
-            last_level = 0.0f;
-        }
+        float fade = 1.0f;
 
         if(fading)
         {
-            out *=
+            fade =
                 1.0f -
                 SmoothstepAdded(
                     static_cast<float>(fade_age) /
@@ -1979,6 +2290,21 @@ struct KickVoice
 
             if(fade_age >= MsToSamples(RETRIGGER_HANDOFF_MS))
                 active = false;
+        }
+
+        punch_sum += punch_out * fade;
+
+        float out =
+            (fading_punch_only
+             ? punch_out
+             : punch_out + sub_out) *
+            fade;
+
+        /* Done once both paths are spent and no handoff is fading. */
+        if(sub_done && punch_done && !handoff)
+        {
+            active = false;
+            last_level = 0.0f;
         }
 
         return out;
@@ -2006,35 +2332,47 @@ static float KickSubDelayMs()
 }
 
 
+/* A free fading slot, else the one furthest through its fade. */
+static KickVoice& FadingSlot()
+{
+    int slot = 0;
+
+    for(int i = 0; i < KICK_FADING_SLOTS; i++)
+    {
+        if(!kick_voice_fading[i].active)
+            return kick_voice_fading[i];
+
+        if(kick_voice_fading[i].fade_age >
+           kick_voice_fading[slot].fade_age)
+        {
+            slot = i;
+        }
+    }
+
+    return kick_voice_fading[slot];
+}
+
+
 static void TriggerKickVoice(uint8_t velocity)
 {
     float delay_ms = KickSubDelayMs();
     bool sounding = kick_voice.Sounding();
 
-    if(sounding && delay_ms > 0.0f)
+    if(delay_ms > 0.0f && (sounding || kick_voice.PunchSounding()))
     {
-        /* A free slot, else the one furthest through its fade. */
-        int slot = 0;
-
-        for(int i = 0; i < KICK_FADING_SLOTS; i++)
-        {
-            if(!kick_voice_fading[i].active)
-            {
-                slot = i;
-                break;
-            }
-
-            if(kick_voice_fading[i].fade_age >
-               kick_voice_fading[slot].fade_age)
-            {
-                slot = i;
-            }
-        }
-
-        kick_voice_fading[slot] = kick_voice;
-        kick_voice_fading[slot].BeginFadeOut();
+        /* No sub to hand off to: the whole old voice carries on and fades. */
+        KickVoice& slot = FadingSlot();
+        slot = kick_voice;
+        slot.BeginFadeOut(false);
 
         sounding = false;
+    }
+    else if(kick_voice.PunchSounding())
+    {
+        /* The sub is handed off below; the old punch finishes on its own. */
+        KickVoice& slot = FadingSlot();
+        slot = kick_voice;
+        slot.BeginFadeOut(true);
     }
 
     kick_voice.Trigger(
@@ -2152,60 +2490,38 @@ struct Biquad
         a2 =
             (1.0f - alpha) / a0;
     }
-
-
-    void SetHighpass(float frequency,
-                     float q)
-    {
-        float w0 =
-            6.2831853f *
-            frequency /
-            SAMPLE_RATE;
-
-        float c =
-            cosf(w0);
-
-        float alpha =
-            sinf(w0) /
-            (2.0f * q);
-
-        float a0 =
-            1.0f + alpha;
-
-        b0 = (1.0f + c) * 0.5f / a0;
-        b1 = -(1.0f + c) / a0;
-        b2 = b0;
-        a1 = -2.0f * c / a0;
-        a2 = (1.0f - alpha) / a0;
-    }
 };
 
 
 /*
- * Wet-lane high-pass, applied after all distortion processing: 4th-order
- * Butterworth at 120 Hz, so the distorted fundamental never stacks on the
- * dry sub. Two biquads at the Butterworth Qs.
+ * High-pass on the Mackie / Sherman RETURN only: two one-poles at 120 Hz.
+ * POLE_A = expf(-2*pi*120/48000).
  */
-static constexpr float WET_HIGHPASS_HZ = 120.0f;
-static constexpr float WET_HIGHPASS_Q1 = 0.54119610f;
-static constexpr float WET_HIGHPASS_Q2 = 1.30656296f;
+static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98441477f;
 
-static Biquad kick_wet_highpass_1;
-static Biquad kick_wet_highpass_2;
+static float character_delta_hp_state = 0.0f;
+static float character_delta_hp_state_2 = 0.0f;
+
+
+static inline float HighPassFixedPole(
+    float input,
+    float pole_a,
+    float& state)
+{
+    state =
+        (1.0f - pole_a) *
+        input +
+        pole_a * state;
+
+
+    return input - state;
+}
 
 
 /* ============================================================
    SOFT SATURATION
    ============================================================ */
 
-static inline float SoftClip(float x)
-{
-    /*
-     * Fast, smooth saturation.
-     */
-    return x /
-           (1.0f + fabsf(x));
-}
 
 
 /*
@@ -9416,10 +9732,14 @@ static void AudioCallback(
             KICK_GAIN_SMOOTH_A;
 
 
+        /* The punch path alone, for the BPF colour. */
+        float punch = 0.0f;
+
         float dry =
             kick_voice.Process(
                 kick_punch_gain_smoothed,
-                kick_sub_gain_smoothed
+                kick_sub_gain_smoothed,
+                punch
             );
 
 
@@ -9430,7 +9750,8 @@ static void AudioCallback(
                 dry +=
                     kick_voice_fading[v].Process(
                         kick_punch_gain_smoothed,
-                        kick_sub_gain_smoothed
+                        kick_sub_gain_smoothed,
+                        punch
                     );
             }
         }
@@ -9440,9 +9761,16 @@ static void AudioCallback(
            WET: DISTORTION (MACKIE / SHERMAN + BPF)
            ====================================================
 
-           The send is a full-band copy of the dry kick, so the fundamental
-           is what drives the models. The 120 Hz high-pass comes AFTER all
-           wet processing, so the distorted sub never stacks on the dry one.
+           As 3af0e35 had it. The send is a full-band copy of the dry kick,
+           so the fundamental is what drives the models. Only the model's
+           RETURN is high-passed, two one-poles at 120 Hz, so its distorted
+           sub does not stack on the dry one; the BPF colour is added after.
+
+           Not a steeper filter: a 4th-order Butterworth at 120 Hz is 180
+           degrees out at its corner, so the return came back inverted
+           around 100-150 Hz and cancelled the dry kick there, 5 dB of upper
+           bass lost at full Mackie. Two one-poles are 90 degrees at the
+           corner and add instead.
          */
 
         float wet = 0.0f;
@@ -9459,10 +9787,26 @@ static void AudioCallback(
                 macro_character_processor.ProcessWet(wet_send);
 
 
-            /* Macro-4 additive BPF colour, excited by the dry kick and the wet. */
+            /* Return-only sub protection. */
+            wet =
+                HighPassFixedPole(
+                    HighPassFixedPole(
+                        wet,
+                        CHARACTER_SUB_PROTECT_POLE_A,
+                        character_delta_hp_state
+                    ),
+                    CHARACTER_SUB_PROTECT_POLE_A,
+                    character_delta_hp_state_2
+                );
+
+
+            /*
+             * Macro-4 additive BPF colour, excited by the punch and the
+             * return; the sub stays out of it, as before.
+             */
             wet +=
                 macro_bpf_bank.Process(
-                    dry +
+                    punch +
                     wet
                 );
 
@@ -9500,13 +9844,6 @@ static void AudioCallback(
             wet *=
                 dirty_post_gain;
 
-
-            wet =
-                kick_wet_highpass_2.Process(
-                    kick_wet_highpass_1.Process(
-                        wet
-                    )
-                );
         }
 
 
@@ -9743,8 +10080,8 @@ static void ResetAudioDspState()
         kick_voice_fading[i].Reset();
 
 
-    kick_wet_highpass_1.Reset();
-    kick_wet_highpass_2.Reset();
+    character_delta_hp_state = 0.0f;
+    character_delta_hp_state_2 = 0.0f;
 
     added_performance_fx.Reset();
     added_kick_master_envelope.Reset();
@@ -9797,16 +10134,6 @@ int main(void)
     final_hf_envelope = 0.0f;
     final_hf_gain = 1.0f;
 
-
-    kick_wet_highpass_1.SetHighpass(
-        WET_HIGHPASS_HZ,
-        WET_HIGHPASS_Q1
-    );
-
-    kick_wet_highpass_2.SetHighpass(
-        WET_HIGHPASS_HZ,
-        WET_HIGHPASS_Q2
-    );
 
 
     ResetAudioDspState();
