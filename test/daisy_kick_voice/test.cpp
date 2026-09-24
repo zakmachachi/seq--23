@@ -39,7 +39,6 @@ static float macro_tail_delay = 0.0f;
 static float macro_decay = 0.34f;
 static float macro_kick_shape = 0.0f;
 /* v1.3.0 per-hit controls, as the firmware's CC60..63 leave them. */
-static float macro_tail_offset_ms = 0.0f;
 static float test_tail_attack_ms = 6.0f;
 static float test_sweep_time_scale = 1.0f;
 static float test_tail_mod = 0.0f;
@@ -420,6 +419,24 @@ int main(int argc, char** argv)
             double hf_sine = BandPeakDb(sine, 1000, SR / 10, SR / 2), hf_saw = BandPeakDb(saw1, 1000, SR / 10, SR / 2);
             printf("WAVE 127 vs 0: level %+.1f dB, energy above 1 kHz %.1f dB vs %.1f dB\n", level_db, hf_saw, hf_sine);
             Expect(fabs(level_db) < 3.0, "full supersaw sits within 3 dB of the sine's level");
+            /*
+             * Bass: the supersaw's fundamental must add to the sine's, not
+             * cancel it, and must not wander (phasing) over the hit. Measured
+             * as the fundamental's level in consecutive 50 ms windows.
+             */
+            auto fundamental = [&](const vector<float>& y, int a, int b){
+                double re = 0, im = 0;
+                for(int n = a; n < b; n++){ double w = 2 * M_PI * 55.0 * n / 48000.0; re += y[n] * cos(w); im += y[n] * sin(w); }
+                return 2.0 * sqrt(re * re + im * im) / (b - a);
+            };
+            double lo_saw = 1e9, hi_saw = 0, lo_sine = 1e9;
+            for(int w0 = SR / 10; w0 + 2400 <= SR / 2; w0 += 2400){
+                double fs = fundamental(saw1, w0, w0 + 2400), fn = fundamental(sine, w0, w0 + 2400);
+                lo_saw = fmin(lo_saw, fs / fn); hi_saw = fmax(hi_saw, fs / fn); lo_sine = fmin(lo_sine, fn);
+            }
+            printf("supersaw fundamental vs the sine's: %.2f .. %.2f over the hit\n", lo_saw, hi_saw);
+            Expect(lo_saw > 0.89, "the supersaw keeps the sine's bass (fundamental within 1 dB or more)");
+            Expect(hi_saw / lo_saw < 1.12, "the supersaw's fundamental does not phase over the hit (< 1 dB swing)");
             Expect(hf_saw > hf_sine + 30.0, "the supersaw adds the harmonics a sine does not have");
             /* Morph changed between two hits of a sounding kick: no step at the seam. */
             vector<float> seam = render(1, SR / 2, {{0, 0.0f}, {SR / 4, 1.0f}});
@@ -438,8 +455,31 @@ int main(int argc, char** argv)
 
         KickVoice c; KickHitParams h3; h3.sub_attack_ms = 1.0f; c.Trigger(h3, false);
         KickVoice d; KickHitParams h4; h4.sub_attack_ms = 500.0f; d.Trigger(h4, false);
-        Expect(c.sub_attack_samples == MsToSamples(TAIL_ATTACK_MIN_MS) && d.sub_attack_samples == MsToSamples(TAIL_ATTACK_MAX_MS),
-               "TAIL ATTACK is held to 6..60 ms");
+        Expect(c.gap_rise == MsToSamples(TAIL_ATTACK_MIN_MS) && d.gap_rise == MsToSamples(TAIL_ATTACK_MAX_MS),
+               "TAIL ATTACK (the gap's rise) is held to 6..60 ms");
+
+        /* TAIL DELAY: the whole kick at full through the punch, silent, back at full. */
+        {
+            KickHitParams g; g.frequency = 55; g.punch = 0.5f; g.decay_seconds = 1000000.0f;
+            g.delay_ms = 250.0f; g.sub_attack_ms = 20.0f;
+            KickVoice v; v.Trigger(g, false);
+            float before = 1, during = 0, after = 0;
+            for(uint32_t n = 0; n < MsToSamples(400); n++){
+                float lv = v.GapLevel();
+                if(n < v.gap_hold) before = fminf(before, lv);
+                if(n > v.gap_hold + v.gap_fall && n < v.gap_return) during = fmaxf(during, lv);
+                if(n > v.gap_return + v.gap_rise) after = fmaxf(after, lv);
+                KickVoiceOut o; v.Process(o);
+            }
+            printf("TAIL DELAY gap: %.2f through the punch, %.2f in the gap, %.2f after\n", before, during, after);
+            Expect(before == 1.0f && during == 0.0f && after == 1.0f,
+                   "TAIL DELAY holds the whole punch, silences the kick, then brings it back to full");
+            KickHitParams early = g; early.delay_ms = 10.0f;
+            KickVoice w; w.Trigger(early, false);
+            float lowest = 1;
+            for(uint32_t n = 0; n < MsToSamples(400); n++){ lowest = fminf(lowest, w.GapLevel()); KickVoiceOut o; w.Process(o); }
+            Expect(lowest == 1.0f, "a TAIL DELAY inside the punch never opens a gap");
+        }
     }
 
     /* Determinism. */

@@ -604,15 +604,14 @@ static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
 
 /*
  * v1.3.0 kick shaping, all per-hit (latched at the trigger):
- *   CC60 TAIL OFFSET   Function + K3 turn: fine nudge of when the sub starts
- *   CC61 TAIL ATTACK   Function + K3 press, then turn: the sub's fade-in
+ *   CC61 TAIL ATTACK   mix page pot 3: how fast the tail comes back in after
+ *                      the TAIL DELAY gap
  *   CC62 SWEEP TIME    Menu 1 pot 3 on the kick channel: punch sweep length
  *   CC63 TAIL MOD      Menu 1 pot 5 on the kick channel: a wobble macro on the
                       sub, 0 = none, up to +-2 st, faster and more irregular
                       as it rises
  *   CC64 WAVE          Menu 1 pot 2 on the kick channel: sine -> supersaw
  */
-static constexpr uint8_t CC_TAIL_OFFSET             = 60;
 static constexpr uint8_t CC_TAIL_ATTACK             = 61;
 static constexpr uint8_t CC_PUNCH_SWEEP_TIME        = 62;
 static constexpr uint8_t CC_TAIL_MOD                = 63;
@@ -838,7 +837,6 @@ static volatile float macro_kick_shape = 0.50f;
 
 
 /* CC60..63; see their declarations. Defaults are the pre-v1.3.0 kick. */
-static volatile float macro_tail_offset_ms = 0.0f;
 static volatile float macro_tail_attack_ms = 6.0f;
 static volatile float macro_punch_time_scale = 1.0f;
 static volatile float macro_tail_mod = 0.0f;  /* 0..1 intensity */
@@ -1730,7 +1728,6 @@ static constexpr float PUNCH_ATTACK_MS = 0.5f;
 static constexpr float SUB_ATTACK_MS   = 6.0f;
 
 /* v1.3.0 control ranges (CC60..63). */
-static constexpr float TAIL_OFFSET_STEP_MS = 0.5f;  /* per CC step, 64 = 0 */
 static constexpr float TAIL_ATTACK_MIN_MS = 6.0f;   /* the click-safe floor */
 static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
 /*
@@ -1744,6 +1741,7 @@ static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
  * first TAIL_MOD_FADE_IN_MS, so the punch is not smeared. Deterministic: the
  * wobble restarts with every hit.
  */
+static constexpr float TAIL_GAP_FALL_MS = 6.0f;
 static constexpr float TAIL_MOD_MAX_SEMITONES = 2.0f;
 static constexpr float TAIL_MOD_RATE_MIN_HZ = 2.0f;
 static constexpr float TAIL_MOD_RATE_MAX_HZ = 12.0f;
@@ -1751,21 +1749,40 @@ static constexpr float TAIL_MOD_IRREGULAR = 0.6f;
 static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
 
 /*
- * WAVE: the oscillator morphs from the sine to a five-saw supersaw on an
- * equal-power curve. The saws are locked to the sine's pitch curve (sweep,
- * PITCH, TAIL MOD, handoff glide) at small fixed detunes, PolyBLEP band-
- * limited, and reset to fixed phases on a fresh hit so a hit is still always
- * the same waveform. Their start phases are spread so they sum to zero.
+ * WAVE: the oscillator morphs from the sine to a five-saw supersaw. Built so
+ * it cannot phase or lose bass:
+ *
+ *   locked       every saw is phase-locked to the one oscillator (its phase
+ *                is the sine's plus a small offset), so it follows the sweep,
+ *                PITCH, TAIL MOD and the handoff glide, and resets with the
+ *                oscillator on every hit.
+ *   harmonics    detuned saws phase against each other at the fundamental no
+ *                matter how small the detune, which is what ate the bass. So
+ *                each saw's own fundamental is subtracted exactly, leaving its
+ *                harmonics, and those are added on top of the sine, which
+ *                stays the fundamental: the bass cannot drift, phase or cancel,
+ *                while the upper partials still shimmer (harmonic k of a saw
+ *                offset by d Hz beats at k * d Hz, as a real supersaw's do).
+ *   detune in Hz the offsets drift at a fixed rate in Hz, not a ratio, so a
+ *                3 kHz punch sweep does not turn it into a fast flutter.
+ *
+ * On a retrigger each saw's offset glides back to zero over the handoff.
  */
 static constexpr int WAVE_SAWS = 5;
-static constexpr float WAVE_SAW_DETUNE[WAVE_SAWS] = {-0.012f, -0.006f, 0.0f, 0.006f, 0.012f};
-static constexpr float WAVE_SAW_START[WAVE_SAWS] = {0.1f, 0.3f, 0.5f, 0.7f, 0.9f};
+static constexpr float WAVE_SAW_DETUNE_HZ[WAVE_SAWS] = {-1.6f, -0.8f, 0.0f, 0.8f, 1.6f};
+static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
+static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
+/* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
+static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
+/* The offsets move slowly, so their sin/cos are refreshed every 16 samples. */
+static constexpr uint32_t WAVE_OFFSET_REFRESH = 16;
 /*
- * Five uncorrelated saws have ~1.29 RMS against the sine's 0.707, so 0.548 on
- * paper; measured against the sine over a hit they came out 3.2 dB low (the
- * slow detune keeps them correlated for most of it), hence 0.79.
+ * WAVE adds the supersaw's harmonics on top of the untouched sine, so the
+ * bass is identical at every setting. Scaled so that at full WAVE the
+ * harmonics stand to the sine as a real saw's do to its own fundamental.
  */
-static constexpr float WAVE_SAW_NORMALISE = 0.79f;  /* measured: +3.2 dB on 0.548 */
+static constexpr float WAVE_HARMONICS_SCALE =
+    1.0f / (WAVE_SAW_FUNDAMENTAL * WAVE_SAW_WEIGHT_SUM);
 
 static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
 
@@ -1944,10 +1961,21 @@ struct KickVoice
 
     uint32_t sub_attack_samples = 1;
 
-    /* WAVE: the supersaw, and how much of it this hit and a carried sub use. */
-    float saw_phase[WAVE_SAWS] = {};
+    /* WAVE: each saw's offset from the oscillator's phase, in cycles. */
+    float saw_offset[WAVE_SAWS] = {};
+    float saw_offset_start[WAVE_SAWS] = {};   /* glides to 0 over a handoff */
+    float saw_offset_sin[WAVE_SAWS] = {};
+    float saw_offset_cos[WAVE_SAWS] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     float wave_morph = 0.0f;
     float carried_morph = 0.0f;
+
+    /*
+     * TAIL DELAY as an envelope over the whole voice: full through the punch,
+     * down over TAIL_GAP_FALL_MS, silent, then back up over TAIL ATTACK at
+     * the tail delay time. The kick keeps evolving underneath.
+     */
+    bool gap = false;
+    uint32_t gap_hold = 0, gap_fall = 1, gap_return = 0, gap_rise = 1;
 
     /* Punch pitch sweep. */
     float sweep_depth = 0.0f;   /* R - 1 */
@@ -2134,7 +2162,7 @@ struct KickVoice
         fading_punch_only = false;
 
         age = 0;
-        start = MsToSamples(hit.delay_ms);
+        start = 0;   /* the sub always starts with the hit; see gap */
 
         phase = 0.0f;
         base_hz = frequency;
@@ -2151,12 +2179,15 @@ struct KickVoice
             SAMPLE_RATE;
         wobble_irregular = TAIL_MOD_IRREGULAR * intensity;
 
-        sub_attack_samples =
+        sub_attack_samples = MsToSamples(SUB_ATTACK_MS);
+
+        /* The gap's rise is TAIL ATTACK. */
+        gap_rise =
             MsToSamples(
                 ClampAdded(hit.sub_attack_ms, TAIL_ATTACK_MIN_MS, TAIL_ATTACK_MAX_MS));
 
-        if(sub_attack_samples < 1)
-            sub_attack_samples = 1;
+        if(gap_rise < 1)
+            gap_rise = 1;
 
         /* SWEEP TIME stretches the whole punch: its sweep and its window. */
         float time_scale = ClampAdded(hit.sweep_time_scale, 0.25f, 4.0f);
@@ -2217,6 +2248,15 @@ struct KickVoice
         if(anatomy_end <= anatomy_start)
             anatomy_end = anatomy_start + 1;
 
+        /* The gap holds the whole punch through, then opens to the tail. */
+        gap = hit.delay_ms > 0.0f;
+        gap_hold =
+            KICK_PUNCH_OLD_ANATOMY
+            ? anatomy_end
+            : MsToSamples(sweep_seconds * 1000.0f);
+        gap_fall = MsToSamples(TAIL_GAP_FALL_MS);
+        gap_return = MsToSamples(hit.delay_ms);
+
         punch_drive =
             ShapeThreePoint(punch,
                             SHAPE_ROUND_DRIVE,
@@ -2265,22 +2305,25 @@ struct KickVoice
 
         if(!hand_off || old_level <= KICK_VOICE_SILENT)
         {
-            /*
-             * Fresh: the saws restart at their fixed phases too, seeded one
-             * step behind so the first sample lands on them.
-             */
+            /* Fresh: the saws start locked to the oscillator. */
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                float p =
-                    WAVE_SAW_START[i] -
-                    last_increment * (1.0f + WAVE_SAW_DETUNE[i]);
-                saw_phase[i] = p - floorf(p);
+                saw_offset[i] = 0.0f;
+                saw_offset_start[i] = 0.0f;
+                saw_offset_sin[i] = 0.0f;
+                saw_offset_cos[i] = 1.0f;
             }
 
             return;
         }
 
-        /* Handed off: the saws carry on, and the carried sub keeps its wave. */
+        /*
+         * Handed off: each saw's offset glides from where it was to zero over
+         * the handoff, and the carried sub keeps its own wave.
+         */
+        for(int i = 0; i < WAVE_SAWS; i++)
+            saw_offset_start[i] = saw_offset[i];
+
         carried_morph = old_morph;
 
         /*
@@ -2426,11 +2469,44 @@ struct KickVoice
     }
 
 
+    /* The TAIL DELAY envelope over the whole voice, 0..1, at this age. */
+    float GapLevel() const
+    {
+        if(!gap || age < gap_hold)
+            return 1.0f;
+
+        float down =
+            1.0f -
+            SmoothstepAdded(
+                static_cast<float>(age - gap_hold) /
+                static_cast<float>(gap_fall)
+            );
+
+        float up =
+            age < gap_return
+            ? 0.0f
+            : SmoothstepAdded(
+                  static_cast<float>(age - gap_return) /
+                  static_cast<float>(gap_rise)
+              );
+
+        /*
+         * Combined as 1 - (1 - down)(1 - up): 1 whenever either is, so a tail
+         * delay inside the punch never closes the gap, but with no corner
+         * where a fall and a rise overlap. fmaxf() left one there, a slope
+         * reversal in a single sample that measured as a click.
+         */
+        return 1.0f - (1.0f - down) * (1.0f - up);
+    }
+
+
     /* Adds this voice's sample to o, before the mixer gains. */
     void Process(KickVoiceOut& o)
     {
         if(!active)
             return;
+
+        float gap_level = GapLevel();
 
         float punch_level =
             PunchLevel() *
@@ -2527,37 +2603,66 @@ struct KickVoice
 
         if(wave_morph > 0.0f || (handoff && carried_morph > 0.0f))
         {
-            float saw = 0.0f;
+            float glide =
+                handoff
+                ? 1.0f - SmoothstepAdded(
+                             static_cast<float>(handoff_age) /
+                             static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS)))
+                : 0.0f;
+
+            float seconds = static_cast<float>(age) / SAMPLE_RATE;
+            float dt = fminf(increment, 0.45f);
+            bool refresh = (age % WAVE_OFFSET_REFRESH) == 0 || handoff;
+
+            float sine_cos = cosf(total_phase * TWO_PI);
+            float harmonics = 0.0f;
 
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                float dt = increment * (1.0f + WAVE_SAW_DETUNE[i]);
-                saw_phase[i] += dt;
-                saw_phase[i] -= floorf(saw_phase[i]);
-                saw += PolyBlepSaw(saw_phase[i], fminf(dt, 0.45f));
+                saw_offset[i] =
+                    saw_offset_start[i] * glide +
+                    WAVE_SAW_DETUNE_HZ[i] * seconds;
+
+                if(refresh)
+                {
+                    saw_offset_sin[i] = sinf(saw_offset[i] * TWO_PI);
+                    saw_offset_cos[i] = cosf(saw_offset[i] * TWO_PI);
+                }
+
+                /* Rising saw, zero at phase 0: its fundamental is in phase. */
+                float q = total_phase + saw_offset[i] + 0.5f;
+                q -= floorf(q);
+
+                /* This saw's own fundamental, sin(2 pi (phase + offset)). */
+                float own =
+                    sine * saw_offset_cos[i] +
+                    sine_cos * saw_offset_sin[i];
+
+                harmonics +=
+                    WAVE_SAW_WEIGHT[i] *
+                    (PolyBlepSaw(q, dt) - WAVE_SAW_FUNDAMENTAL * own);
             }
 
-            saw *= WAVE_SAW_NORMALISE;
+            harmonics *= WAVE_HARMONICS_SCALE;
 
-            wave =
-                sine * cosf(wave_morph * 1.57079632679f) +
-                saw * sinf(wave_morph * 1.57079632679f);
-
-            carried_wave =
-                sine * cosf(carried_morph * 1.57079632679f) +
-                saw * sinf(carried_morph * 1.57079632679f);
+            /* The sine stays the fundamental; WAVE adds the saw harmonics. */
+            wave = sine + harmonics * wave_morph;
+            carried_wave = sine + harmonics * carried_morph;
         }
 
         /* The punch filters run from its first sample so their state is real. */
-        float punch_out = ShapePunch(wave) * punch_level;
-        float sub_out = wave * sub_level;
-        float carried_out = carried_wave * carried_level;
+        float punch_out = ShapePunch(wave) * punch_level * gap_level;
+        float sub_out = wave * sub_level * gap_level;
+        float carried_out = carried_wave * carried_level * gap_level;
         float open = WetOpen();
+
+        /* What a retrigger carries on from is the level actually heard. */
+        float heard = (sub_level + carried_level) * gap_level;
 
         last_increment = increment;
         last_phase = total_phase;
-        last_level_step = sub_level + carried_level - last_level;
-        last_level = sub_level + carried_level;
+        last_level_step = heard - last_level;
+        last_level = heard;
         last_punch = punch_out;
 
         /* Advance the one oscillator. */
@@ -2674,16 +2779,10 @@ static float final_hf_guard_state[3] = {0.0f, 0.0f, 0.0f};
  */
 static float KickSubDelayMs()
 {
-    if(!tail_delay_enabled)
+    if(!tail_delay_enabled || macro_tail_delay <= 0.005f)
         return 0.0f;
 
-    float coarse =
-        macro_tail_delay > 0.005f
-        ? MacroTailDelayMs(macro_tail_delay)
-        : 0.0f;
-
-    /* TAIL OFFSET nudges the start either way; it cannot go before the hit. */
-    return fmaxf(0.0f, coarse + macro_tail_offset_ms);
+    return MacroTailDelayMs(macro_tail_delay);
 }
 
 
@@ -2721,16 +2820,7 @@ static void TriggerKickVoice(uint8_t velocity)
             kick_fresh_hit = false;
     }
 
-    if(delay_ms > 0.0f && (sounding || kick_voice.PunchSounding()))
-    {
-        /* No sub to hand off to: the whole old voice carries on and fades. */
-        KickVoice& slot = FadingSlot();
-        slot = kick_voice;
-        slot.BeginFadeOut(false);
-
-        sounding = false;
-    }
-    else if(kick_voice.PunchSounding())
+    if(kick_voice.PunchSounding())
     {
         /* The sub is handed off below; the old punch finishes on its own. */
         KickVoice& slot = FadingSlot();
@@ -9166,11 +9256,6 @@ static bool HandleSixMacroCC(
             return true;
 
         /* v1.3.0 kick shaping: plain values, latched by the next hit. */
-        case CC_TAIL_OFFSET:
-            macro_tail_offset_ms =
-                (static_cast<float>(value) - 64.0f) * TAIL_OFFSET_STEP_MS;
-            return true;
-
         case CC_TAIL_ATTACK:
             macro_tail_attack_ms =
                 TAIL_ATTACK_MIN_MS *
