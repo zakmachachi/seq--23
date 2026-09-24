@@ -77,6 +77,26 @@ static constexpr float EXTERNAL_RETURN_GAIN = 0.62f;
    The external lane retains its dedicated pump + external delay only.
  */
 static constexpr float KICK_OUTPUT_LINEAR_GAIN = 0.86f;
+
+/* Where OutputCeiling() starts to bend; shared with the wet headroom below. */
+static constexpr float OUTPUT_CEILING_KNEE = 0.80f;
+
+/*
+ * WET HEADROOM. At high LINE the dry kick alone already reaches the output
+ * ceiling, so anything the distortion added on top was soft-limited away:
+ * past the base drive K5 seemed to do nothing, and limiting the peaks pressed
+ * the bass down (1-5 kHz flat and < 150 Hz -2 dB from K5 50 % to 100 % at
+ * LINE 100 %). With this on, the wet only uses the room the dry kick leaves
+ * under the ceiling's knee, squeezed smoothly into it: plenty near the sub's
+ * zero crossings, little at its peaks. The dry kick, and so the bass, is
+ * never limited by the distortion.
+ *
+ * Off by default: measured, it keeps the bass (-0.2 dB) but squeezes the
+ * distortion hard at high LINE, the liked base drive included (1-5 kHz at
+ * K5 25 % fell from +18 to +11 dB at LINE 100 %). Lowering LINE for headroom
+ * works better; this stays as an option.
+ */
+static constexpr bool KICK_WET_HEADROOM = false;
 static constexpr float EXTERNAL_OUTPUT_LINEAR_GAIN = 1.00f;
 
 /* Canonical libDaisy non-interleaved channel indices. */
@@ -3145,7 +3165,7 @@ static KickSidechainReverb kick_reverb;
  */
 static inline float OutputCeiling(float x)
 {
-    constexpr float knee  = 0.80f;
+    constexpr float knee  = OUTPUT_CEILING_KNEE;
     constexpr float limit = 0.995f;
     constexpr float range = limit - knee;
 
@@ -6643,10 +6663,35 @@ static MacroBpfBank macro_bpf_bank;
    No tanh, no random modulation, no feedback.
    ============================================================ */
 
+/*
+ * Past the base drive, the first stage is already fully saturated, so more
+ * drive only squares the same shape a little more: the knob stopped doing
+ * anything. Instead, above MACKIE_BRIGHT_FROM the amount reshapes the tone
+ * around the clippers, all scaled by one "brightness" that is 0 through the
+ * base drive and 1 at full:
+ *
+ *   pre-emphasis   highs above ~1.2 kHz lifted INTO the first clipper, up
+ *                  to +11 dB, so it generates denser, brighter harmonics
+ *   presence / air the 1 kHz presence band grows and a 4.2 kHz air band
+ *                  joins it, while the 340 Hz body band eases off
+ *   second stage   driven harder for more harmonic density
+ *   top end        the output low-pass opens from 10 kHz to 16 kHz
+ *
+ * The bass is not involved: the dry kick never passes through here, and the
+ * return is high-passed at 120 Hz before it is added back.
+ */
+static constexpr float MACKIE_BRIGHT_FROM = 0.25f;
+static constexpr float MACKIE_EMPHASIS_GAIN = 2.5f;       /* +11 dB above ~1.2 kHz */
+static constexpr float MACKIE_EMPHASIS_LP_A = 0.14543f;    /* 1 - expf(-2pi 1200/48000) */
+static constexpr float MACKIE_POST_A_DARK = 0.72990000f;   /* 10 kHz, as before */
+static constexpr float MACKIE_POST_A_BRIGHT = 0.87670000f; /* 16 kHz */
+
 struct MacroMackieProcessor
 {
     Biquad body_band;
     Biquad presence_band;
+    Biquad air_band;
+    float emphasis_lp = 0.0f;
 
     float previous_input = 0.0f;
     float pre_lp_1 = 0.0f;
@@ -6678,6 +6723,9 @@ struct MacroMackieProcessor
         presence_band.Reset();
         body_band.SetBandpass(340.0f, 0.78f);
         presence_band.SetBandpass(1050.0f, 0.92f);
+        air_band.Reset();
+        air_band.SetBandpass(4200.0f, 0.70f);
+        emphasis_lp = 0.0f;
 
         previous_input = 0.0f;
         pre_lp_1 = pre_lp_2 = 0.0f;
@@ -6697,21 +6745,37 @@ struct MacroMackieProcessor
             dc_x1 = dc_y1 = 0.0f;
             body_band.Process(0.0f);
             presence_band.Process(0.0f);
+            air_band.Process(0.0f);
+            emphasis_lp = input;
             return 0.0f;
         }
+
+        /* 0 through the base drive, 1 at full; see MACKIE_BRIGHT_FROM. */
+        float bright =
+            SmoothstepAdded(
+                Clamp01Added(
+                    (amount - MACKIE_BRIGHT_FROM) / (1.0f - MACKIE_BRIGHT_FROM)
+                )
+            );
 
         constexpr float pre_a = 0.79210000f; /* MACKIE_PRE_LP_HZ */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
+        /* Pre-emphasis into the first clipper. */
+        emphasis_lp += MACKIE_EMPHASIS_LP_A * (pre_lp_2 - emphasis_lp);
+        float emphasised =
+            pre_lp_2 +
+            (pre_lp_2 - emphasis_lp) * MACKIE_EMPHASIS_GAIN * bright;
+
         float accumulated = 0.0f;
         for(int os = 1; os <= 4; ++os)
         {
             float t = static_cast<float>(os) * 0.25f;
-            float x = previous_input + (pre_lp_2 - previous_input) * t;
+            float x = previous_input + (emphasised - previous_input) * t;
             accumulated += Core(x * MACKIE_INTERNAL_GAIN);
         }
-        previous_input = pre_lp_2;
+        previous_input = emphasised;
 
         float stage1 = accumulated * 0.25f;
 
@@ -6723,12 +6787,18 @@ struct MacroMackieProcessor
         /* overload -> broad desk EQ boosts -> overload again */
         float body = body_band.Process(dc_blocked);
         float presence = presence_band.Process(dc_blocked);
+        float air = air_band.Process(dc_blocked);
         float eq_driven =
-            dc_blocked + body * 0.62f + presence * 0.25f;
+            dc_blocked +
+            body * 0.62f * (1.0f - 0.4f * bright) +
+            presence * (0.25f + 0.75f * bright) +
+            air * 0.9f * bright;
 
-        float stage2 = Core(eq_driven * 1.65f);
+        float stage2 = Core(eq_driven * 1.65f * (1.0f + 0.8f * bright));
 
-        constexpr float post_a = 0.72990000f; /* MACKIE_POST_LP_HZ */
+        float post_a =
+            MACKIE_POST_A_DARK +
+            (MACKIE_POST_A_BRIGHT - MACKIE_POST_A_DARK) * bright;
         post_lp_1 += post_a * (stage2 - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
@@ -10261,6 +10331,23 @@ static void AudioCallback(
         /* ====================================================
            DRY + WET, THEN THE KICK FX
            ==================================================== */
+
+        /* KICK_WET_HEADROOM: see its declaration. */
+        if(KICK_WET_HEADROOM)
+        {
+            float out_gain = param_line_gain * KICK_OUTPUT_LINEAR_GAIN;
+
+            if(out_gain > 0.0001f)
+            {
+                float room = OUTPUT_CEILING_KNEE / out_gain - fabsf(dry);
+
+                if(room < 0.0f)
+                    room = 0.0f;
+
+                /* |wet| stays under room, and is ~unchanged while small. */
+                wet = wet / (1.0f + fabsf(wet) / (room + 1.0e-6f));
+            }
+        }
 
         float signal =
             dry +
