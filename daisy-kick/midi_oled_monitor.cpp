@@ -151,6 +151,18 @@ static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
 static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
 
+/*
+ * CC wrote these directly and they are read per sample, so every message
+ * stepped the gain - audible as a tick while turning. CC now writes *_target;
+ * audio slews to it once per block. SUB and PUNCH are not listed: the kick
+ * voice already slews them per sample (KICK_GAIN_SMOOTH_A).
+ */
+static volatile float param_line_gain_target    = 2.8184f;
+static volatile float param_mackie_gain_target  = 1.01703f;
+static volatile float param_sherman_gain_target = 1.56710f;
+static volatile float param_bpf_gain_target     = 4.0f;
+static constexpr float PARAM_GAIN_SLEW = 0.06f;
+
 /* Sidechain reverb tuning. HP pole = expf(-2*pi*250/48000). */
 /* 300 Hz: expf(-2*pi*300/48000). Keeps the tank off the punch. */
 static constexpr float REVERB_SEND_HP_POLE_A = 0.96149f;
@@ -5370,6 +5382,20 @@ struct AddedQuantizedLooper
    MASTER DJ HIGH-PASS
    ============================================================ */
 
+/*
+ * DO NOT REINTRODUCE AN ONSET BYPASS HERE.
+ *
+ * This used to hold the kick path DRY for the first 4 ms of every hit
+ * (keyed on kick_age_samples, which resets on every trigger) and crossfade
+ * into the HPF over the next 12 ms. It assumed the kick starts from silence.
+ * Whenever the previous hit was still sounding - DECAY INF, any overlap - it
+ * snapped from the filtered signal back to the dry one in a single sample,
+ * and even at the 24 Hz minimum cutoff the phase shift makes that a large
+ * step. It was the loud click heard as soon as the HPF was engaged.
+ *
+ * The SVF is primed to the current input on enable and runs continuously, so
+ * there is nothing for a bypass to protect against.
+ */
 struct AddedDjHighpass
 {
     float ic1eq = 0.0f;
@@ -7411,11 +7437,22 @@ struct AddedPerformanceFx
 
 
         /*
-         * Kick performance chain deliberately ends here:
+         * The LPF object existed and was reset, but was never processed here,
+         * so CC34 moved a filter that nothing listened to and the control did
+         * nothing at all on the kick. Its external twin was always wired.
+         */
+        x =
+            macro_dj_lowpass.Process(
+                x
+            );
+
+
+        /*
+         * Kick performance chain:
          *
-         *     STUTTER -> HPF
+         *     STUTTER -> HPF -> LPF
          *
-         * LOOPER, LPF, pump and delay are external-input effects only.
+         * LOOPER, pump and delay remain external-input effects only.
          */
         return x;
     }
@@ -8485,19 +8522,19 @@ static bool HandleSixMacroCC(
            ==================================================== */
 
         case CC_MIX_LINE_GAIN:
-            param_line_gain = v * PARAM_LINE_GAIN_MAX;
+            param_line_gain_target = v * PARAM_LINE_GAIN_MAX;
             return true;
 
         case CC_MIX_MACKIE_GAIN:
-            param_mackie_gain = v * PARAM_MACKIE_GAIN_MAX;
+            param_mackie_gain_target = v * PARAM_MACKIE_GAIN_MAX;
             return true;
 
         case CC_MIX_SHERMAN_GAIN:
-            param_sherman_gain = v * PARAM_SHERMAN_GAIN_MAX;
+            param_sherman_gain_target = v * PARAM_SHERMAN_GAIN_MAX;
             return true;
 
         case CC_MIX_BPF_GAIN:
-            param_bpf_gain = v * PARAM_BPF_GAIN_MAX;
+            param_bpf_gain_target = v * PARAM_BPF_GAIN_MAX;
             return true;
 
         case CC_MIX_SUB_GAIN:
@@ -9329,6 +9366,13 @@ static void AudioCallback(
      * Macro-4 BPF layer frequency smoothing/coefficient update.
      */
     macro_bpf_bank.Update();
+
+
+    /* Slew the mix gains toward their CC targets; see their declarations. */
+    param_line_gain    += (param_line_gain_target    - param_line_gain)    * PARAM_GAIN_SLEW;
+    param_mackie_gain  += (param_mackie_gain_target  - param_mackie_gain)  * PARAM_GAIN_SLEW;
+    param_sherman_gain += (param_sherman_gain_target - param_sherman_gain) * PARAM_GAIN_SLEW;
+    param_bpf_gain     += (param_bpf_gain_target     - param_bpf_gain)     * PARAM_GAIN_SLEW;
 
 
     /*
