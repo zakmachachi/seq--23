@@ -27,7 +27,7 @@ One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=
 
 FUNCTION + K3 does not edit the TAIL amount: it edits one of two fine controls, and FUNCTION + B3 switches which. TAIL OFFSET moves the sub's start either side of the K3 delay in 0.5 ms steps (it cannot go before the hit). TAIL ATTACK sets the sub's fade-in from 6 ms, the click-safe minimum, to 60 ms. OLED2 shows whichever is active. They are not provisional: they stay when FUNCTION is released, are never recorded as a motion lane, and are saved with the patch separately from the rest of the page. The overview's K3 cell shows the offset next to ON/OFF when it is not zero.
 
-Two per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 3 is SWEEP (CC62, the punch sweep time, 0.25x–4x SHAPE's own) and pot 5 is TMOD (CC63, a second pitch sweep of up to ±24 semitones across the decay); pot 6's velocity is shown as PITCH, in semitones. Both CCs are sent from the step engine just before each kick note, only when they change.
+Three per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 2 is WAVE (CC64, sine to supersaw), pot 3 is SWEEP (CC62, the punch sweep time, 0.25x–4x SHAPE's own) and pot 5 is TMOD (CC63, a wobble macro: 0 off, rising to ±2 semitones at up to 12 Hz and increasingly irregular); pot 6's velocity is shown as PITCH, in semitones. The CCs are sent from the step engine just before each kick note, only when they change.
 
 ## Motion lane
 

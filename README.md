@@ -16,11 +16,12 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 **The kick has been rebuilt from scratch, and the click is gone.** It is now a single sine whose pitch sweep (the punch) and bass tone (the sub) are two envelopes on the same oscillator, so they can no longer beat against each other. A hit that lands while the last one is still ringing picks up exactly where the old sine is and glides onto the new hit, instead of cutting it off.
 
 **Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
+- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw
 - **SWEEP** (pot 3) sets how long the punch sweep takes, from a quarter to four times SHAPE's own length. SHAPE still sets how deep it goes
-- **TMOD** (pot 5) sweeps the pitch across the rest of the decay, up to two octaves down or up. Its button snaps it back to the centre. Record it under FUNCTION like any Notes-page knob and it moves per step
-- **PITCH** (pot 6, formerly velocity) is the quick glide at the start of the tail. PITCH down with TMOD up gives a down-then-up kick
+- **TMOD** (pot 5) is a wobble macro for the tail: turning it up makes the pitch move deeper (up to two semitones either way), faster and more irregular. Its button switches it off. Record it under FUNCTION like any Notes-page knob and it changes per step
+- **PITCH** (pot 6, formerly velocity) is the quick glide at the start of the tail, up to an octave down or up
 - Gate is gone for the kick: the Daisy never used it
-- Screen 2 draws the kick you are about to hear: its pitch over time on top, and the punch and sub levels underneath
+- Screen 2 draws the kick you are about to hear: its pitch over time on top, with the note as a dotted line, and underneath the punch (hatched) handing over to the sub (solid)
 
 **Fine-tune the tail delay.** On the kick page, **FUNCTION + K3** nudges exactly when the sub comes in, in half-millisecond steps either side of the K3 delay. **FUNCTION + B3** switches K3 to the sub's fade-in instead, from a sharp 6 ms up to a 60 ms swell. Unlike other FUNCTION edits, these stay when FUNCTION is released.
 
