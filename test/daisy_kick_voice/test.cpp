@@ -5,10 +5,15 @@
  * includes it here with stubs for the few firmware helpers it calls, so this
  * exercises the real code.
  *
- * The click measure is spectral: a 55 Hz sub has no business above 1 kHz,
- * so the peak of a 4th-order 1 kHz high-pass of the output, relative to the
- * sub's own peak, is how loud any click is. Every scenario must stay below
- * CLICK_LIMIT_DB, and a control proves the measure catches a real click.
+ * With the punch off (SHAPE 0, PUNCH 0) the click measure is spectral: a
+ * 55 Hz sub has no business above 1 kHz, so the peak of a 4th-order 1 kHz
+ * high-pass of the output, relative to the sub's own peak, is how loud any
+ * click is. Every scenario must stay below CLICK_LIMIT_DB, and a control
+ * proves the measure catches a real click.
+ *
+ * With the punch on, energy above 1 kHz is the punch itself, so the check is
+ * instead that no sample steps further than a smooth sine at the voice's
+ * own frequency and level could, plus determinism.
  *
  * Pass "wav" to also write audition renders into the current directory.
  */
@@ -32,6 +37,7 @@ static float MacroDecaySeconds(float x) { x = Clamp01Added(x); if(x >= 0.99f) re
 static bool tail_delay_enabled = false;
 static float macro_tail_delay = 0.0f;
 static float macro_decay = 0.34f;
+static float macro_kick_shape = 0.0f;
 static float kick_frequency = 55.0f;
 #include "voice_extract.inc"
 
@@ -58,22 +64,76 @@ static double ClickDb(const vector<float>& y)
     return 20 * log10(fmax(hf, 1e-12) / peak);
 }
 
-/* The firmware's trigger + per-sample loop. */
-static vector<float> Run(const vector<pair<int, int>>& hits, int length, float gain)
+struct Render
 {
-    KickVoice voice;
     vector<float> y;
+    float worst_step_ratio = 0.0f;  /* largest |dy| over the smooth-sine bound */
+};
+
+/* One voice's per-sample slope bound: level times angular frequency. */
+static float SlopeBound(const KickVoice& v, float pg, float sg)
+{
+    if(!v.active) return 0.0f;
+    float f = v.BaseFrequency(v.SubAge()) * (1.0f + v.sweep_depth * v.sweep);
+    float level = KICK_PUNCH_LEVEL * pg + KICK_SUB_LEVEL * sg + (v.handoff ? v.handoff_level : 0.0f);
+    return level * TWO_PI * fminf(f, 0.45f * SAMPLE_RATE) / SAMPLE_RATE;
+}
+
+/* Allowance for the raised-cosine onsets and the smoothstep fades. */
+static float EnvelopeAllowance(float pg, float sg)
+{
+    return KICK_PUNCH_LEVEL * pg * PI / (2.0f * MsToSamples(PUNCH_ATTACK_MS)) +
+           KICK_SUB_LEVEL * sg * PI / (2.0f * MsToSamples(SUB_ATTACK_MS)) +
+           (KICK_PUNCH_LEVEL * pg + KICK_SUB_LEVEL * sg) * 1.5f / MsToSamples(RETRIGGER_HANDOFF_MS);
+}
+
+/* The firmware's TriggerKickVoice() and per-sample loop. */
+static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, float sg)
+{
+    KickVoice voice, fading[KICK_FADING_SLOTS];
+    Render r;
     size_t h = 0;
+    float prev = 0.0f;
     for(int n = 0; n < length; n++)
     {
         while(h < hits.size() && hits[h].first == n)
         {
             float delay = (tail_delay_enabled && macro_tail_delay > 0.005f) ? MacroTailDelayMs(macro_tail_delay) : 0.0f;
-            voice.Trigger(kick_frequency, (uint8_t)hits[h].second, delay, MacroDecaySeconds(macro_decay));
+            bool sounding = voice.Sounding();
+            if(sounding && delay > 0.0f)
+            {
+                int slot = 0;
+                for(int i = 0; i < KICK_FADING_SLOTS; i++)
+                {
+                    if(!fading[i].active) { slot = i; break; }
+                    if(fading[i].fade_age > fading[slot].fade_age) slot = i;
+                }
+                fading[slot] = voice;
+                fading[slot].BeginFadeOut();
+                sounding = false;
+            }
+            voice.Trigger(kick_frequency, macro_kick_shape, (uint8_t)hits[h].second, delay,
+                          MacroDecaySeconds(macro_decay), sounding);
             h++;
         }
-        y.push_back(voice.Process(gain));
+        float bound = SlopeBound(voice, pg, sg) + EnvelopeAllowance(pg, sg) + 1e-5f;
+        for(auto& f : fading) bound += SlopeBound(f, pg, sg) + EnvelopeAllowance(pg, sg);
+        float y = voice.Process(pg, sg);
+        for(auto& f : fading) if(f.active) y += f.Process(pg, sg);
+        r.worst_step_ratio = fmaxf(r.worst_step_ratio, fabsf(y - prev) / bound);
+        prev = y;
+        r.y.push_back(y);
     }
+    return r;
+}
+
+/* Sub only: SHAPE 0, PUNCH gain 0, SUB at `gain`. */
+static vector<float> Run(const vector<pair<int, int>>& hits, int length, float gain)
+{
+    float shape = macro_kick_shape;
+    macro_kick_shape = 0.0f;
+    vector<float> y = RunFull(hits, length, 0.0f, gain).y;
+    macro_kick_shape = shape;
     return y;
 }
 
@@ -189,6 +249,41 @@ int main(int argc, char** argv)
         Expect(worst_excess <= 6.0, "a retrigger at DECAY INF is within 6 dB of an uninterrupted sine in every band");
     }
 
+    /* ---------------- punch ---------------- */
+    printf("punch start ratio: SHAPE 0 %.3f, 64 %.3f, 127 %.3f\n", PunchStartRatio(0), PunchStartRatio(0.5f), PunchStartRatio(1));
+    Expect(PunchStartRatio(0) == 1.0f, "SHAPE 0 = no sweep");
+    Expect(fabsf(PunchStartRatio(0.5f) - 3.8f) < 0.05f && fabsf(PunchSweepMs(0.5f) - 88.0f) < 1e-3f, "SHAPE 64 = 3.8x over 88 ms");
+    Expect(fabsf(PunchStartRatio(1.0f) - 30.0f) < 1e-3f && fabsf(PunchSweepMs(1.0f) - 110.0f) < 1e-3f, "SHAPE 127 = 30x over 110 ms");
+    {
+        float shapes[] = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+        float gains[][2] = {{1.0f, 0.95f}, {2.0f, 1.6f}, {1.0f, 0.0f}, {0.0f, 1.6f}};
+        float worst_ratio = 0; char worst_desc[160] = "";
+        for(float sh : shapes) for(auto& g : gains) for(float dl : delays) for(float dc : decays) for(int vel : {1, 64, 127})
+        {
+            macro_kick_shape = sh; kick_frequency = 55; macro_decay = dc; tail_delay_enabled = dl > 0; macro_tail_delay = dl;
+            vector<pair<int, int>> hits = {{100, vel}, {100 + SR / 3, vel}, {100 + SR / 3 + 1234, vel},
+                                            {100 + SR / 3 + 1234 + 97, vel}, {100 + SR / 3 + 9000, vel},
+                                            {100 + SR / 3 + 9000 + 2000, vel}};
+            Render r = RunFull(hits, SR, g[0], g[1]);
+            if(r.worst_step_ratio > worst_ratio)
+            {
+                worst_ratio = r.worst_step_ratio;
+                snprintf(worst_desc, sizeof worst_desc, "shape %.2f punch %.1f sub %.1f delay %.2f decay %.2f vel %d", sh, g[0], g[1], dl, dc, vel);
+            }
+        }
+        printf("punch on: worst sample step over the smooth-sine bound %.3f (%s)\n", worst_ratio, worst_desc);
+        Expect(worst_ratio <= 1.0f, "with the punch on, no hit or ratchet steps the waveform");
+
+        macro_kick_shape = 0.6f; macro_decay = 0.99f; tail_delay_enabled = false;
+        vector<float> fresh = RunFull({{0, 64}}, SR, 1.0f, 0.95f).y;
+        vector<float> again = RunFull({{0, 64}, {7777, 64}}, 7777 + SR, 1.0f, 0.95f).y;
+        float diff = 0;
+        for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(fresh[n] - again[7777 + n]));
+        Expect(diff == 0.0f, "with the punch on at DECAY INF, a retriggered hit is bit-identical to a fresh one after the handoff");
+        Expect(fresh[0] == 0.0f, "a punched hit starts at exactly zero");
+        macro_kick_shape = 0.0f;
+    }
+
     /* Determinism. */
     kick_frequency = 55; macro_decay = 0.6f; tail_delay_enabled = true; macro_tail_delay = 0.4f;
     vector<float> a = Run({{0, 90}}, SR, 0.95f);
@@ -222,6 +317,17 @@ int main(int argc, char** argv)
         render("sub_decay600_down.wav", 1, 0, 0.6f);
         render("sub_decay600_up.wav", 127, 0, 0.6f);
         render("sub_long_decay_ratchet.wav", 64, 0, 0.9f);
+        auto punched = [&](const char* name, float shape, float decay)
+        {
+            kick_frequency = 55; macro_kick_shape = shape; macro_decay = decay; tail_delay_enabled = false;
+            vector<pair<int, int>> hits;
+            for(int i = 0; i < 8; i++) hits.push_back({i * SR / 3, 64});
+            WriteWav(name, RunFull(hits, 3 * SR, 1.0f, 0.95f).y);
+            macro_kick_shape = 0.0f;
+        };
+        punched("punch_shape064.wav", 0.5f, 0.34f);
+        punched("punch_shape127_laser.wav", 1.0f, 0.34f);
+        punched("punch_shape064_decay_inf.wav", 0.5f, 0.99f);
     }
 
     printf("%s\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED");
