@@ -138,7 +138,7 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  */
 static volatile float param_line_gain    = 2.8184f; /* CC53, max 4.0  */
 static volatile float param_mackie_gain  = 1.01703f;/* CC54, max 2.0  */
-static volatile float param_sherman_gain = 1.56710f;/* CC55, max 2.5  */
+static volatile float param_tube_gain = 1.56710f;/* CC55, max 2.5  */
 static volatile float param_bpf_gain     = 4.0f;    /* CC56, max 8.0  */
 static volatile float param_sub_gain     = 0.95f;   /* CC57, max 1.6  */
 static volatile float param_punch_gain   = 1.0f;    /* CC58, max 2.0  */
@@ -146,7 +146,7 @@ static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
-static constexpr float PARAM_SHERMAN_GAIN_MAX = 2.5f;
+static constexpr float PARAM_TUBE_GAIN_MAX = 2.5f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
 static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
@@ -159,7 +159,7 @@ static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
  */
 static volatile float param_line_gain_target    = 2.8184f;
 static volatile float param_mackie_gain_target  = 1.01703f;
-static volatile float param_sherman_gain_target = 1.56710f;
+static volatile float param_tube_gain_target = 1.56710f;
 static volatile float param_bpf_gain_target     = 4.0f;
 static constexpr float PARAM_GAIN_SLEW = 0.06f;
 
@@ -190,13 +190,13 @@ static constexpr float REVERB_DUCK_RECOVER_A = 0.000298f;
 static constexpr float REVERB_DUCK_CUT_STEP  = 1.0f / (0.002f * SAMPLE_RATE);
 
 /* ============================================================
-   MUSICAL MACKIE / SHERMAN CHARACTER
+   MUSICAL MACKIE / TUBE CHARACTER
    ============================================================
 
    The models are PARALLEL SEND/RETURN processors:
 
        dry punch + sub ------------------------------------> dry lane
-              \-> wet send -> Mackie/Sherman + BPF -> 120 Hz HPF -> wet
+              \-> wet send -> Mackie/Tube + BPF -> 120 Hz HPF -> wet
        dry + wet -> kick FX
 
    This means character can be driven hard without replacing or phase-
@@ -225,28 +225,6 @@ static constexpr float MACKIE_POST_LP_HZ     = 10000.0f;
 static constexpr float MACKIE_INTERNAL_GAIN  = 7.40f;
 /* +3 dB: 0.72 * 10^(3/20). Drive/character untouched, level only. */
 
-static constexpr float SHERMAN_PRE_LP_HZ     = 12000.0f;
-static constexpr float SHERMAN_POST_LP_HZ    = 10000.0f;
-static constexpr float SHERMAN_FILTER_RESONANCE = 0.85f;
-static constexpr float SHERMAN_FEEDBACK      = 0.15f;
-static constexpr float SHERMAN_INPUT_DRIVE   = 3.05f;
-
-/*
- * VCF-4 controls. On the hardware these are front-panel; here they are
- * fixed until they are given CCs of their own.
- *
- * MODE       0 = LPF, 0.5 = BPF, 1 = HPF (one knob sweeps the three VCAs).
- * BP_POLARITY  -1..+1, the -BP/0/+BP switch summed on top of the blend.
- *              Fully negative nulls the bandpass instead of dulling it.
- * CLOCK_RATIO  Core B's clock divider against core A: 1 = 24 dB cascade,
- *              2 = octave, 3 = the "harmonics" setting.
- * SERIAL       A into B, versus the two cores in parallel.
- */
-static constexpr float SHERMAN_MODE        = 0.46f;
-static constexpr float SHERMAN_BP_POLARITY = 0.35f;
-static constexpr float SHERMAN_CLOCK_RATIO = 2.0f;
-static constexpr bool  SHERMAN_SERIAL_ROUTING = true;
-/* +7 dB: 0.70 * 10^(7/20). 4 dB to match Mackie, plus the shared 3 dB. */
 
 /*
  * How much the K5 amount drives the model, rather than only fading its
@@ -273,7 +251,7 @@ static constexpr float CHARACTER_AMOUNT_SMOOTH_MS = 18.0f;
    ============================================================ */
 
 /*
- * The previous build kept expensive Mackie/Sherman processing alive even
+ * The previous build kept expensive Mackie/Tube processing alive even
  * at exactly 0% wet, and kept BOTH DJ SVFs evaluating tanf() every sample
  * while bypassed.
  *
@@ -523,8 +501,8 @@ static constexpr uint8_t CC_FX_DELAY_WET = 76;
        KNOB 4   CC23    CURRENT BPF LAYER FREQUENCY
        BUTTON 4 CC103   BPF LAYERS 0 -> 1 -> 2 -> 3 -> 0
 
-       KNOB 5   CC24    MACKIE / SHERMAN WET
-       BUTTON 5 CC104   MACKIE <-> SHERMAN MODEL
+       KNOB 5   CC24    MACKIE / TUBE WET
+       BUTTON 5 CC104   MACKIE <-> TUBE MODEL
 
        KNOB 6   CC25    KICK SHAPE
        BUTTON 6 CC105   PUMP TOGGLE
@@ -582,8 +560,8 @@ static constexpr uint8_t CC_FX_DELAY_WET = 76;
  *   CC46 BPF LAYER 3 FREQ
  *   CC47 BPF LAYER COUNT        absolute 0..3
  *   CC48 MACKIE AMOUNT
- *   CC49 SHERMAN AMOUNT
- *   CC50 CHARACTER MODEL        0=MACKIE, 127=SHERMAN
+ *   CC49 TUBE AMOUNT
+ *   CC50 CHARACTER MODEL        0=MACKIE, 127=TUBE
  *   CC51 KICK SHAPE
  *   CC52 PUMP STATE             0=OFF, 127=ON
  *
@@ -611,7 +589,7 @@ static constexpr uint8_t CC_BPF_LAYER2_FREQUENCY    = 45;
 static constexpr uint8_t CC_BPF_LAYER3_FREQUENCY    = 46;
 static constexpr uint8_t CC_BPF_LAYER_COUNT         = 47;
 static constexpr uint8_t CC_MACKIE_AMOUNT           = 48;
-static constexpr uint8_t CC_SHERMAN_AMOUNT          = 49;
+static constexpr uint8_t CC_TUBE_AMOUNT          = 49;
 static constexpr uint8_t CC_CHARACTER_MODEL         = 50;
 static constexpr uint8_t CC_KICK_SHAPE_ABSOLUTE     = 51;
 static constexpr uint8_t CC_PUMP_STATE              = 52;
@@ -619,10 +597,22 @@ static constexpr uint8_t CC_PUMP_STATE              = 52;
 /* Mix page: Teensy FUNCTION + MENU2. */
 static constexpr uint8_t CC_MIX_LINE_GAIN           = 53;
 static constexpr uint8_t CC_MIX_MACKIE_GAIN         = 54;
-static constexpr uint8_t CC_MIX_SHERMAN_GAIN        = 55;
+static constexpr uint8_t CC_MIX_TUBE_GAIN        = 55;
 static constexpr uint8_t CC_MIX_BPF_GAIN            = 56;
 static constexpr uint8_t CC_MIX_SUB_GAIN            = 57;
 static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
+
+/*
+ * v1.3.0 kick shaping, all per-hit (latched at the trigger):
+ *   CC60 TAIL OFFSET   Function + K3 turn: fine nudge of when the sub starts
+ *   CC61 TAIL ATTACK   Function + K3 press, then turn: the sub's fade-in
+ *   CC62 SWEEP TIME    Menu 1 pot 3 on the kick channel: punch sweep length
+ *   CC63 TAIL MOD      Menu 1 pot 5 on the kick channel: second pitch sweep
+ */
+static constexpr uint8_t CC_TAIL_OFFSET             = 60;
+static constexpr uint8_t CC_TAIL_ATTACK             = 61;
+static constexpr uint8_t CC_PUNCH_SWEEP_TIME        = 62;
+static constexpr uint8_t CC_TAIL_MOD                = 63;
 
 
 static constexpr uint8_t CC_BUTTON_FX_NEXT          = 100;
@@ -825,15 +815,15 @@ static volatile float macro_character_wet = 0.0f;
  * UI / requested character model.
  * Audio DSP owns its actual active model internally.
  */
-static volatile bool macro_character_sherman = false;
+static volatile bool macro_character_tube = false;
 
 /*
  * Main-loop MIDI code ONLY writes these request flags.
  * The audio callback consumes them and is the ONLY place allowed to
- * reset/switch Mackie/Sherman DSP state.
+ * reset/switch Mackie/Tube DSP state.
  */
 static volatile bool character_switch_pending = false;
-static volatile bool character_switch_target_sherman = false;
+static volatile bool character_switch_target_tube = false;
 
 /* Button-5 edge latch: repeated held CC values cannot retrigger switching. */
 static bool character_button_down = false;
@@ -841,6 +831,13 @@ static bool character_button_down = false;
 
 /* Macro 6: laser -> long bass-note kick shape. */
 static volatile float macro_kick_shape = 0.50f;
+
+
+/* CC60..63; see their declarations. Defaults are the pre-v1.3.0 kick. */
+static volatile float macro_tail_offset_ms = 0.0f;
+static volatile float macro_tail_attack_ms = 6.0f;
+static volatile float macro_punch_time_scale = 1.0f;
+static volatile float macro_tail_mod_semitones = 0.0f;
 
 
 /*
@@ -901,7 +898,7 @@ static constexpr uint32_t MACRO_FX_LONG_PRESS_MS = 500;
  * K5 stores separate positions for the two models.
  */
 static volatile float macro_mackie_amount = 0.0f;
-static volatile float macro_sherman_amount = 0.0f;
+static volatile float macro_tube_amount = 0.0f;
 
 /*
  * true  = newly-selected model starts at 0
@@ -1466,7 +1463,7 @@ static float ProcessFinalHfDynamicTamer(
        click that appears the moment SUB leaves 0 %.
 
    KICK_BYPASS_WET
-       Skips Mackie/Sherman, BPF, dirty-bus manager and the wet HPF, so
+       Skips Mackie/Tube, BPF, dirty-bus manager and the wet HPF, so
        they are not even computed.
 
    KICK_BYPASS_POST
@@ -1727,6 +1724,12 @@ static constexpr float PUNCH_AMP_DECAY_PER_SWEEP = 1.0f;
 static constexpr float PUNCH_ATTACK_MS = 0.5f;
 static constexpr float SUB_ATTACK_MS   = 6.0f;
 
+/* v1.3.0 control ranges (CC60..63). */
+static constexpr float TAIL_OFFSET_STEP_MS = 0.5f;  /* per CC step, 64 = 0 */
+static constexpr float TAIL_ATTACK_MIN_MS = 6.0f;   /* the click-safe floor */
+static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
+static constexpr float TAIL_MOD_RANGE_SEMITONES = 24.0f;
+
 static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
 
 /* Level staging before the CC57 / CC58 mixer gains. */
@@ -1760,7 +1763,7 @@ static constexpr float SUB_MOVE_DOWN_SEMITONES = -12.0f;
 static constexpr float SUB_MOVE_UP_SEMITONES   =  12.0f;
 static constexpr float SUB_MOVE_GLIDE_MS       = 115.0f;
 static constexpr float SUB_MIN_FREQUENCY_HZ    = 12.0f;
-static constexpr float SUB_MAX_FREQUENCY_HZ    = 180.0f;
+static constexpr float SUB_MAX_FREQUENCY_HZ    = 440.0f;  /* room for TAIL MOD up */
 
 
 static float PunchStartRatio(float p)
@@ -1847,8 +1850,22 @@ struct KickVoiceOut
 {
     float punch = 0.0f;     /* dry punch path */
     float sub = 0.0f;       /* dry sub path */
-    float send = 0.0f;      /* into Mackie / Sherman */
+    float send = 0.0f;      /* into Mackie / Tube */
     float bpf_punch = 0.0f; /* the punch as the BPF colour hears it */
+};
+
+
+/* Everything a hit latches at its trigger. */
+struct KickHitParams
+{
+    float frequency = 55.0f;
+    float punch = 0.5f;                /* K6 SHAPE, 0..1: sweep depth */
+    uint8_t velocity = 64;             /* PITCH: the first glide */
+    float delay_ms = 0.0f;             /* tail delay incl. fine offset */
+    float decay_seconds = 0.5f;
+    float sub_attack_ms = 6.0f;        /* TAIL ATTACK */
+    float sweep_time_scale = 1.0f;     /* SWEEP TIME */
+    float tail_mod_semitones = 0.0f;   /* TAIL MOD: the second sweep */
 };
 
 
@@ -1862,6 +1879,12 @@ struct KickVoice
     float phase = 0.0f;
     float base_hz = 55.0f;
     float move_log_ratio = 0.0f;
+
+    /* TAIL MOD: a second glide across the decay, after the PITCH glide. */
+    float mod_log_ratio = 0.0f;
+    uint32_t mod_samples = 1;
+
+    uint32_t sub_attack_samples = 1;
 
     /* Punch pitch sweep. */
     float sweep_depth = 0.0f;   /* R - 1 */
@@ -1955,18 +1978,31 @@ struct KickVoice
     }
 
 
-    /* The note plus velocity movement, n samples after the sub starts. */
+    /*
+     * The note plus both movements, n samples after the sub starts: PITCH
+     * glides over the first SUB_MOVE_GLIDE_MS, then TAIL MOD over the rest
+     * of the decay. Down on one and up on the other is a down-then-up kick.
+     */
     float BaseFrequency(uint32_t n) const
     {
-        if(move_log_ratio == 0.0f)
+        if(move_log_ratio == 0.0f && mod_log_ratio == 0.0f)
             return base_hz;
 
-        float t =
+        uint32_t glide = MsToSamples(SUB_MOVE_GLIDE_MS);
+
+        float t1 =
             static_cast<float>(n) /
-            static_cast<float>(MsToSamples(SUB_MOVE_GLIDE_MS));
+            static_cast<float>(glide);
+
+        float t2 =
+            n > glide
+            ? static_cast<float>(n - glide) / static_cast<float>(mod_samples)
+            : 0.0f;
 
         return ClampAdded(
-            base_hz * expf(move_log_ratio * SmoothstepAdded(Clamp01Added(t))),
+            base_hz *
+            expf(move_log_ratio * SmoothstepAdded(Clamp01Added(t1)) +
+                 mod_log_ratio * SmoothstepAdded(Clamp01Added(t2))),
             SUB_MIN_FREQUENCY_HZ,
             SUB_MAX_FREQUENCY_HZ
         );
@@ -1996,13 +2032,13 @@ struct KickVoice
      * hand_off: carry the previous hit's sub on. Only valid with no tail
      * delay; the caller fades the old voice out instead otherwise.
      */
-    void Trigger(float frequency,
-                 float punch,
-                 uint8_t velocity,
-                 float delay_ms,
-                 float decay_seconds,
+    void Trigger(const KickHitParams& hit,
                  bool hand_off)
     {
+        float frequency = hit.frequency;
+        float punch = hit.punch;
+        float decay_seconds = hit.decay_seconds;
+
         /* The old sub's next sample, had it carried on. */
         float old_phase = last_phase + last_increment;
         old_phase -= floorf(old_phase);
@@ -2019,13 +2055,34 @@ struct KickVoice
         fading_punch_only = false;
 
         age = 0;
-        start = MsToSamples(delay_ms);
+        start = MsToSamples(hit.delay_ms);
 
         phase = 0.0f;
         base_hz = frequency;
 
         move_log_ratio =
-            VelocityToSubMoveSemitones(velocity) * (0.69314718f / 12.0f);
+            VelocityToSubMoveSemitones(hit.velocity) * (0.69314718f / 12.0f);
+
+        /*
+         * TAIL MOD runs over the audible rest of the decay: the old blended
+         * decay empties in about 60 % of K2's time. Capped so INF still moves.
+         */
+        mod_log_ratio = hit.tail_mod_semitones * (0.69314718f / 12.0f);
+        mod_samples =
+            MsToSamples(ClampAdded(0.6f * decay_seconds, 0.05f, 2.0f) * 1000.0f);
+
+        if(mod_samples < 1)
+            mod_samples = 1;
+
+        sub_attack_samples =
+            MsToSamples(
+                ClampAdded(hit.sub_attack_ms, TAIL_ATTACK_MIN_MS, TAIL_ATTACK_MAX_MS));
+
+        if(sub_attack_samples < 1)
+            sub_attack_samples = 1;
+
+        /* SWEEP TIME stretches the whole punch: its sweep and its window. */
+        float time_scale = ClampAdded(hit.sweep_time_scale, 0.25f, 4.0f);
 
         float start_ratio = PunchStartRatio(punch);
 
@@ -2035,7 +2092,7 @@ struct KickVoice
         if(start_ratio < 1.0f)
             start_ratio = 1.0f;
 
-        float sweep_seconds = PunchSweepMs(punch) * 0.001f;
+        float sweep_seconds = PunchSweepMs(punch) * 0.001f * time_scale;
 
         sweep_depth = start_ratio - 1.0f;
         sweep = 1.0f;
@@ -2063,6 +2120,7 @@ struct KickVoice
 
         anatomy_start =
             MsToSamples(
+                time_scale *
                 ShapeThreePoint(punch,
                                 SHAPE_ROUND_HANDOFF_START_MS,
                                 SHAPE_PUNCH_HANDOFF_START_MS,
@@ -2070,6 +2128,7 @@ struct KickVoice
 
         anatomy_end =
             MsToSamples(
+                time_scale *
                 ShapeThreePoint(punch,
                                 SHAPE_ROUND_HANDOFF_END_MS,
                                 SHAPE_PUNCH_HANDOFF_END_MS,
@@ -2289,7 +2348,7 @@ struct KickVoice
                 decay *
                 RaisedCosine01(
                     static_cast<float>(age - start) /
-                    static_cast<float>(MsToSamples(SUB_ATTACK_MS))
+                    static_cast<float>(sub_attack_samples)
                 ) *
                 KICK_SUB_LEVEL;
 
@@ -2464,10 +2523,16 @@ static float final_hf_guard_state[3] = {0.0f, 0.0f, 0.0f};
  */
 static float KickSubDelayMs()
 {
-    if(!tail_delay_enabled || macro_tail_delay <= 0.005f)
+    if(!tail_delay_enabled)
         return 0.0f;
 
-    return MacroTailDelayMs(macro_tail_delay);
+    float coarse =
+        macro_tail_delay > 0.005f
+        ? MacroTailDelayMs(macro_tail_delay)
+        : 0.0f;
+
+    /* TAIL OFFSET nudges the start either way; it cannot go before the hit. */
+    return fmaxf(0.0f, coarse + macro_tail_offset_ms);
 }
 
 
@@ -2522,14 +2587,17 @@ static void TriggerKickVoice(uint8_t velocity)
         slot.BeginFadeOut(true);
     }
 
-    kick_voice.Trigger(
-        kick_frequency,
-        macro_kick_shape,
-        velocity,
-        delay_ms,
-        MacroDecaySeconds(macro_decay),
-        sounding
-    );
+    KickHitParams hit;
+    hit.frequency = kick_frequency;
+    hit.punch = macro_kick_shape;
+    hit.velocity = velocity;
+    hit.delay_ms = delay_ms;
+    hit.decay_seconds = MacroDecaySeconds(macro_decay);
+    hit.sub_attack_ms = macro_tail_attack_ms;
+    hit.sweep_time_scale = macro_punch_time_scale;
+    hit.tail_mod_semitones = macro_tail_mod_semitones;
+
+    kick_voice.Trigger(hit, sounding);
 
     kick_age_samples = 0;
 }
@@ -2641,7 +2709,7 @@ struct Biquad
 
 
 /*
- * High-pass on the Mackie / Sherman RETURN only: two one-poles at 120 Hz.
+ * High-pass on the Mackie / Tube RETURN only: two one-poles at 120 Hz.
  * POLE_A = expf(-2*pi*120/48000).
  */
 static constexpr float CHARACTER_SUB_PROTECT_POLE_A = 0.98441477f;
@@ -6273,7 +6341,7 @@ struct MacroBpfBank
         /*
          * Compensation for the parallel energy each extra layer adds. This
          * is the ONLY layer-count attenuation: the dirty bus used to
-         * subtract a second one, which also dimmed Mackie and Sherman even
+         * subtract a second one, which also dimmed Mackie and Tube even
          * though they had gained no energy.
          */
         float count_compensation =
@@ -6426,281 +6494,218 @@ struct MacroMackieProcessor
 };
 
 /* ============================================================
-   SHERMAN — VCF-4 SWITCHED-CAPACITOR MODEL
+   TUBE — TWO-STAGE TRIODE PREAMP
    ============================================================
 
-   Modelled on the VCF-4 dual switched capacitor audio filter by
-   Skull & Circuits (c)2023.
-   https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2
+   Replaces the Sherman VCF-4 model on K5's second slot (CC49 amount,
+   CC55 mixer gain, CC50 model switch). A musical model of two cascaded
+   common-cathode triode stages, not a circuit simulation. What makes it
+   read as a tube rather than another clipper:
 
-   The hardware pairs two LTC1060 switched-capacitor filter cores. An
-   LTC1060 has no voltage or current cutoff control at all: cutoff is set
-   purely by a square-wave clock running at 100x the wanted frequency, so
-   a 10 Hz cutoff needs a 1 kHz clock and 10 kHz needs 1 MHz.
+       asymmetric transfer     the grid starts conducting on positive
+                               swings, so they flatten early and hard;
+                               negative swings run into cutoff on a much
+                               softer knee. The mismatch is even-order
+                               harmonics, the "warm" part.
+       blocking bias shift     grid current charges the coupling cap, so
+                               a loud hit drags the operating point
+                               negative and the stage compresses and
+                               sags, recovering over ~60 ms. Level
+                               dependent, so the drive responds to the
+                               kick's envelope instead of clipping flat.
+       two inverting stages    each triode inverts, and the second is
+                               biased differently, so the pair does not
+                               simply cancel its own asymmetry.
+       coupling caps           ~20 Hz high-pass between stages.
+       roll-off                a gentle 2-pole top end at ~7.5 kHz, and a
+                               low-mid bump at ~180 Hz from the plate load.
 
-   That constraint is the whole character. Because the ratio is fixed by
-   the topology, the integrator coefficient is a CONSTANT and the cutoff
-   moves entirely with the clock. And because the core only updates on a
-   clock edge, at low cutoffs the clock falls under the audio rate and the
-   output visibly steps between edges -- the write-up describes it as "a
-   bit crusher kind of effect on low filter settings".
-
-   That artefact lands exactly in a kick's range: at 48 kHz the clock drops
-   below the host rate once the cutoff is under ~480 Hz, so the crunch
-   appears on its own as the filter sweeps down into the body.
-
-   Resonance is BP fed back to the input through a VCA, which self
-   oscillates at the top of its range, as on the hardware.
+   Nonlinear stages run 4x oversampled, as the Mackie does.
    ============================================================ */
 
-struct MacroShermanSVF
+/* Stage operating points, as a fraction of the grid swing. */
+static constexpr float TUBE_STAGE1_BIAS = -0.18f;
+static constexpr float TUBE_STAGE2_BIAS = -0.32f;
+
+/* Input drive into stage 1 at full amount (the amount knob adds more). */
+static constexpr float TUBE_INPUT_GAIN = 3.2f;
+static constexpr float TUBE_INTERSTAGE_GAIN = 2.4f;
+
+/* Blocking: how much grid current shifts the bias, and how fast it recovers. */
+static constexpr float TUBE_BLOCKING_DEPTH = 0.45f;
+static constexpr float TUBE_BLOCKING_CHARGE_A = 0.0052f;    /* ~1 ms at the 4x rate */
+static constexpr float TUBE_BLOCKING_RECOVER_A = 0.0000868f; /* ~60 ms at the 4x rate */
+
+/*
+ * Output staging, and polarity. Negative on purpose: with it positive the
+ * return came back out of phase with the dry kick around 100-150 Hz and
+ * cancelled 2-3 dB of it (measured with the host harness). Negative, the
+ * tube's low harmonics add to the dry kick instead, about +4 dB below 150 Hz.
+ */
+static constexpr float TUBE_OUTPUT_GAIN = -1.0f;
+
+
+struct MacroTubeProcessor
 {
-    float ic1eq = 0.0f;
-    float ic2eq = 0.0f;
-    float k = 1.0f;
+    Biquad plate_bump;
 
-    /* Clock phase, in cycles. One wrap = one capacitor switch. */
-    float clock_phase = 0.0f;
-    float clock_hz = 20000.0f;
+    float previous_input = 0.0f;
+    float pre_lp_1 = 0.0f;
+    float pre_lp_2 = 0.0f;
 
-    /* Held outputs: the core only moves on a clock edge. */
-    float held_low = 0.0f;
-    float held_band = 0.0f;
-    float held_high = 0.0f;
+    /* Coupling caps: input, interstage, output. */
+    float couple_in = 0.0f;
+    float couple_mid = 0.0f;
+    float couple_out_x = 0.0f;
+    float couple_out_y = 0.0f;
+
+    /* Blocking bias shift, per stage. */
+    float block_1 = 0.0f;
+    float block_2 = 0.0f;
+
+    float post_lp_1 = 0.0f;
+    float post_lp_2 = 0.0f;
+
 
     /*
-     * Clock is always 100x cutoff, so g = tan(pi * fc / clock) is fixed.
-     * This is why the real chip needs no frequency-dependent trimming.
+     * One triode stage, inverting. x is the grid swing, bias the operating
+     * point. Above the grid-conduction point the curve flattens hard; below
+     * it runs into cutoff on a soft knee. Normalised so the output is zero
+     * at the operating point, whatever the bias.
      */
-    static constexpr float SC_CLOCK_RATIO = 100.0f;
-    static constexpr float SC_G = 0.031426266f; /* tanf(PI / 100) */
-
-    void ResetState()
+    static float Triode(float x, float bias)
     {
-        ic1eq = 0.0f;
-        ic2eq = 0.0f;
-        clock_phase = 0.0f;
-        held_low = held_band = held_high = 0.0f;
-    }
+        float v = x + bias;
 
-    void Set(float frequency, float resonance, bool immediate = false)
-    {
-        frequency = ClampAdded(frequency, 55.0f, 6000.0f);
-        resonance = ClampAdded(resonance, 0.0f, 0.98f);
+        float plate;
 
-        /* k is 1/Q. Reaching ~0.10 lets the core self-oscillate. */
-        float new_k = 1.62f - resonance * 1.55f;
-        if(new_k < 0.10f)
-            new_k = 0.10f;
-
-        k = immediate ? new_k : k + (new_k - k) * 0.25f;
-        clock_hz = frequency * SC_CLOCK_RATIO;
-    }
-
-    /* One switched-capacitor core step, evaluated at the clock rate. */
-    void Tick(float input)
-    {
-        float denom = 1.0f + SC_G * (SC_G + k);
-
-        float v3 = input - ic2eq;
-        float v1 = (ic1eq + SC_G * v3) / denom;
-        float v2 = ic2eq + SC_G * v1;
-        ic1eq = 2.0f * v1 - ic1eq;
-        ic2eq = 2.0f * v2 - ic2eq;
-
-        held_low = v2;
-        held_band = v1;
-        held_high = input - k * held_band - held_low;
-    }
-
-    void Process(float input, float& low, float& band, float& high)
-    {
-        /*
-         * Advance the clock across this audio sample and run one core step
-         * per switch. Below ~480 Hz cutoff there is less than one switch
-         * per sample, so the previous output is HELD and the signal steps:
-         * the bit-crusher artefact, arising from the topology rather than
-         * being added on afterwards.
-         *
-         * Capped at 8 steps: above that the clock is far past the audio
-         * rate, nothing is audibly stepping, and the extra iterations only
-         * cost cycles.
-         */
-        clock_phase += clock_hz * (1.0f / SAMPLE_RATE);
-
-        int steps = static_cast<int>(clock_phase);
-        if(steps > 8)
+        if(v >= 0.0f)
         {
-            steps = 8;
-            clock_phase = 0.0f;
+            /* Grid conduction: early, firm compression. */
+            plate = v / (1.0f + 2.2f * v);
         }
         else
         {
-            clock_phase -= static_cast<float>(steps);
+            /* Towards cutoff: a much softer knee. */
+            float u = -v;
+            plate = -u / sqrtf(1.0f + 0.55f * u * u);
         }
 
-        for(int s = 0; s < steps; ++s)
-            Tick(input);
+        float rest =
+            bias >= 0.0f
+            ? bias / (1.0f + 2.2f * bias)
+            : bias / sqrtf(1.0f + 0.55f * bias * bias);
 
-        low = held_low;
-        band = held_band;
-        high = held_high;
-    }
-};
-
-struct MacroShermanProcessor
-{
-    MacroShermanSVF f1;
-    MacroShermanSVF f2;
-
-    float pre_lp_1 = 0.0f;
-    float pre_lp_2 = 0.0f;
-    float post_lp_1 = 0.0f;
-    float post_lp_2 = 0.0f;
-    float feedback_memory = 0.0f;
-    float input_hp_state = 0.0f;
-    float prepared_fundamental = -1.0f;
-
-    void PrepareForPitch(float fundamental, bool immediate = false)
-    {
-        fundamental = ClampAdded(fundamental, 25.0f, 130.0f);
-
-        /*
-         * Core A sits over the body. Core B follows it at the selected
-         * clock ratio, exactly as the hardware's frequency dividers lock
-         * the second LTC1060 to the first: 1:1 cascades to 24 dB, 2:1 and
-         * 3:1 give the octave spacing the write-up calls "incredibly
-         * useful" and acid-like.
-         */
-        float f1_frequency =
-            ClampAdded(fundamental * 5.5f, 220.0f, 760.0f);
-        float f2_frequency =
-            ClampAdded(f1_frequency * SHERMAN_CLOCK_RATIO, 220.0f, 4800.0f);
-
-        f1.Set(f1_frequency, SHERMAN_FILTER_RESONANCE, immediate);
-        f2.Set(f2_frequency, SHERMAN_FILTER_RESONANCE * 0.94f, immediate);
-        prepared_fundamental = fundamental;
+        return -(plate - rest);
     }
 
-    /*
-     * One knob sweeping LPF -> BPF -> HPF, as the hardware does with three
-     * VCAs fed from a single pot. The bipolar -BP/0/+BP term is summed on
-     * top: the Nord Lead trick the write-up cites, where subtracting the
-     * bandpass from the blend nulls it out rather than just dulling it.
-     */
-    static float ModeMix(float low, float band, float high)
-    {
-        float mode = SHERMAN_MODE;
-
-        float low_gain = Clamp01Added(1.0f - mode * 2.0f);
-        float high_gain = Clamp01Added(mode * 2.0f - 1.0f);
-        float band_gain = 1.0f - fabsf(mode * 2.0f - 1.0f);
-
-        return low * low_gain +
-               band * band_gain +
-               high * high_gain +
-               band * SHERMAN_BP_POLARITY;
-    }
 
     void Reset()
     {
-        f1.ResetState();
-        f2.ResetState();
+        plate_bump.Reset();
+        plate_bump.SetBandpass(180.0f, 0.70f);
+
+        previous_input = 0.0f;
         pre_lp_1 = pre_lp_2 = 0.0f;
+        couple_in = couple_mid = 0.0f;
+        couple_out_x = couple_out_y = 0.0f;
+        block_1 = block_2 = 0.0f;
         post_lp_1 = post_lp_2 = 0.0f;
-        feedback_memory = 0.0f;
-        input_hp_state = 0.0f;
-        PrepareForPitch(kick_frequency, true);
     }
 
-    void Trigger()
-    {
-        PrepareForPitch(kick_frequency, false);
-    }
+
+    void Trigger() {}
+
 
     float Process(float input, float amount)
     {
         if(amount <= CHARACTER_HEAVY_PROCESS_EPSILON)
         {
+            previous_input = input;
             pre_lp_1 = pre_lp_2 = input;
+            couple_in = input;
+            couple_mid = 0.0f;
+            couple_out_x = couple_out_y = 0.0f;
+            block_1 = block_2 = 0.0f;
             post_lp_1 = post_lp_2 = 0.0f;
-            feedback_memory = 0.0f;
-            input_hp_state = input;
-            f1.ResetState();
-            f2.ResetState();
+            plate_bump.Process(0.0f);
             return 0.0f;
         }
 
-        if(prepared_fundamental < 0.0f)
-            PrepareForPitch(kick_frequency, false);
-
-        constexpr float pre_a = 0.79210000f; /* SHERMAN_PRE_LP_HZ */
+        constexpr float pre_a = 0.79210000f; /* 12 kHz, as the Mackie */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
-        constexpr float hp_a = 0.00680f;
-        input_hp_state += hp_a * (pre_lp_2 - input_hp_state);
-        float source = pre_lp_2 - input_hp_state;
+        /* Input coupling cap, ~20 Hz. */
+        constexpr float couple_a = 0.00261f;
+        couple_in += couple_a * (pre_lp_2 - couple_in);
+        float grid = pre_lp_2 - couple_in;
 
-        /*
-         * Resonance is the BANDPASS fed back to the input through a VCA,
-         * not a filter coefficient -- the hardware replaces the resonance
-         * pot with an AS3360 VCA in that path, and self-oscillates when it
-         * is driven far enough.
-         */
-        float feedback_signal = SoftClip(feedback_memory * 1.35f);
-        float driven =
-            SoftClip(
-                source * SHERMAN_INPUT_DRIVE +
-                feedback_signal * SHERMAN_FEEDBACK
-            );
+        float stage2_sum = 0.0f;
 
-        float l1, b1, h1;
-        f1.Process(driven, l1, b1, h1);
-        float f1_mix = ModeMix(l1, b1, h1);
+        for(int os = 1; os <= 4; ++os)
+        {
+            float t = static_cast<float>(os) * 0.25f;
+            float x =
+                (previous_input + (grid - previous_input) * t) *
+                TUBE_INPUT_GAIN;
 
-        /*
-         * SERIAL routing: core A into core B. At a 1:1 ratio this is the
-         * 24 dB cascade; at 2:1 or 3:1 the second core tracks an octave or
-         * more above and the pair reads as a formant pair rather than one
-         * steeper filter.
-         */
-        float f2_input =
-            SHERMAN_SERIAL_ROUTING
-            ? SoftClip(f1_mix * 1.45f)
-            : SoftClip(driven * 1.45f);
+            /* Stage 1, with its bias dragged down by grid current. */
+            float bias_1 = TUBE_STAGE1_BIAS - block_1 * TUBE_BLOCKING_DEPTH;
+            float s1 = Triode(x, bias_1);
 
-        float l2, b2, h2;
-        f2.Process(f2_input, l2, b2, h2);
-        float f2_mix = ModeMix(l2, b2, h2);
+            float grid_current_1 = fmaxf(0.0f, x + bias_1);
+            block_1 +=
+                (grid_current_1 > block_1 ? TUBE_BLOCKING_CHARGE_A
+                                          : TUBE_BLOCKING_RECOVER_A) *
+                (grid_current_1 - block_1);
 
-        float wet =
-            SHERMAN_SERIAL_ROUTING
-            ? SoftClip(f2_mix * 2.15f)
-            : SoftClip((f1_mix + f2_mix) * 1.30f);
+            /* Interstage coupling cap, ~20 Hz, at the oversampled rate. */
+            constexpr float mid_a = 0.000654f;
+            couple_mid += mid_a * (s1 - couple_mid);
+            float x2 = (s1 - couple_mid) * TUBE_INTERSTAGE_GAIN;
 
-        /* Only the bandpass returns to the resonance VCA. */
-        float resonance_return =
-            SHERMAN_SERIAL_ROUTING ? b2 : (b1 + b2) * 0.5f;
+            float bias_2 = TUBE_STAGE2_BIAS - block_2 * TUBE_BLOCKING_DEPTH;
+            float s2 = Triode(x2, bias_2);
 
-        constexpr float fb_post_a = 0.32f;
-        feedback_memory += fb_post_a * (resonance_return - feedback_memory);
+            float grid_current_2 = fmaxf(0.0f, x2 + bias_2);
+            block_2 +=
+                (grid_current_2 > block_2 ? TUBE_BLOCKING_CHARGE_A
+                                          : TUBE_BLOCKING_RECOVER_A) *
+                (grid_current_2 - block_2);
 
-        constexpr float post_a = 0.72990000f; /* SHERMAN_POST_LP_HZ */
-        post_lp_1 += post_a * (wet - post_lp_1);
+            stage2_sum += s2;
+        }
+
+        previous_input = grid;
+
+        float stage2 = stage2_sum * 0.25f;
+
+        /* Output coupling cap / DC block. */
+        constexpr float dc_r = 0.99935f;
+        float coupled = stage2 - couple_out_x + dc_r * couple_out_y;
+        couple_out_x = stage2;
+        couple_out_y = coupled;
+
+        /* Plate-load low-mid bump. */
+        float voiced = coupled + plate_bump.Process(coupled) * 0.35f;
+
+        constexpr float post_a = 0.62500000f; /* ~7.5 kHz */
+        post_lp_1 += post_a * (voiced - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
-        return post_lp_2 * param_sherman_gain;
+        return post_lp_2 * TUBE_OUTPUT_GAIN * param_tube_gain;
     }
 };
+
 
 struct MacroCharacterProcessor
 {
     MacroMackieProcessor mackie;
-    MacroShermanProcessor sherman;
+    MacroTubeProcessor tube;
 
     float mackie_amount_smoothed = 0.0f;
-    float sherman_amount_smoothed = 0.0f;
+    float tube_amount_smoothed = 0.0f;
 
     enum class SwitchState
     {
@@ -6710,8 +6715,8 @@ struct MacroCharacterProcessor
     };
 
     SwitchState switch_state = SwitchState::STABLE;
-    bool active_sherman = false;
-    bool desired_sherman = false;
+    bool active_tube = false;
+    bool desired_tube = false;
     float transition_gain = 1.0f;
 
     static bool AudioValueSafe(float x)
@@ -6720,26 +6725,26 @@ struct MacroCharacterProcessor
     }
 
     void PrepareMackie() { mackie.Reset(); }
-    void PrepareSherman() { sherman.Reset(); }
+    void PrepareTube() { tube.Reset(); }
 
     void Reset()
     {
         PrepareMackie();
-        PrepareSherman();
+        PrepareTube();
         mackie_amount_smoothed = 0.0f;
-        sherman_amount_smoothed = 0.0f;
-        active_sherman = macro_character_sherman;
-        desired_sherman = active_sherman;
+        tube_amount_smoothed = 0.0f;
+        active_tube = macro_character_tube;
+        desired_tube = active_tube;
         switch_state = SwitchState::STABLE;
         transition_gain = 1.0f;
         character_switch_pending = false;
-        character_switch_target_sherman = active_sherman;
+        character_switch_target_tube = active_tube;
     }
 
     void Trigger()
     {
-        if(active_sherman)
-            sherman.Trigger();
+        if(active_tube)
+            tube.Trigger();
         else
             mackie.Trigger();
     }
@@ -6749,9 +6754,9 @@ struct MacroCharacterProcessor
         if(!character_switch_pending)
             return;
 
-        desired_sherman = character_switch_target_sherman;
+        desired_tube = character_switch_target_tube;
         character_switch_pending = false;
-        if(desired_sherman != active_sherman)
+        if(desired_tube != active_tube)
             switch_state = SwitchState::FADE_TO_ZERO;
     }
 
@@ -6763,24 +6768,24 @@ struct MacroCharacterProcessor
 
     float CurrentSmoothedAmount() const
     {
-        return active_sherman ? sherman_amount_smoothed : mackie_amount_smoothed;
+        return active_tube ? tube_amount_smoothed : mackie_amount_smoothed;
     }
 
     float ProcessSelectedWet(float input)
     {
-        if(active_sherman)
+        if(active_tube)
         {
-            float target = Clamp01Added(macro_sherman_amount);
-            sherman_amount_smoothed = SmoothAmount(sherman_amount_smoothed, target);
+            float target = Clamp01Added(macro_tube_amount);
+            tube_amount_smoothed = SmoothAmount(tube_amount_smoothed, target);
             float drive =
-                1.0f + sherman_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
-            float wet = sherman.Process(input * drive, sherman_amount_smoothed);
+                1.0f + tube_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+            float wet = tube.Process(input * drive, tube_amount_smoothed);
             if(!AudioValueSafe(wet))
             {
-                PrepareSherman();
+                PrepareTube();
                 return 0.0f;
             }
-            return wet * sherman_amount_smoothed;
+            return wet * tube_amount_smoothed;
         }
 
         float target = Clamp01Added(macro_mackie_amount);
@@ -6808,13 +6813,13 @@ struct MacroCharacterProcessor
             if(transition_gain <= 0.0f)
             {
                 transition_gain = 0.0f;
-                active_sherman = desired_sherman;
+                active_tube = desired_tube;
 
-                if(active_sherman)
+                if(active_tube)
                 {
                     if(CHARACTER_RESET_ON_MODEL_SWITCH)
-                        sherman_amount_smoothed = 0.0f;
-                    PrepareSherman();
+                        tube_amount_smoothed = 0.0f;
+                    PrepareTube();
                 }
                 else
                 {
@@ -8913,24 +8918,24 @@ static bool HandleSixMacroCC(
 
 
         /* ====================================================
-           K5 — MACKIE/SHERMAN HAVE SEPARATE AMOUNT CCs
+           K5 — MACKIE/TUBE HAVE SEPARATE AMOUNT CCs
            ==================================================== */
 
         case CC_MACKIE_AMOUNT:
         {
             macro_mackie_amount = v;
 
-            if(!macro_character_sherman)
+            if(!macro_character_tube)
                 macro_character_wet = v;
 
             return true;
         }
 
-        case CC_SHERMAN_AMOUNT:
+        case CC_TUBE_AMOUNT:
         {
-            macro_sherman_amount = v;
+            macro_tube_amount = v;
 
-            if(macro_character_sherman)
+            if(macro_character_tube)
                 macro_character_wet = v;
 
             return true;
@@ -8947,12 +8952,12 @@ static bool HandleSixMacroCC(
              * No toggle ambiguity and no button edge-state dependency.
              */
             if(requested !=
-               macro_character_sherman)
+               macro_character_tube)
             {
-                macro_character_sherman =
+                macro_character_tube =
                     requested;
 
-                character_switch_target_sherman =
+                character_switch_target_tube =
                     requested;
 
                 character_switch_pending =
@@ -8962,7 +8967,7 @@ static bool HandleSixMacroCC(
 
             macro_character_wet =
                 requested
-                ? macro_sherman_amount
+                ? macro_tube_amount
                 : macro_mackie_amount;
 
             return true;
@@ -8992,8 +8997,8 @@ static bool HandleSixMacroCC(
             param_mackie_gain_target = v * PARAM_MACKIE_GAIN_MAX;
             return true;
 
-        case CC_MIX_SHERMAN_GAIN:
-            param_sherman_gain_target = v * PARAM_SHERMAN_GAIN_MAX;
+        case CC_MIX_TUBE_GAIN:
+            param_tube_gain_target = v * PARAM_TUBE_GAIN_MAX;
             return true;
 
         case CC_MIX_BPF_GAIN:
@@ -9006,6 +9011,29 @@ static bool HandleSixMacroCC(
 
         case CC_MIX_PUNCH_GAIN:
             param_punch_gain = v * PARAM_PUNCH_GAIN_MAX;
+            return true;
+
+        /* v1.3.0 kick shaping: plain values, latched by the next hit. */
+        case CC_TAIL_OFFSET:
+            macro_tail_offset_ms =
+                (static_cast<float>(value) - 64.0f) * TAIL_OFFSET_STEP_MS;
+            return true;
+
+        case CC_TAIL_ATTACK:
+            macro_tail_attack_ms =
+                TAIL_ATTACK_MIN_MS *
+                powf(TAIL_ATTACK_MAX_MS / TAIL_ATTACK_MIN_MS, v);
+            return true;
+
+        case CC_PUNCH_SWEEP_TIME:
+            macro_punch_time_scale =
+                powf(2.0f, (static_cast<float>(value) - 64.0f) / 32.0f);
+            return true;
+
+        case CC_TAIL_MOD:
+            macro_tail_mod_semitones =
+                ClampAdded((static_cast<float>(value) - 64.0f) / 63.0f, -1.0f, 1.0f) *
+                TAIL_MOD_RANGE_SEMITONES;
             return true;
 
 
@@ -9153,8 +9181,8 @@ static bool HandleSixMacroCC(
         {
             if(ENABLE_LEGACY_K5_CHARACTER_CONTROLS)
             {
-                if(macro_character_sherman)
-                    macro_sherman_amount = v;
+                if(macro_character_tube)
+                    macro_tube_amount = v;
                 else
                     macro_mackie_amount = v;
                 macro_character_wet = v;
@@ -9162,7 +9190,7 @@ static bool HandleSixMacroCC(
             return true;
         }
 
-        /* K5 button: Mackie <-> Sherman, press edge only. */
+        /* K5 button: Mackie <-> Tube, press edge only. */
         case CC_BUTTON_CHARACTER_LEGACY:
         {
             bool down = value >= 64;
@@ -9175,14 +9203,14 @@ static bool HandleSixMacroCC(
                  */
                 float live_amount = Clamp01Added(macro_character_wet);
 
-                macro_character_sherman = !macro_character_sherman;
+                macro_character_tube = !macro_character_tube;
 
-                if(macro_character_sherman)
-                    macro_sherman_amount = live_amount;
+                if(macro_character_tube)
+                    macro_tube_amount = live_amount;
                 else
                     macro_mackie_amount = live_amount;
 
-                character_switch_target_sherman = macro_character_sherman;
+                character_switch_target_tube = macro_character_tube;
                 character_switch_pending = true;
                 macro_character_wet = live_amount;
             }
@@ -9834,7 +9862,7 @@ static void AudioCallback(
     /* Slew the mix gains toward their CC targets; see their declarations. */
     param_line_gain    += (param_line_gain_target    - param_line_gain)    * PARAM_GAIN_SLEW;
     param_mackie_gain  += (param_mackie_gain_target  - param_mackie_gain)  * PARAM_GAIN_SLEW;
-    param_sherman_gain += (param_sherman_gain_target - param_sherman_gain) * PARAM_GAIN_SLEW;
+    param_tube_gain += (param_tube_gain_target - param_tube_gain) * PARAM_GAIN_SLEW;
     param_bpf_gain     += (param_bpf_gain_target     - param_bpf_gain)     * PARAM_GAIN_SLEW;
 
 
@@ -9897,7 +9925,7 @@ static void AudioCallback(
 
 
         /* ====================================================
-           WET: DISTORTION (MACKIE / SHERMAN + BPF)
+           WET: DISTORTION (MACKIE / TUBE + BPF)
            ====================================================
 
            As 3af0e35 had it. The send is the full-band punch + sub before
@@ -9957,7 +9985,7 @@ static void AudioCallback(
 
             /*
              * Amount-aware management begins around MID I and becomes
-             * increasingly assertive as Mackie/Sherman amount rises.
+             * increasingly assertive as Mackie/Tube amount rises.
              */
             wet =
                 character_dirty_bus_manager.Process(
@@ -10383,11 +10411,11 @@ int main(void)
     macro_pump_enabled = false;
 
     macro_mackie_amount = 0.0f;
-    macro_sherman_amount = 0.0f;
+    macro_tube_amount = 0.0f;
     macro_character_wet = 0.0f;
 
-    character_switch_target_sherman =
-        macro_character_sherman;
+    character_switch_target_tube =
+        macro_character_tube;
 
     character_switch_pending = false;
 

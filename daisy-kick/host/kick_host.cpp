@@ -9,9 +9,10 @@
  *   usage: kick_host <out.f32> [key=value ...]
  *
  *   bpm=185  hits=4  decay=<0..1>  sub=<0..1>  punch=<0..1>
- *   line=<0..1>  mackie=<0..1>  sherman=<0..1>  bpf=<0..1>
+ *   line=<0..1>  mackie=<0..1>  tube=<0..1>  bpf=<0..1>
  *   hpf=<0..1>   lpf=<0..1>     (DJ filter position; hpf enables itself)
- *   mackamt=<0..1>  shrmamt=<0..1> (K5 character amount, CC48 / CC49)
+ *   mackamt=<0..1>  tubeamt=<0..1> (K5 character amount, CC48 / CC49)
+ *   model=<0|1>                    (K5 model, CC50: 0 Mackie, 1 tube)
  *   taildelay=<0..1>               (K3, CC42; also enables it, CC43)
  *   tail=<ms of silence after the last hit>  vel=<1..127, default 100>
  */
@@ -176,7 +177,7 @@ int main(int argc, char** argv)
 
     maybe("line",    CC_MIX_LINE_GAIN);
     maybe("mackie",  CC_MIX_MACKIE_GAIN);
-    maybe("sherman", CC_MIX_SHERMAN_GAIN);
+    maybe("tube",    CC_MIX_TUBE_GAIN);
     maybe("bpf",     CC_MIX_BPF_GAIN);
     maybe("sub",     CC_MIX_SUB_GAIN);
     maybe("punch",   CC_MIX_PUNCH_GAIN);
@@ -188,7 +189,8 @@ int main(int argc, char** argv)
     maybe("taildelay", CC_TAIL_DELAY_ABSOLUTE);
     if(ArgOr(argc, argv, "taildelay", -1.0) >= 0.0)
         SendCC(MIDI_CHANNEL_KICK, CC_TAIL_DELAY_STATE, 127);
-    maybe("shrmamt", CC_SHERMAN_AMOUNT);
+    maybe("tubeamt", CC_TUBE_AMOUNT);
+    maybe("model",   CC_CHARACTER_MODEL);
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);

@@ -38,6 +38,11 @@ static bool tail_delay_enabled = false;
 static float macro_tail_delay = 0.0f;
 static float macro_decay = 0.34f;
 static float macro_kick_shape = 0.0f;
+/* v1.3.0 per-hit controls, as the firmware's CC60..63 leave them. */
+static float macro_tail_offset_ms = 0.0f;
+static float test_tail_attack_ms = 6.0f;
+static float test_sweep_time_scale = 1.0f;
+static float test_tail_mod_semitones = 0.0f;
 static float kick_frequency = 55.0f;
 #include "voice_extract.inc"
 
@@ -60,9 +65,9 @@ struct Biquad
  * silent (DECAY at minimum under the old anatomy) turns its own rounding
  * into a "click".
  */
-static double ClickDb(const vector<float>& y)
+static double ClickDb(const vector<float>& y, double fc = 1000.0)
 {
-    Biquad a(1000, 0.54119610), b(1000, 1.30656296);
+    Biquad a(fc, 0.54119610), b(fc, 1.30656296);
     double peak = KICK_SUB_LEVEL * 0.95, hf = 0;
     /* Renders may end mid-note; only the render itself is analysed. */
     for(float s : y) { peak = fmax(peak, fabs(s)); hf = fmax(hf, fabs(b.Process(a.Process(s)))); }
@@ -132,8 +137,16 @@ static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, 
                 slot = voice;
                 slot.BeginFadeOut(true);
             }
-            voice.Trigger(kick_frequency, macro_kick_shape, (uint8_t)hits[h].second, delay,
-                          MacroDecaySeconds(macro_decay), sounding);
+            KickHitParams hit;
+            hit.frequency = kick_frequency;
+            hit.punch = macro_kick_shape;
+            hit.velocity = (uint8_t)hits[h].second;
+            hit.delay_ms = delay;
+            hit.decay_seconds = MacroDecaySeconds(macro_decay);
+            hit.sub_attack_ms = test_tail_attack_ms;
+            hit.sweep_time_scale = test_sweep_time_scale;
+            hit.tail_mod_semitones = test_tail_mod_semitones;
+            voice.Trigger(hit, sounding);
             h++;
         }
         float bound = SlopeBound(voice, pg, sg) + 1e-5f;
@@ -215,7 +228,13 @@ int main(int argc, char** argv)
         vector<pair<int, int>> hits = {{100, vel}, {100 + SR / 3, vel}, {100 + SR / 3 + 1234, vel},
                                         {100 + SR / 3 + 1234 + 97, vel}, {100 + SR / 3 + 9000, vel},
                                         {100 + SR / 3 + 9000 + 2000, vel}};
-        double db = ClickDb(Run(hits, 2 * SR, 0.95f));
+        /*
+         * The click band starts at 1 kHz, or six times the highest pitch
+         * the sub reaches if that is higher: PITCH can take a 130 Hz note to
+         * 260 Hz, whose own onset reaches toward 1 kHz without clicking.
+         */
+        float top = fminf(SUB_MAX_FREQUENCY_HZ, note * powf(2.0f, fmaxf(0.0f, VelocityToSubMoveSemitones(vel)) / 12.0f));
+        double db = ClickDb(Run(hits, 2 * SR, 0.95f), fmax(1000.0, 6.0 * top));
         if(db > worst)
         {
             worst = db;
@@ -282,8 +301,12 @@ int main(int argc, char** argv)
         float shapes[] = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
         float gains[][2] = {{1.0f, 0.95f}, {2.0f, 1.6f}, {1.0f, 0.0f}, {0.0f, 1.6f}};
         float worst_ratio = 0; char worst_desc[160] = "";
+        struct Extra { float attack, scale, mod; };
+        const Extra extras[] = {{6, 1, 0}, {60, 0.25f, 24}, {6, 4, -24}, {30, 2, 12}};
         for(float sh : shapes) for(auto& g : gains) for(float dl : delays) for(float dc : decays) for(int vel : {1, 64, 127})
+        for(const Extra& ex : extras)
         {
+            test_tail_attack_ms = ex.attack; test_sweep_time_scale = ex.scale; test_tail_mod_semitones = ex.mod;
             macro_kick_shape = sh; kick_frequency = 55; macro_decay = dc; tail_delay_enabled = dl > 0; macro_tail_delay = dl;
             vector<pair<int, int>> hits = {{100, vel}, {100 + SR / 3, vel}, {100 + SR / 3 + 1234, vel},
                                             {100 + SR / 3 + 1234 + 97, vel}, {100 + SR / 3 + 9000, vel},
@@ -292,9 +315,11 @@ int main(int argc, char** argv)
             if(r.worst_step_ratio > worst_ratio)
             {
                 worst_ratio = r.worst_step_ratio;
-                snprintf(worst_desc, sizeof worst_desc, "shape %.2f punch %.1f sub %.1f delay %.2f decay %.2f vel %d", sh, g[0], g[1], dl, dc, vel);
+                snprintf(worst_desc, sizeof worst_desc, "shape %.2f punch %.1f sub %.1f delay %.2f decay %.2f vel %d attack %.0f scale %.2f mod %.0f",
+                         sh, g[0], g[1], dl, dc, vel, ex.attack, ex.scale, ex.mod);
             }
         }
+        test_tail_attack_ms = 6; test_sweep_time_scale = 1; test_tail_mod_semitones = 0;
         printf("punch on: worst sample step over the smooth-sine bound %.3f (%s)\n", worst_ratio, worst_desc);
         Expect(worst_ratio <= 1.0f, "with the punch on, no hit or ratchet steps the waveform");
 
@@ -312,6 +337,29 @@ int main(int argc, char** argv)
         Expect(diff <= 1e-6f, "with the punch on at DECAY INF, a retriggered hit matches a fresh one after the handoff");
         Expect(fresh[0] == 0.0f, "a punched hit starts at exactly zero");
         macro_kick_shape = 0.0f;
+    }
+
+    /* ---------------- v1.3.0 controls ---------------- */
+    {
+        KickHitParams hit;
+        hit.frequency = 55; hit.velocity = 1; hit.decay_seconds = 1.0f; hit.tail_mod_semitones = 24.0f;
+        KickVoice v; v.Trigger(hit, false);
+        uint32_t glide = MsToSamples(SUB_MOVE_GLIDE_MS);
+        float f_glide = v.BaseFrequency(glide), f_end = v.BaseFrequency(glide + v.mod_samples);
+        printf("PITCH 1 + TAIL MOD +24: %.1f Hz -> %.1f Hz after the glide -> %.1f Hz at the end\n", 55.0f, f_glide, f_end);
+        Expect(fabsf(f_glide - 27.5f) < 0.1f && fabsf(f_end - 110.0f) < 0.2f, "PITCH down then TAIL MOD up is a down-then-up kick");
+
+        KickVoice a, b; KickHitParams h1; h1.punch = 0.5f; KickHitParams h2 = h1; h2.sweep_time_scale = 2.0f;
+        a.Trigger(h1, false); b.Trigger(h2, false);
+        Expect(b.anatomy_end == 2 * a.anatomy_end || b.anatomy_end == 2 * a.anatomy_end + 1,
+               "SWEEP TIME 2x doubles the punch window");
+        Expect(fabsf(logf(b.sweep_coefficient) * 2.0f - logf(a.sweep_coefficient)) < 1e-6f,
+               "SWEEP TIME 2x halves the sweep's decay rate");
+
+        KickVoice c; KickHitParams h3; h3.sub_attack_ms = 1.0f; c.Trigger(h3, false);
+        KickVoice d; KickHitParams h4; h4.sub_attack_ms = 500.0f; d.Trigger(h4, false);
+        Expect(c.sub_attack_samples == MsToSamples(TAIL_ATTACK_MIN_MS) && d.sub_attack_samples == MsToSamples(TAIL_ATTACK_MAX_MS),
+               "TAIL ATTACK is held to 6..60 ms");
     }
 
     /* Determinism. */

@@ -17,7 +17,7 @@ Read it back with `numpy.fromfile(path, dtype=numpy.float32)` at 48 kHz mono.
 ## Arguments
 
 `bpm` `hits` `gate` (ms) `tail` (ms of silence after the last hit), and the
-mix CCs as 0..1: `line` `mackie` `sherman` `bpf` `sub` `punch` `decay`.
+mix CCs as 0..1: `line` `mackie` `tube` `bpf` `sub` `punch` `decay`; also `mackamt` `tubeamt` `model` `taildelay` `vel`, and `shape` `hpf` `lpf`.
 
 **Only CCs named on the command line are sent**; anything omitted keeps the
 firmware's power-on default. `line` is the master output level, not a mix
