@@ -65,7 +65,7 @@ int main(int argc, char** argv){
     // The WAVE icon across its range, as screen 1 shows it.
     FakeOled d;
     const uint8_t waves[] = {0, 32, 64, 96, 127};
-    for (int i = 0; i < 5; i++) drawWaveIcon(d, 2 + i * 25, 28, 22, 9, waves[i], 1);
+    for (int i = 0; i < 5; i++) drawWaveIcon(d, 2 + i * 25, 28, 24, 9, waves[i], 1);
     char path[512]; snprintf(path, sizeof(path), "%s/wave_icons.pbm", dir); d.save(path);
     printf("%s\n", path);
   }

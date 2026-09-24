@@ -16,7 +16,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 **The kick has been rebuilt from scratch, and the click is gone.** It is now a single sine whose pitch sweep (the punch) and bass tone (the sub) are two envelopes on the same oscillator, so they can no longer beat against each other. A hit that lands while the last one is still ringing picks up exactly where the old sine is and glides onto the new hit, instead of cutting it off.
 
 **Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
-- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that changes shape as you turn it. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics
+- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics
 - **SWEEP** clicks into place at 1.00x on the way past, and **FUNCTION + pot 3** snaps it straight back there
 - **SWEEP** (pot 3) sets how long the punch sweep takes, from a quarter to four times SHAPE's own length. SHAPE still sets how deep it goes
 - **TMOD** (pot 5) is a wobble macro for the tail: turning it up makes the pitch move deeper (up to two semitones either way), faster and more irregular. Its button switches it off. Record it under FUNCTION like any Notes-page knob and it changes per step
@@ -28,7 +28,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 **One distortion dial.** On the mix page, **DIST** (pot 2) sets the Mackie and Tube levels together.
 
-**K5 keeps the good part of the drive.** The first half of K5 is the base drive you liked, stretched out and much louder; the old upper settings, which squashed and dulled it, are gone. The second half holds the drive and sharpens the filter bank instead. The filter bank now sits entirely before the distortion, feeding it, so it is heard through Mackie or Tube rather than on its own.
+**K5 no longer dulls as you turn it up.** The compressor that took over the distortion from about a quarter of the way up (and flattened MID I–III) is gone; the drive curve and filter bank are otherwise as before.
 
 **Tube replaces Sherman.** K5's second distortion is now a two-stage tube preamp: it compresses and sags on loud hits, adds warmth underneath, and rolls off gently at the top. It sits at the same level Sherman did, on the same knob, button and mixer slot.
 

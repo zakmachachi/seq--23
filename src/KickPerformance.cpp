@@ -476,10 +476,12 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
     int w = (RIGHT-LEFT-2)*v/127;
     if (w) d.fillRect(LEFT+1,GRAPH_TOP+5,w,8,SH110X_WHITE);
     if (p == MACKIE || p == TUBE){
-      // v1.3.0: drive below the mark, BPF Q above it.
-      int px = LEFT+(RIGHT-LEFT)/2;
-      d.drawFastVLine(px,GRAPH_TOP+2,14,SH110X_WHITE);
-      d.drawFastVLine(px,GRAPH_TOP+5,8,SH110X_BLACK);
+      const uint8_t marks[] = {25,48,73};
+      for (uint8_t m : marks){
+        int px = LEFT+(RIGHT-LEFT)*m/100;
+        d.drawFastVLine(px,GRAPH_TOP+2,14,SH110X_WHITE);
+        d.drawFastVLine(px,GRAPH_TOP+5,8,SH110X_BLACK);
+      }
     }
     return;
   }
@@ -548,11 +550,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   } else if (p <= BPF3) snprintf(footer,sizeof(footer),"85Hz ------ 3.2kHz");
   else if (p == MACKIE || p == TUBE){
     unsigned pct = percent(v);
-    // Must track K5BaseAmount / K5QBoost on the Daisy: the first half is the
-    // base drive, the second half raises the BPF's Q (up to 4x).
-    if (v == 0) snprintf(extra,sizeof(extra),"DRY");
-    else if (pct <= 50) snprintf(extra,sizeof(extra),"DRIVE %u%%",pct*2);
-    else snprintf(extra,sizeof(extra),"DRIVE MAX  BPF Q x%.1f",1.f + 3.f*(pct-50)/50.f);
+    snprintf(extra,sizeof(extra),"%s",v == 0 ? "DRY" : pct <= 25 ? "BASE DRIVE" : pct <= 48 ? "MID I" : pct < 73 ? "MID II" : "MID III");
     snprintf(footer,sizeof(footer),"%s %u%%",p == MACKIE ? "TUBE" : "MACKIE",percent(p == MACKIE ? state_.tubeAmount : state_.mackieAmount));
   } else {
     float ratio,seconds; shapeValues(v,ratio,seconds);

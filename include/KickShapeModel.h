@@ -121,21 +121,24 @@ inline float kickShapeDisplaySt(float st){
   return st;
 }
 
-// WAVE as a picture: two cycles of the sine morphing towards a saw, w x h
-// pixels at (x, y). Mirrors the Daisy's "sine + saw harmonics" blend.
+// WAVE as a picture, w x h pixels at (x, y), in the style of the Elektron
+// Digitone 2 / Digitakt 2 wave displays: the waveform itself bends rather than
+// two shapes blending. Phase distortion (the Casio CZ sine-to-saw trick): the
+// rising half of the cycle is stretched and the fall squeezed, so the sine
+// leans over and sharpens into a saw with a vertical drop. A visual indicator
+// only; the knee moves on a square-root curve so small settings show clearly.
 template <class D>
 void drawWaveIcon(D& d, int x, int y, int w, int h, uint8_t wave, uint16_t white){
-  float m = wave / 127.f;
+  float m = sqrtf(wave / 127.f);
+  float knee = .5f + .47f * m;           // where the peak sits in the cycle
   int prev = -1;
   for (int i = 0; i < w; i++){
-    float p = 2.f * i / (w - 1);                        // two cycles
-    float ph = p - floorf(p);
-    float sine = sinf(ph * 6.2831853f);
-    float q = ph + .5f; q -= floorf(q);
-    float saw = 2.f * q - 1.f;                          // rising, in phase
-    float harmonics = saw * 1.5707963f - sine;          // saw minus its fundamental
-    float v = sine + harmonics * m;                     // peak ~1 .. ~1.57
-    int yy = y + h / 2 - (int)lroundf(v / 1.6f * (h / 2));
+    float ph = (float)i / (w - 1);       // one cycle
+    float warped =
+      ph < knee ? .5f * ph / knee
+                : .5f + .5f * (ph - knee) / (1.f - knee);
+    float v = -cosf(warped * 6.2831853f);  // -1 at the ends, +1 at the knee
+    int yy = y + (int)lroundf((1.f - v) * .5f * (h - 1));
     if (prev >= 0) d.drawLine(x + i - 1, prev, x + i, yy, white);
     prev = yy;
   }
@@ -155,7 +158,7 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
   // Header: the kick channel's Menu 1 knobs, in pot order, in fixed
   // six-character columns so they never run into each other.
   char text[12];
-  drawWaveIcon(d, 0, 0, 36, 8, in.wave, white);
+  drawWaveIcon(d, 2, 0, 24, 9, in.wave, white);
   snprintf(text, sizeof(text), "SWP%.1f", powf(2.f, ((int)in.sweepTime - 64) / 32.f));
   d.setCursor(46, 0); d.print(text);
   snprintf(text, sizeof(text), "TMD%3d", (int)(in.tailMod * 100 + 63) / 127);

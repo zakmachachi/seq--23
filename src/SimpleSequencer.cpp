@@ -4431,7 +4431,7 @@ void SimpleSequencer::drawNotesView(){
   display.setCursor(colX[0], valY1);
   display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
   display.setCursor(colX[1], valY1);
-  if (kick) drawWaveIcon(display, colX[1], valY1 - 1, 38, 9, kickWave[ch], SH110X_WHITE);
+  if (kick) drawWaveIcon(display, colX[1], valY1 - 1, 24, 9, kickWave[ch], SH110X_WHITE);
   else display.print(scaleNames[sm]);
   display.setCursor(colX[2], valY1);
   if (kick){

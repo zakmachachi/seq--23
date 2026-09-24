@@ -12,7 +12,7 @@ All performance CCs use MIDI **channel 15** (status `0xBE`).
 | K2 / B2 | DECAY 40 | REVERSE 41: 0 / 127 |
 | K3 / B3 | TAIL DELAY 42 | TAIL ENABLE 43: 0 / 127 |
 | K4 / B4 | BPF1 44, BPF2 45, BPF3 46 | Layer count 47: 0 / 42 / 85 / 127 |
-| K5 / B5 | MACKIE 48 or TUBE 49, independently remembered. 0–50 %: drive (the old base drive, extended and louder); 50–100 %: drive held, BPF Q rises to 4x | MODEL 50: 0 / 127 (Mackie / Tube) |
+| K5 / B5 | MACKIE 48 or TUBE 49, independently remembered (the dirty-bus compressor no longer engages) | MODEL 50: 0 / 127 (Mackie / Tube) |
 | K6 / B6 | SHAPE 51 | PUMP ENABLE 52: 0 / 127 |
 
 BPF count 0 stages L1; counts 1, 2, 3 edit L1, L2, L3 respectively. Changing count sends no frequency. Changing character model sends no amount. Pump and tail enable buttons retain their amounts. REV is a plain 0..127 amount displayed as a percentage, OFF at zero. B1's reset preserves pump amount/enable and all K2–K6 state. Its OLED2 overlay lasts 700 ms.
