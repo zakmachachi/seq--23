@@ -3220,20 +3220,29 @@ static inline float OutputCeiling(float x)
 
 
 /*
- * OUTPUT HIGH-PASS: 2nd-order Butterworth at 25 Hz, the last filter on both
- * outputs, just before the kick's ceiling and the external lane's clamp.
- * Nothing below 25 Hz is heard, but DC and sub-sonic energy (a PITCH glide
- * an octave under a low note, the models' offsets) still take headroom.
- * -0.2 dB at 55 Hz.
+ * SUB-SONIC HIGH-PASS: 2nd-order Butterworth at 25 Hz, -0.2 dB at 55 Hz. On
+ * the external input, before anything there saturates.
  *
- * On the whole output rather than one lane, so its phase shift is common to
- * everything and nothing can cancel. A TPT state-variable filter, which stays
- * accurate this close to DC in float, where a direct-form biquad does not.
- * Never reset on a trigger.
+ * NOT on the kick, where every placement changed the sound and none bought
+ * headroom (peaks the same or higher; below 25 Hz is ~0.1 % of the energy).
+ * Measured with the host harness at Mackie 87 %, DIST / SUB / PUNCH 100 %:
+ *   - after the Mackie, before the ceiling: it tilts the saturated wave's
+ *     flat tops back into spikes, +1.4 dB of peak and 2-3 dB more ceiling
+ *     distortion, heard as hard clipping above LINE 33 %
+ *   - on the dry lane and the model sends: clipping as before, but the
+ *     Mackie bites differently on the kick's lopsided first lobe (itself
+ *     sub-sonic energy): punch 1-16 kHz -1 dB at Mackie 87 %, -2..-5 dB at 35 %
+ *   - on the dry lane alone: dry and return fall out of phase and the
+ *     ceiling distortion changes again
+ * KICK_SUBSONIC_HPF puts it on the dry lane and the sends, for an A/B.
+ *
+ * A TPT state-variable filter, which stays accurate this close to DC in
+ * float, where a direct-form biquad does not. Never reset on a trigger.
  */
-static constexpr float OUTPUT_HPF_HZ = 25.0f;
+static constexpr float SUBSONIC_HPF_HZ = 25.0f;
+static constexpr bool KICK_SUBSONIC_HPF = false;
 
-struct OutputHighpass
+struct SubsonicHighpass
 {
     float g = 0.0f;
     float k = 0.0f;
@@ -3245,7 +3254,7 @@ struct OutputHighpass
 
     void Reset()
     {
-        g = tanf(PI * OUTPUT_HPF_HZ / SAMPLE_RATE);
+        g = tanf(PI * SUBSONIC_HPF_HZ / SAMPLE_RATE);
         k = 1.41421356f;   /* 1 / Q, Q = 0.7071 */
         a1 = 1.0f / (1.0f + g * (g + k));
 
@@ -3266,8 +3275,10 @@ struct OutputHighpass
     }
 };
 
-static OutputHighpass kick_output_hpf;
-static OutputHighpass external_output_hpf;
+static SubsonicHighpass kick_dry_hpf;
+static SubsonicHighpass kick_send_hpf;
+static SubsonicHighpass kick_bpf_punch_hpf;
+static SubsonicHighpass external_input_hpf;
 
 
 /* ============================================================
@@ -10324,6 +10335,15 @@ static void AudioCallback(
             voices.sub * kick_sub_gain_smoothed;
 
 
+        /* Off; see SUBSONIC_HPF_HZ. Before anything saturates. */
+        if(KICK_SUBSONIC_HPF)
+        {
+            dry = kick_dry_hpf.Process(dry);
+            voices.send = kick_send_hpf.Process(voices.send);
+            voices.bpf_punch = kick_bpf_punch_hpf.Process(voices.bpf_punch);
+        }
+
+
         /* ====================================================
            WET: DISTORTION (MACKIE / TUBE + BPF)
            ====================================================
@@ -10627,13 +10647,6 @@ static void AudioCallback(
         }
 
 
-        /* OUTPUT HIGH-PASS: see OUTPUT_HPF_HZ. */
-        kick_output =
-            kick_output_hpf.Process(
-                kick_output
-            );
-
-
         kick_output =
             OutputCeiling(
                 kick_output
@@ -10671,6 +10684,13 @@ static void AudioCallback(
             EXTERNAL_INPUT_2_GAIN;
 
 
+        /* Before anything saturates; see SUBSONIC_HPF_HZ. */
+        external_output =
+            external_input_hpf.Process(
+                external_output
+            );
+
+
         external_output =
             added_performance_fx.ProcessExternal(
                 external_output
@@ -10680,13 +10700,6 @@ static void AudioCallback(
         external_output *=
             EXTERNAL_RETURN_GAIN *
             EXTERNAL_OUTPUT_LINEAR_GAIN;
-
-
-        /* OUTPUT HIGH-PASS: see OUTPUT_HPF_HZ. */
-        external_output =
-            external_output_hpf.Process(
-                external_output
-            );
 
 
         /*
@@ -10751,8 +10764,10 @@ static void ResetAudioDspState()
 
     kick_onset_level = 1.0f;
 
-    kick_output_hpf.Reset();
-    external_output_hpf.Reset();
+    kick_dry_hpf.Reset();
+    kick_send_hpf.Reset();
+    kick_bpf_punch_hpf.Reset();
+    external_input_hpf.Reset();
 
     added_performance_fx.Reset();
     added_kick_master_envelope.Reset();

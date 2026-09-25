@@ -37,7 +37,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
-- Both outputs end in a 25 Hz high-pass, so DC and sub-sonic energy no longer take headroom (-0.2 dB at 55 Hz; a tail PITCH-glided below 25 Hz is cut)
+- The Digitakt return gets a 25 Hz high-pass at its input. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
 
 **Fixed**
 - A loud click whenever the kick's HPF was engaged: at the start of every hit it switched back to the unfiltered kick in a single sample
