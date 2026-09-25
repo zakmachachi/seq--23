@@ -1785,22 +1785,22 @@ static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
  *                matter how small the detune, which is what ate the bass. So
  *                each saw's own fundamental is subtracted exactly, leaving its
  *                harmonics, and those are added on top of the sine, which
- *                stays the fundamental: the bass cannot drift, phase or cancel,
- *                while the upper partials still shimmer (harmonic k of a saw
- *                offset by d Hz beats at k * d Hz, as a real supersaw's do).
- *   detune in Hz the offsets drift at a fixed rate in Hz, not a ratio, so a
- *                3 kHz punch sweep does not turn it into a fast flutter, and
- *                from zero at every hit, so the phasing is the same each time.
+ *                stays the fundamental: the bass cannot drift, phase or cancel.
+ *   spread       fixed phase offsets rather than detune, so nothing moves;
+ *                see WAVE_SAW_SPREAD.
  *
  * On a retrigger each saw's offset glides back to zero over the handoff.
  */
 static constexpr int WAVE_SAWS = 5;
 /*
- * Detune in Hz. The drift is the supersaw's phasing, wanted, and it is
- * deterministic: every offset is (detune x time since the hit), starting from
- * zero with the oscillator's phase-0 reset, so each kick phases identically.
+ * No detune: any detune drifts the saws against each other over the kick,
+ * and that drift is heard as phasing, even when every kick drifts the same
+ * way (tried in 962bafc, rejected on the hardware: Hz detune of +-0.8 / 1.6
+ * swung the 100-700 Hz band 2.3 dB over a tail). The five saws are spread by
+ * FIXED phase offsets, set at every hit: they still stack into a thicker
+ * "super" waveform, but it is phase-locked to the oscillator and never moves.
  */
-static constexpr float WAVE_SAW_DETUNE_HZ[WAVE_SAWS] = {-1.6f, -0.8f, 0.0f, 0.8f, 1.6f};
+static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.06f, -0.03f, 0.0f, 0.03f, 0.06f};
 static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
 static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
 /* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
@@ -1812,8 +1812,21 @@ static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
  */
 static constexpr float WAVE_SAW_RELOCK_MS = 5.0f;
 
-/* At full WAVE the richer tail masks the punch; the punch gains up to this. */
-static constexpr float WAVE_PUNCH_BOOST = 0.6f;             /* x1.6, +4 dB */
+/*
+ * The punch keeps most of the clean sine sweep: with the saw's harmonics on
+ * it too, the transient smeared into the buzz and got lost at full WAVE. The
+ * supersaw lives in the body, which fades in as the punch hands over. The
+ * punch then gains up to WAVE_PUNCH_BOOST against the brighter body.
+ */
+static constexpr float WAVE_PUNCH_HARMONICS = 0.25f;
+static constexpr float WAVE_PUNCH_BOOST = 2.0f;             /* x3, +9.5 dB */
+/*
+ * A choked kick drops its saw harmonics over this, faster than its sine's
+ * KICK_CHOKE_MS: the old kick's bright tail no longer lands on the new
+ * attack (it differed hit to hit by -15.5 dB in the first 25 ms; the sine's
+ * own overlap is -28 dB). Only high partials fade here, so no thump.
+ */
+static constexpr float WAVE_CHOKE_MS = 3.0f;
 
 /* The offsets move slowly, so their sin/cos are refreshed every 16 samples. */
 static constexpr uint32_t WAVE_OFFSET_REFRESH = 16;
@@ -2373,10 +2386,10 @@ struct KickVoice
             /* Fresh: the saws start locked to the oscillator. */
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                saw_offset[i] = 0.0f;
-                saw_offset_start[i] = 0.0f;
-                saw_offset_sin[i] = 0.0f;
-                saw_offset_cos[i] = 1.0f;
+                saw_offset[i] = WAVE_SAW_SPREAD[i];
+                saw_offset_start[i] = WAVE_SAW_SPREAD[i];
+                saw_offset_sin[i] = sinf(WAVE_SAW_SPREAD[i] * TWO_PI);
+                saw_offset_cos[i] = cosf(WAVE_SAW_SPREAD[i] * TWO_PI);
             }
 
 
@@ -2670,6 +2683,7 @@ struct KickVoice
          */
         float wave = sine;
         float carried_wave = sine;
+        float punch_wave = sine;
 
         if(wave_morph > 0.0f || (handoff && carried_morph > 0.0f))
         {
@@ -2681,7 +2695,6 @@ struct KickVoice
                              static_cast<float>(MsToSamples(WAVE_SAW_RELOCK_MS)))
                 : 0.0f;
 
-            float seconds = static_cast<float>(age) / SAMPLE_RATE;
             float dt = fminf(increment, 0.45f);
             bool refresh = (age % WAVE_OFFSET_REFRESH) == 0 || handoff;
 
@@ -2690,10 +2703,10 @@ struct KickVoice
 
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                /* Drift from the hit; a handoff glides from the old offsets. */
+                /* The fixed spread; a handoff glides from the old offsets. */
                 saw_offset[i] =
                     saw_offset_start[i] * glide +
-                    WAVE_SAW_DETUNE_HZ[i] * seconds;
+                    WAVE_SAW_SPREAD[i] * (1.0f - glide);
 
                 if(refresh)
                 {
@@ -2717,14 +2730,23 @@ struct KickVoice
 
             harmonics *= WAVE_HARMONICS_SCALE / WAVE_SAW_WEIGHT_SUM;
 
+            if(fading && !fading_punch_only)
+                harmonics *=
+                    1.0f -
+                    SmoothstepAdded(fminf(
+                        1.0f,
+                        static_cast<float>(fade_age) /
+                        static_cast<float>(MsToSamples(WAVE_CHOKE_MS))));
+
             /* The sine stays the fundamental; WAVE adds the saw harmonics. */
             wave = sine + harmonics * wave_morph;
             carried_wave = sine + harmonics * carried_morph;
+            punch_wave = sine + harmonics * wave_morph * WAVE_PUNCH_HARMONICS;
         }
 
         /* The punch filters run from its first sample so their state is real. */
         float punch_out =
-            ShapePunch(wave) * punch_level * gap_level *
+            ShapePunch(punch_wave) * punch_level * gap_level *
             (1.0f + WAVE_PUNCH_BOOST * wave_morph);
         float sub_out = wave * sub_level * gap_level;
         float carried_out = carried_wave * carried_level * gap_level;
