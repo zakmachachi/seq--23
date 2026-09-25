@@ -437,6 +437,29 @@ int main(int argc, char** argv)
             printf("supersaw fundamental vs the sine's: %.2f .. %.2f over the hit\n", lo_saw, hi_saw);
             Expect(lo_saw > 0.89, "the supersaw keeps the sine's bass (fundamental within 1 dB or more)");
             Expect(hi_saw / lo_saw < 1.12, "the supersaw's fundamental does not phase over the hit (< 1 dB swing)");
+            /*
+             * Phasing: the level of the 100-700 Hz and 700-3000 Hz bands in
+             * windows of exactly two cycles, over a held tail. A steady wave
+             * gives equal windows; phasing shows as a swing. (Windows that
+             * are not whole cycles make a saw's edges look like a swing.)
+             */
+            auto band_swing = [&](const vector<float>& y, double lo, double hi){
+                Biquad a(lo, 0.54119610), b(lo, 1.30656296);
+                vector<double> x(y.size());
+                for(size_t n = 0; n < y.size(); n++) x[n] = b.Process(a.Process(y[n]));
+                int w = (int)(48000.0 / hi); double acc = 0; vector<double> band(x.size());
+                for(size_t n = 0; n < x.size(); n++){ acc += x[n]; if((int)n >= w) acc -= x[n - w]; band[n] = x[n] - acc / w; }
+                const int W = (int)lround(2.0 * 48000.0 / 55.0);
+                double lo_db = 1e9, hi_db = -1e9;
+                for(int s0 = SR / 10; s0 + W <= (int)y.size(); s0 += W){
+                    double e = 0; for(int n = s0; n < s0 + W; n++) e += band[n] * band[n];
+                    double db = 10 * log10(e / W + 1e-20); lo_db = fmin(lo_db, db); hi_db = fmax(hi_db, db);
+                }
+                return hi_db - lo_db;
+            };
+            double low_swing = band_swing(saw1, 100, 700), mid_swing = band_swing(saw1, 700, 3000);
+            printf("supersaw band swing over a held tail: 100-700 Hz %.2f dB, 700-3000 Hz %.2f dB\n", low_swing, mid_swing);
+            Expect(low_swing < 0.3 && mid_swing < 0.3, "the supersaw does not phase (no band swings over the tail)");
             Expect(hf_saw > hf_sine + 30.0, "the supersaw adds the harmonics a sine does not have");
             /* Morph changed between two hits of a sounding kick: no step at the seam. */
             vector<float> seam = render(1, SR / 2, {{0, 0.0f}, {SR / 4, 1.0f}});
