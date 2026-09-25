@@ -1794,8 +1794,9 @@ static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
  * tail every harmonic swept through 20-34 dB nulls, a flanger on the sub, and
  * through Mackie / Tube it beat against the sub's distortion harmonics, which
  * are locked to it. Bounded, harmonic k moves by at most 2 pi k x spread
- * radians: the body (to ~harmonic 16, 900 Hz at 55 Hz) stays within 1-2 dB,
- * as the sine's own distortion harmonics do, and only the top shimmers.
+ * radians: the body stays put against the sub, as a static saw's does, and
+ * only the top shimmers. test/daisy_kick_phasing checks it across LINE,
+ * DECAY, the models, SHAPE, PITCH, TAIL MOD, notes and BPF layers.
  *
  * On a retrigger each saw's offset glides from where it was onto the new
  * hit's wobble over the handoff.
@@ -1805,8 +1806,13 @@ static constexpr int WAVE_SAWS = 5;
  * Each saw's largest offset from the oscillator, in cycles; the middle one is
  * the anchor. The own-fundamental series in Process() needs offsets well
  * under 0.05 cycles.
+ *
+ * A hard-driven model folds the top's movement down into the body, so the
+ * spread is set by test/daisy_kick_phasing: band swing over a static saw at
+ * Mackie 87 %, DIST / SUB / PUNCH 100 %, DECAY INF, LINE 33 %, harmonics
+ * 7-16, was 1.6 dB at twice this spread, 0.5 dB here.
  */
-static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.012f, -0.008f, 0.0f, 0.008f, 0.012f};
+static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.006f, -0.004f, 0.0f, 0.004f, 0.006f};
 /* Unrelated rates, so the top shimmers instead of sweeping as one. */
 static constexpr float WAVE_SAW_RATE_HZ[WAVE_SAWS] = {4.3f, 6.1f, 0.0f, 7.3f, 5.2f};
 static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
@@ -1828,6 +1834,18 @@ static constexpr float WAVE_PUNCH_BOOST = 2.0f;             /* x3, +9.5 dB */
  * harmonics stand to the sine as a real saw's do to its own fundamental.
  */
 static constexpr float WAVE_HARMONICS_SCALE = 1.0f / WAVE_SAW_FUNDAMENTAL;
+/*
+ * The harmonics, not the sine, go through a one-pole high-pass at 250 Hz, a
+ * sine sub under a high-passed supersaw: harmonic 2 of a 55 Hz tail -8 dB,
+ * harmonic 4 -4 dB, 500 Hz up nearly untouched. Locked, the saw's low
+ * harmonics sat at full level through the whole tail, right in the band the
+ * SHAPE sweep lives in, and pushed the ceiling into the sub. At Mackie 87 %,
+ * DECAY INF, LINE 33 %, punch over tail went 80-300 Hz +6.6 -> +8.8 dB,
+ * 1-4 kHz +4.8 -> +6.7, 4-16 kHz +4.1 -> +6.5 (a sine: +9.9 / +5.4 / +7.4),
+ * and the tail's 30-80 Hz -5.6 -> -4.9 dB (a sine: -4.6).
+ * 1 - expf(-2 pi 250 / 48000).
+ */
+static constexpr float WAVE_BODY_HP_A = 0.032195f;
 
 static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
 
@@ -2023,6 +2041,7 @@ struct KickVoice
 
     float wave_morph = 0.0f;
     float carried_morph = 0.0f;
+    float harmonics_lp = 0.0f;   /* WAVE_BODY_HP_A's state */
 
     /*
      * TAIL DELAY as an envelope over the whole voice: full through the punch,
@@ -2361,6 +2380,13 @@ struct KickVoice
         /* Every hit, fresh or handed off, starts the saws' wobble over. */
         for(int i = 0; i < WAVE_SAWS; i++)
             saw_wobble_phase[i] = 0.0f;
+
+        /*
+         * The body high-pass carries on through a handoff, where the
+         * harmonics carry on too; it starts empty wherever they start.
+         */
+        if(!hand_off || old_level <= KICK_VOICE_SILENT || old_morph <= 0.0f)
+            harmonics_lp = 0.0f;
 
         if(!hand_off || old_level <= KICK_VOICE_SILENT)
         {
@@ -2708,6 +2734,10 @@ struct KickVoice
             }
 
             harmonics *= WAVE_HARMONICS_SCALE / WAVE_SAW_WEIGHT_SUM;
+
+            /* Out of the sub's and the punch's way; see WAVE_BODY_HP_A. */
+            harmonics_lp += WAVE_BODY_HP_A * (harmonics - harmonics_lp);
+            harmonics -= harmonics_lp;
 
             /* The sine stays the fundamental; WAVE adds the saw harmonics. */
             wave = sine + harmonics * wave_morph;

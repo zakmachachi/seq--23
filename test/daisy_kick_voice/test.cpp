@@ -442,8 +442,9 @@ int main(int argc, char** argv)
              * its level, as a sine's distortion harmonics do. Windows of
              * exactly 11 cycles (9600 samples at 55 Hz) make each harmonic's
              * DFT bin leakage-free. Saws detuned in Hz swept these through
-             * ~30 dB nulls. The top is allowed to shimmer; it must still move,
-             * or the spread has been lost.
+             * ~30 dB nulls. The top is allowed to shimmer; it must still move
+             * (a static saw reads ~0.05 dB here), or the spread has been lost.
+             * test/daisy_kick_phasing checks the whole chain.
              */
             {
                 vector<float> held = render(1, SR * 2, {{0, 1.0f}});
@@ -463,7 +464,7 @@ int main(int argc, char** argv)
                 for(int k = 40; k <= 48; k++) top = fmax(top, swing_db(k));
                 printf("supersaw over a held tail: body harmonics 2-8 swing %.2f dB, top 40-48 %.1f dB\n", body, top);
                 Expect(body < 1.0, "the supersaw's body harmonics stay locked to the sub (< 1 dB swing)");
-                Expect(top > 3.0, "the supersaw's top still shimmers");
+                Expect(top > 0.3, "the supersaw's top still shimmers");
             }
             /*
              * Deterministic: a hit landing on a still-sounding kick must play
@@ -474,7 +475,8 @@ int main(int argc, char** argv)
                 vector<float> fresh = render(1, SR, {{0, 1.0f}});
                 vector<float> again = render(1, SR / 3 + SR, {{0, 1.0f}, {SR / 3, 1.0f}});
                 float diff = 0;
-                for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++)
+                /* The body high-pass (~0.6 ms) forgets the handoff 5 ms on. */
+                for(int n = MsToSamples(RETRIGGER_HANDOFF_MS + 5.0f); n < SR; n++)
                     diff = fmaxf(diff, fabsf(fresh[n] - again[SR / 3 + n]));
                 printf("supersaw: a retriggered hit vs a fresh one after the handoff: max diff %g\n", diff);
                 Expect(diff <= 1e-5f, "a retriggered supersaw hit matches a fresh one after the handoff");
