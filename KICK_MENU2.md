@@ -25,7 +25,7 @@ One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=
 
 ## Tail delay and the mix page (v1.3.0)
 
-TAIL DELAY is an envelope over the whole kick: full level through the punch, then (when enabled) the whole voice drops out over 6 ms and comes back at the tail delay time, rising over TAIL ATTACK. A delay shorter than the punch leaves no gap. The mix page (FUNCTION + MENU2) holds TAIL ATTACK on pot 3 (CC61, 6–60 ms), where the Tube gain was, and DIST on pot 2 sets both distortion gains at once: Mackie CC54 at the dial's value and Tube CC55 at 80/65 of it, the ratio their separate defaults had.
+TAIL DELAY is an envelope over the whole kick: full level through the punch, then (when enabled) the whole voice drops out over 10 ms and comes back at the tail delay time, rising over TAIL ATTACK. A delay shorter than the punch leaves no gap. The mix page (FUNCTION + MENU2) holds TAIL ATTACK on pot 3 (CC61, 8–60 ms), where the Tube gain was, and DIST on pot 2 sets both distortion gains at once: Mackie CC54 at the dial's value and Tube CC55 at 80/65 of it, the ratio their separate defaults had.
 
 Three per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 2 is WAVE (CC64, sine to supersaw), pot 3 is SWEEP (CC62, the punch sweep time, 0.25x–4x SHAPE's own) and pot 5 is TMOD (CC63, a wobble macro: 0 off, rising to ±2 semitones at up to 12 Hz and increasingly irregular); pot 6's velocity is shown as PITCH, in semitones. The CCs are sent from the step engine just before each kick note, only when they change.
 

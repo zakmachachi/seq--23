@@ -857,7 +857,7 @@ static volatile float macro_kick_shape = 0.50f;
 
 
 /* CC60..63; see their declarations. Defaults are the pre-v1.3.0 kick. */
-static volatile float macro_tail_attack_ms = 6.0f;
+static volatile float macro_tail_attack_ms = 8.0f;  /* TAIL_ATTACK_MIN_MS */
 static volatile float macro_punch_time_scale = 1.0f;
 static volatile float macro_tail_mod = 0.0f;  /* 0..1 intensity */
 static volatile float macro_wave = 0.0f;
@@ -1748,7 +1748,12 @@ static constexpr float PUNCH_ATTACK_MS = 0.5f;
 static constexpr float SUB_ATTACK_MS   = 6.0f;
 
 /* v1.3.0 control ranges (CC60..63). */
-static constexpr float TAIL_ATTACK_MIN_MS = 6.0f;   /* the click-safe floor */
+/*
+ * The click-safe floor: the kick comes back at full level at whatever phase
+ * it has reached, and at 6 ms a 165 Hz sub (PITCH up) returned at -53 dB
+ * above 1 kHz; 8 ms, with the 10 ms fall below, measures -59 dB.
+ */
+static constexpr float TAIL_ATTACK_MIN_MS = 8.0f;
 static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
 /*
  * TAIL MOD is a macro: one intensity drives a pitch wobble on the sub.
@@ -1761,7 +1766,7 @@ static constexpr float TAIL_ATTACK_MAX_MS = 60.0f;
  * first TAIL_MOD_FADE_IN_MS, so the punch is not smeared. Deterministic: the
  * wobble restarts with every hit.
  */
-static constexpr float TAIL_GAP_FALL_MS = 6.0f;
+static constexpr float TAIL_GAP_FALL_MS = 10.0f;
 static constexpr float TAIL_MOD_MAX_SEMITONES = 2.0f;
 static constexpr float TAIL_MOD_RATE_MIN_HZ = 2.0f;
 static constexpr float TAIL_MOD_RATE_MAX_HZ = 12.0f;
@@ -1800,6 +1805,13 @@ static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6
 static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
 /* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
 static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
+/*
+ * On a retrigger the saws' offsets glide back onto the fresh pattern over
+ * this, much faster than the sine's own 80 ms handoff: the phasing restarts
+ * almost at once, while the glide still keeps the saws from stepping.
+ */
+static constexpr float WAVE_SAW_RELOCK_MS = 5.0f;
+
 /* At full WAVE the richer tail masks the punch; the punch gains up to this. */
 static constexpr float WAVE_PUNCH_BOOST = 0.6f;             /* x1.6, +4 dB */
 
@@ -1813,6 +1825,29 @@ static constexpr uint32_t WAVE_OFFSET_REFRESH = 16;
 static constexpr float WAVE_HARMONICS_SCALE = 1.0f / WAVE_SAW_FUNDAMENTAL;
 
 static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
+
+/*
+ * RETRIGGER: DETERMINISTIC (the default). Every kick starts fresh at phase 0,
+ * punch and supersaw included, so for a given set of parameters every kick
+ * is the same. A kick still ringing when the next arrives is moved to a
+ * fading slot, keeps its own phase and fades out over KICK_CHOKE_MS.
+ *
+ * The phase HANDOFF below (KICK_RETRIGGER_HANDOFF) is continuous instead:
+ * the new kick starts on the old one's phase and glides onto the fresh
+ * trajectory over RETRIGGER_HANDOFF_MS. No tick, but the first 80 ms of an
+ * overlapping kick then depends on where the old wave was when the note
+ * landed, and with the Teensy and Daisy on separate clocks that point walks
+ * slowly: measured with one sample of drift per hit, overlapping kicks
+ * differed by -18 dB (sine) to +2.6 dB (supersaw) in their first 80 ms,
+ * heard as a slow phasing over many bars.
+ */
+static constexpr bool KICK_RETRIGGER_HANDOFF = false;
+/*
+ * 20 ms: at DECAY INF two full-level sines at unrelated phases overlap here,
+ * and their sum wobbles in level. At 6 ms that thumped (+14 dB above 150 Hz
+ * over a hit from silence); at 20 ms it is within a few dB of one.
+ */
+static constexpr float KICK_CHOKE_MS = 20.0f;
 
 /* Level staging before the CC57 / CC58 mixer gains. */
 static constexpr float KICK_PUNCH_LEVEL = 0.32f;
@@ -2066,6 +2101,7 @@ struct KickVoice
     bool fading = false;
     bool fading_punch_only = false;
     uint32_t fade_age = 0;
+    uint32_t fade_samples = 1;
 
 
     void Reset()
@@ -2390,11 +2426,15 @@ struct KickVoice
      * Hand this voice to a fading slot: carry on, fade to zero. punch_only
      * silences its sub path, for when the new hit carries the sub on.
      */
-    void BeginFadeOut(bool punch_only)
+    void BeginFadeOut(bool punch_only, float fade_ms)
     {
         fading = true;
         fading_punch_only = punch_only;
         fade_age = 0;
+        fade_samples = MsToSamples(fade_ms);
+
+        if(fade_samples < 1)
+            fade_samples = 1;
     }
 
 
@@ -2633,11 +2673,12 @@ struct KickVoice
 
         if(wave_morph > 0.0f || (handoff && carried_morph > 0.0f))
         {
+            /* The saws re-lock over WAVE_SAW_RELOCK_MS, not the whole handoff. */
             float glide =
                 handoff
                 ? 1.0f - SmoothstepAdded(
                              static_cast<float>(handoff_age) /
-                             static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS)))
+                             static_cast<float>(MsToSamples(WAVE_SAW_RELOCK_MS)))
                 : 0.0f;
 
             float seconds = static_cast<float>(age) / SAMPLE_RATE;
@@ -2759,12 +2800,12 @@ struct KickVoice
                 1.0f -
                 SmoothstepAdded(
                     static_cast<float>(fade_age) /
-                    static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS))
+                    static_cast<float>(fade_samples)
                 );
 
             fade_age++;
 
-            if(fade_age >= MsToSamples(RETRIGGER_HANDOFF_MS))
+            if(fade_age >= fade_samples)
                 active = false;
         }
 
@@ -2853,12 +2894,24 @@ static void TriggerKickVoice(uint8_t velocity)
             kick_fresh_hit = false;
     }
 
-    if(kick_voice.PunchSounding())
+    if(!KICK_RETRIGGER_HANDOFF)
+    {
+        /* Deterministic: the old kick fades out on its own, the new is fresh. */
+        if(kick_voice.active)
+        {
+            KickVoice& slot = FadingSlot();
+            slot = kick_voice;
+            slot.BeginFadeOut(false, KICK_CHOKE_MS);
+        }
+
+        sounding = false;
+    }
+    else if(kick_voice.PunchSounding())
     {
         /* The sub is handed off below; the old punch finishes on its own. */
         KickVoice& slot = FadingSlot();
         slot = kick_voice;
-        slot.BeginFadeOut(true);
+        slot.BeginFadeOut(true, RETRIGGER_HANDOFF_MS);
     }
 
     KickHitParams hit;

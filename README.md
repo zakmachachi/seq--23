@@ -24,7 +24,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - Gate is gone for the kick: the Daisy never used it
 - Screen 2 draws the kick you are about to hear: its pitch over time on top, with the note as a dotted line, and underneath the punch (hatched) handing over to the sub (solid)
 
-**Tail delay shapes the whole kick.** The kick plays at full level through the punch; with tail delay on, the whole kick — sub, pitch movement, distortion and all — then drops out and comes back in at the tail delay time, while it keeps evolving underneath. **TAIL ATTACK** on the mix page (FUNCTION + MENU2, pot 3) sets how fast it comes back, from a sharp 6 ms to a 60 ms swell.
+**Tail delay shapes the whole kick.** The kick plays at full level through the punch; with tail delay on, the whole kick — sub, pitch movement, distortion and all — then drops out and comes back in at the tail delay time, while it keeps evolving underneath. **TAIL ATTACK** on the mix page (FUNCTION + MENU2, pot 3) sets how fast it comes back, from a sharp 8 ms to a 60 ms swell.
 
 **One distortion dial.** On the mix page, **DIST** (pot 2) sets the Mackie and Tube levels together.
 

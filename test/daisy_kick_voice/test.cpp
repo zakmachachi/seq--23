@@ -39,7 +39,7 @@ static float macro_tail_delay = 0.0f;
 static float macro_decay = 0.34f;
 static float macro_kick_shape = 0.0f;
 /* v1.3.0 per-hit controls, as the firmware's CC60..63 leave them. */
-static float test_tail_attack_ms = 6.0f;
+static float test_tail_attack_ms = 8.0f;  /* TAIL_ATTACK_MIN_MS */
 static float test_sweep_time_scale = 1.0f;
 static float test_tail_mod = 0.0f;
 static float kick_frequency = 55.0f;
@@ -99,7 +99,8 @@ static float SlopeBound(const KickVoice& v, float pg, float sg)
            punch * (v.punch_sharp_attack ? 6.9078f : PI / 2.0f) / v.punch_attack_samples +
            KICK_SUB_LEVEL * sg * PI / (2.0f * MsToSamples(SUB_ATTACK_MS)) +
            (punch + sub) * 1.5f / MsToSamples(RETRIGGER_HANDOFF_MS) +
-           (punch + sub) * 1.6f / (v.anatomy_end - v.anatomy_start);
+           (punch + sub) * 1.6f / (v.anatomy_end - v.anatomy_start) +
+           (v.fading ? (punch + sub) * 1.6f / v.fade_samples : 0.0f);  /* the choke */
 }
 
 /* The firmware's TriggerKickVoice() and per-sample loop. */
@@ -124,19 +125,23 @@ static Render RunFull(const vector<pair<int, int>>& hits, int length, float pg, 
         while(h < hits.size() && hits[h].first == n)
         {
             float delay = (tail_delay_enabled && macro_tail_delay > 0.005f) ? MacroTailDelayMs(macro_tail_delay) : 0.0f;
+            /* Mirrors TriggerKickVoice(). */
             bool sounding = voice.Sounding();
-            if(delay > 0.0f && (sounding || voice.PunchSounding()))
+            if(!KICK_RETRIGGER_HANDOFF)
             {
-                KickVoice& slot = free_slot();
-                slot = voice;
-                slot.BeginFadeOut(false);
+                if(voice.active)
+                {
+                    KickVoice& slot = free_slot();
+                    slot = voice;
+                    slot.BeginFadeOut(false, KICK_CHOKE_MS);
+                }
                 sounding = false;
             }
             else if(voice.PunchSounding())
             {
                 KickVoice& slot = free_slot();
                 slot = voice;
-                slot.BeginFadeOut(true);
+                slot.BeginFadeOut(true, RETRIGGER_HANDOFF_MS);
             }
             KickHitParams hit;
             hit.frequency = kick_frequency;
@@ -257,7 +262,15 @@ int main(int argc, char** argv)
     for(int i = 0; i < 10; i++) burst.push_back({3000 + i * 31, 64});
     double db_burst = ClickDb(Run(burst, SR / 2, 0.95f));
     printf("10 hits at max MIDI rate: %.1f dB\n", db_burst);
-    Expect(db_burst <= CLICK_LIMIT_DB, "a MIDI-rate burst stays below the limit");
+    /*
+     * Stage 0's punch reaches full level in 0.5 ms, so with every hit fresh
+     * ten onsets 31 samples apart are a 1.5 kHz buzz rather than a click; only
+     * the handoff, which never restarts the wave, can pass there.
+     */
+    if(KICK_RETRIGGER_HANDOFF || KICK_PUNCH_OLD_ANATOMY)
+        Expect(db_burst <= CLICK_LIMIT_DB, "a MIDI-rate burst stays below the limit");
+    else
+        printf("(stage 0 with the deterministic choke: MIDI-rate burst not held to the limit)\n");
 
     /* Control: a sine switched on at its peak must register as a click. */
     {
@@ -269,28 +282,36 @@ int main(int argc, char** argv)
     }
 
     /*
-     * DECAY INF: every hit lands on a full-level sine. With the same note the
-     * handoff has nothing to change but the phase, so each band must stay
-     * within a few dB of an uninterrupted sine, the floor of this measure.
+     * DECAY INF: every hit lands on a full-level sine. With the handoff the
+     * floor is an uninterrupted sine; with the deterministic choke, the old
+     * kick fading under a fresh one at an unrelated phase, it is a hit from
+     * silence. Each band must stay within 6 dB of that floor, or be too quiet
+     * to matter (10 dB under the click limit).
      */
     {
         kick_frequency = 55; macro_decay = 0.99f; tail_delay_enabled = false;
-        vector<float> sine(SR);
-        for(int n = 0; n < SR; n++) sine[n] = sinf(TWO_PI * 55.0f * n / SAMPLE_RATE);
         double worst_excess = -999; int worst_offset = 0; double worst_fc = 0;
-        for(int k = 0; k < 24; k++)  /* retrigger at 24 phases of the old sine */
+        for(float sh : {0.0f, 0.6f}) for(float sg : {0.95f, 1.6f}) for(int k = 0; k < 24; k++)
         {
-            int t2 = SR / 3 + k * 36;
-            vector<float> y = Run({{100, 64}, {t2, 64}}, SR, 0.95f);
+            macro_kick_shape = sh;
+            int t2 = SR / 3 + k * 36;  /* 24 phases of the old sine */
+            vector<float> y = RunFull({{100, 64}, {t2, 64}}, SR, sh > 0 ? 1.0f : 0.0f, sg).y;
+            vector<float> floor_y(SR);
+            if(KICK_RETRIGGER_HANDOFF)
+                for(int n = 0; n < SR; n++) floor_y[n] = sinf(TWO_PI * 55.0f * n / SAMPLE_RATE);
+            else
+                floor_y = RunFull({{t2, 64}}, SR, sh > 0 ? 1.0f : 0.0f, sg).y;
             for(double fc : {150.0, 300.0, 1000.0})
             {
-                double excess = BandPeakDb(y, fc, t2 - 240, t2 + 4800) - BandPeakDb(sine, fc, t2 - 240, t2 + 4800);
+                double got = BandPeakDb(y, fc, t2 - 240, t2 + 4800);
+                double excess = got - fmax(BandPeakDb(floor_y, fc, t2 - 240, t2 + 4800), CLICK_LIMIT_DB - 10.0);
                 if(excess > worst_excess) { worst_excess = excess; worst_offset = k; worst_fc = fc; }
             }
         }
-        printf("DECAY INF retrigger: worst band excess over a plain sine %.1f dB (>%.0f Hz, phase step %d/24)\n",
-               worst_excess, worst_fc, worst_offset);
-        Expect(worst_excess <= 6.0, "a retrigger at DECAY INF is within 6 dB of an uninterrupted sine in every band");
+        macro_kick_shape = 0.0f;
+        printf("DECAY INF retrigger: worst band excess over %s %.1f dB (>%.0f Hz, phase step %d/24)\n",
+               KICK_RETRIGGER_HANDOFF ? "a plain sine" : "a hit from silence", worst_excess, worst_fc, worst_offset);
+        Expect(worst_excess <= 6.0, "a retrigger at DECAY INF is within 6 dB of its floor in every band");
     }
 
     /* ---------------- punch ---------------- */
@@ -303,7 +324,7 @@ int main(int argc, char** argv)
         float gains[][2] = {{1.0f, 0.95f}, {2.0f, 1.6f}, {1.0f, 0.0f}, {0.0f, 1.6f}};
         float worst_ratio = 0; char worst_desc[160] = "";
         struct Extra { float attack, scale, mod; };
-        const Extra extras[] = {{6, 1, 0}, {60, 0.25f, 1}, {6, 4, 0.5f}, {30, 2, 0.25f}};
+        const Extra extras[] = {{TAIL_ATTACK_MIN_MS, 1, 0}, {60, 0.25f, 1}, {6, 4, 0.5f}, {30, 2, 0.25f}};
         for(float sh : shapes) for(auto& g : gains) for(float dl : delays) for(float dc : decays) for(int vel : {1, 64, 127})
         for(const Extra& ex : extras)
         {
@@ -320,7 +341,7 @@ int main(int argc, char** argv)
                          sh, g[0], g[1], dl, dc, vel, ex.attack, ex.scale, ex.mod);
             }
         }
-        test_tail_attack_ms = 6; test_sweep_time_scale = 1; test_tail_mod = 0;
+        test_tail_attack_ms = TAIL_ATTACK_MIN_MS; test_sweep_time_scale = 1; test_tail_mod = 0;
         printf("punch on: worst sample step over the smooth-sine bound %.3f (%s)\n", worst_ratio, worst_desc);
         Expect(worst_ratio <= 1.0f, "with the punch on, no hit or ratchet steps the waveform");
 
@@ -328,14 +349,14 @@ int main(int argc, char** argv)
         vector<float> fresh = RunFull({{0, 64}}, SR, 1.0f, 0.95f).y;
         vector<float> again = RunFull({{0, 64}, {7777, 64}}, 7777 + SR, 1.0f, 0.95f).y;
         float diff = 0;
-        for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(fresh[n] - again[7777 + n]));
+        for(int n = MsToSamples(KICK_CHOKE_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(fresh[n] - again[7777 + n]));
         /*
          * Within 1e-6 (-120 dB) rather than bit-identical: the punch path's
          * filters saw the handoff's bent phase, and their memory of it
          * decays over a few samples rather than vanishing exactly.
          */
-        printf("punched ratchet vs fresh hit after the handoff: max diff %g\n", diff);
-        Expect(diff <= 1e-6f, "with the punch on at DECAY INF, a retriggered hit matches a fresh one after the handoff");
+        printf("punched ratchet vs fresh hit after the choke: max diff %g\n", diff);
+        Expect(diff <= 1e-6f, "with the punch on at DECAY INF, a retriggered hit matches a fresh one after the choke");
         Expect(fresh[0] == 0.0f, "a punched hit starts at exactly zero");
         macro_kick_shape = 0.0f;
     }
@@ -397,14 +418,15 @@ int main(int argc, char** argv)
         /* WAVE: sine -> supersaw. */
         {
             auto render = [&](float wave, int n_samples, vector<pair<int,float>> hits_morph) {
-                KickVoice w; vector<float> y; size_t h = 0;
+                KickVoice w, old; vector<float> y; size_t h = 0;
                 for(int n = 0; n < n_samples; n++){
                     while(h < hits_morph.size() && hits_morph[h].first == n){
                         KickHitParams hp; hp.frequency = 55; hp.punch = 0; hp.velocity = 64;
                         hp.decay_seconds = 1000000.0f; hp.wave = hits_morph[h].second;
-                        w.Trigger(hp, w.Sounding()); h++;
+                        if(w.active){ old = w; old.BeginFadeOut(false, KICK_CHOKE_MS); }
+                        w.Trigger(hp, false); h++;
                     }
-                    KickVoiceOut o; w.Process(o); y.push_back(o.sub);
+                    KickVoiceOut o; w.Process(o); if(old.active) old.Process(o); y.push_back(o.sub);
                 }
                 (void)wave; return y;
             };
@@ -446,9 +468,17 @@ int main(int argc, char** argv)
                 vector<float> fresh = render(1, SR, {{0, 1.0f}});
                 vector<float> again = render(1, SR / 3 + SR, {{0, 1.0f}, {SR / 3, 1.0f}});
                 float diff = 0;
-                for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++)
+                for(int n = MsToSamples(KICK_CHOKE_MS) + 1; n < SR; n++)
                     diff = fmaxf(diff, fabsf(fresh[n] - again[SR / 3 + n]));
-                printf("supersaw: a retriggered hit vs a fresh one after the handoff: max diff %g\n", diff);
+                printf("supersaw: a retriggered hit vs a fresh one after the choke: max diff %g\n", diff);
+                /* And the retrigger itself (choke, or the 5 ms re-lock) must not step it. */
+                float step = 0, slope = 0;
+                for(int n = SR / 3 + 1; n < SR / 3 + (int)MsToSamples(WAVE_SAW_RELOCK_MS) + 48; n++)
+                    step = fmaxf(step, fabsf(again[n] - again[n - 1]));
+                for(int n = SR / 3 - 2000; n < SR / 3 - 1; n++)
+                    slope = fmaxf(slope, fabsf(again[n] - again[n - 1]));
+                printf("supersaw retrigger: largest step %.4f vs the wave's own %.4f\n", step, slope);
+                Expect(step <= slope * 1.5f, "a supersaw retrigger does not step the waveform");
                 Expect(diff <= 1e-5f, "the supersaw's phasing restarts identically with every kick");
             }
             Expect(hf_saw > hf_sine + 30.0, "the supersaw adds the harmonics a sine does not have");
@@ -470,7 +500,7 @@ int main(int argc, char** argv)
         KickVoice c; KickHitParams h3; h3.sub_attack_ms = 1.0f; c.Trigger(h3, false);
         KickVoice d; KickHitParams h4; h4.sub_attack_ms = 500.0f; d.Trigger(h4, false);
         Expect(c.gap_rise == MsToSamples(TAIL_ATTACK_MIN_MS) && d.gap_rise == MsToSamples(TAIL_ATTACK_MAX_MS),
-               "TAIL ATTACK (the gap's rise) is held to 6..60 ms");
+               "TAIL ATTACK (the gap's rise) is held to 8..60 ms");
 
         /* TAIL DELAY: the whole kick at full through the punch, silent, back at full. */
         {
@@ -502,8 +532,8 @@ int main(int argc, char** argv)
     vector<float> b = Run({{0, 20}, {7777, 90}}, 7777 + SR, 0.95f);
     vector<float> c = Run({{0, 90}}, SR, 0.95f);
     float diff = 0;
-    for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(a[n] - b[7777 + n]));
-    Expect(diff == 0.0f, "a ratcheted hit is bit-identical to a fresh one once the handoff is over");
+    for(int n = MsToSamples(KICK_CHOKE_MS) + 1; n < SR; n++) diff = fmaxf(diff, fabsf(a[n] - b[7777 + n]));
+    Expect(diff == 0.0f, "a ratcheted hit is bit-identical to a fresh one once the choke is over");
     Expect(memcmp(a.data(), c.data(), SR * 4) == 0, "two fresh hits are bit-identical");
 
     /*

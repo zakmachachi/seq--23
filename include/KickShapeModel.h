@@ -26,7 +26,7 @@ struct KickShapeInputs {
 
 struct KickShape {
   float f0 = 55, ratio = 1, sweepMs = 88, holdMs = 36, endMs = 82;
-  float decayS = .5f, delayMs = 0, pitchSt = 0, attackMs = 6, totalMs = 300;
+  float decayS = .5f, delayMs = 0, pitchSt = 0, attackMs = 8, totalMs = 300;
   float gapHoldMs = 82;   // TAIL DELAY: full through the punch, then a gap
   float wobbleDepth = 0, wobbleHz = 2, wobbleIrregular = 0;
   bool inf = false;
@@ -64,7 +64,7 @@ struct KickShape {
     wobbleDepth = 2.f * intensity;
     wobbleHz = 2.f + 10.f * intensity * intensity;
     wobbleIrregular = .6f * intensity;
-    attackMs = 6.f * powf(10.f, in.tailAttack / 127.f);
+    attackMs = 8.f * powf(60.f / 8.f, in.tailAttack / 127.f);
     // The old blended sub decay empties in ~61 % of the DECAY time.
     float subMs = inf ? 1200.f : .61f * decayS * 1000.f;
     float end = subMs > delayMs + 60.f ? subMs : delayMs + 60.f;
@@ -76,7 +76,7 @@ struct KickShape {
   // KickVoice::GapLevel).
   float gapLevel(float t) const {
     if (delayMs <= 0 || t < gapHoldMs) return 1.f;
-    float down = 1.f - smooth((t - gapHoldMs) / 6.f);
+    float down = 1.f - smooth((t - gapHoldMs) / 10.f);
     float up = t < delayMs ? 0.f : smooth((t - delayMs) / attackMs);
     return 1.f - (1.f - down) * (1.f - up);
   }
