@@ -438,9 +438,37 @@ int main(int argc, char** argv)
             Expect(lo_saw > 0.89, "the supersaw keeps the sine's bass (fundamental within 1 dB or more)");
             Expect(hi_saw / lo_saw < 1.12, "the supersaw's fundamental does not phase over the hit (< 1 dB swing)");
             /*
-             * The supersaw phases on purpose, but deterministically: a hit
-             * landing on a still-sounding kick must play exactly like a fresh
-             * one once the handoff has glided the saws back onto it.
+             * Locked to the sub: over a held tail each body harmonic keeps
+             * its level, as a sine's distortion harmonics do. Windows of
+             * exactly 11 cycles (9600 samples at 55 Hz) make each harmonic's
+             * DFT bin leakage-free. Saws detuned in Hz swept these through
+             * ~30 dB nulls. The top is allowed to shimmer; it must still move,
+             * or the spread has been lost.
+             */
+            {
+                vector<float> held = render(1, SR * 2, {{0, 1.0f}});
+                auto harmonic = [&](int k, int a){
+                    double re = 0, im = 0;
+                    for(int n = a; n < a + 9600; n++){ double w = 2 * M_PI * 55.0 * k * n / 48000.0; re += held[n] * cos(w); im += held[n] * sin(w); }
+                    return sqrt(re * re + im * im);
+                };
+                auto swing_db = [&](int k){
+                    double lo = 1e30, hi = 0;
+                    for(int a = SR / 10; a + 9600 <= 2 * SR; a += 2400){ double m = harmonic(k, a); lo = fmin(lo, m); hi = fmax(hi, m); }
+                    return 20 * log10(hi / lo);
+                };
+                double body = 0;
+                for(int k = 2; k <= 8; k++) body = fmax(body, swing_db(k));
+                double top = 0;
+                for(int k = 40; k <= 48; k++) top = fmax(top, swing_db(k));
+                printf("supersaw over a held tail: body harmonics 2-8 swing %.2f dB, top 40-48 %.1f dB\n", body, top);
+                Expect(body < 1.0, "the supersaw's body harmonics stay locked to the sub (< 1 dB swing)");
+                Expect(top > 3.0, "the supersaw's top still shimmers");
+            }
+            /*
+             * Deterministic: a hit landing on a still-sounding kick must play
+             * exactly like a fresh one once the handoff has glided the saws
+             * onto the new hit's wobble.
              */
             {
                 vector<float> fresh = render(1, SR, {{0, 1.0f}});
@@ -449,7 +477,7 @@ int main(int argc, char** argv)
                 for(int n = MsToSamples(RETRIGGER_HANDOFF_MS) + 1; n < SR; n++)
                     diff = fmaxf(diff, fabsf(fresh[n] - again[SR / 3 + n]));
                 printf("supersaw: a retriggered hit vs a fresh one after the handoff: max diff %g\n", diff);
-                Expect(diff <= 1e-5f, "the supersaw's phasing restarts identically with every kick");
+                Expect(diff <= 1e-5f, "a retriggered supersaw hit matches a fresh one after the handoff");
             }
             Expect(hf_saw > hf_sine + 30.0, "the supersaw adds the harmonics a sine does not have");
             /* Morph changed between two hits of a sounding kick: no step at the seam. */

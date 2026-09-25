@@ -16,7 +16,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 **The kick has been rebuilt from scratch, and the click is gone.** It is now a single sine whose pitch sweep (the punch) and bass tone (the sub) are two envelopes on the same oscillator, so they can no longer beat against each other. A hit that lands while the last one is still ringing picks up exactly where the old sine is and glides onto the new hit, instead of cutting it off.
 
 **Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
-- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics
+- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics. The saws are locked to the sub the way the sine is, so the body never phases against it and every kick starts the same; only the top shimmers
 - **SWEEP** clicks into place at 1.00x on the way past, and **FUNCTION + pot 3** snaps it straight back there
 - **SWEEP** (pot 3) sets how long the punch sweep takes, from a quarter to four times SHAPE's own length. SHAPE still sets how deep it goes
 - **TMOD** (pot 5) is a wobble macro for the tail: turning it up makes the pitch move deeper (up to two semitones either way), faster and more irregular. Its button switches it off. Record it under FUNCTION like any Notes-page knob and it changes per step
@@ -37,10 +37,12 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
+- Both outputs end in a 25 Hz high-pass, so DC and sub-sonic energy no longer take headroom (-0.2 dB at 55 Hz; a tail PITCH-glided below 25 Hz is cut)
 
 **Fixed**
 - A loud click whenever the kick's HPF was engaged: at the start of every hit it switched back to the unfiltered kick in a single sample
 - A tick on every hit when the tail was still sounding, getting louder as SUB went up
+- The supersaw phasing against the sub: its saws were detuned in Hz, so every harmonic drifted off the sub and swept through deep nulls over each tail
 
 Saved patches from v1.2.0 load as before; the new controls start at their centre settings.
 

@@ -1769,33 +1769,38 @@ static constexpr float TAIL_MOD_IRREGULAR = 0.6f;
 static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
 
 /*
- * WAVE: the oscillator morphs from the sine to a five-saw supersaw. Built so
- * it cannot phase or lose bass:
+ * WAVE: the oscillator morphs from the sine to a five-saw supersaw, locked to
+ * the sub the way the sine is:
  *
- *   locked       every saw is phase-locked to the one oscillator (its phase
- *                is the sine's plus a small offset), so it follows the sweep,
- *                PITCH, TAIL MOD and the handoff glide, and resets with the
- *                oscillator on every hit.
- *   harmonics    detuned saws phase against each other at the fundamental no
- *                matter how small the detune, which is what ate the bass. So
- *                each saw's own fundamental is subtracted exactly, leaving its
- *                harmonics, and those are added on top of the sine, which
- *                stays the fundamental: the bass cannot drift, phase or cancel,
- *                while the upper partials still shimmer (harmonic k of a saw
- *                offset by d Hz beats at k * d Hz, as a real supersaw's do).
- *   detune in Hz the offsets drift at a fixed rate in Hz, not a ratio, so a
- *                3 kHz punch sweep does not turn it into a fast flutter, and
- *                from zero at every hit, so the phasing is the same each time.
+ *   one oscillator  every saw runs on the sine's own phase plus a small
+ *                   offset, so it follows the sweep, PITCH, TAIL MOD and the
+ *                   handoff glide, and starts the same way on every hit.
+ *   harmonics       each saw's own fundamental is subtracted exactly and the
+ *                   rest is added on top of the sine, which stays the
+ *                   fundamental: WAVE never touches the bass.
+ *   bounded spread  a saw's offset only wobbles within WAVE_SAW_SPREAD of a
+ *                   cycle, on a slow wobble that restarts with the hit.
  *
- * On a retrigger each saw's offset glides back to zero over the handoff.
+ * The spread must stay bounded. Saws detuned in Hz drift without limit, so
+ * harmonic k of each walks k x the detune off the sub's own harmonics: over a
+ * tail every harmonic swept through 20-34 dB nulls, a flanger on the sub, and
+ * through Mackie / Tube it beat against the sub's distortion harmonics, which
+ * are locked to it. Bounded, harmonic k moves by at most 2 pi k x spread
+ * radians: the body (to ~harmonic 16, 900 Hz at 55 Hz) stays within 1-2 dB,
+ * as the sine's own distortion harmonics do, and only the top shimmers.
+ *
+ * On a retrigger each saw's offset glides from where it was onto the new
+ * hit's wobble over the handoff.
  */
 static constexpr int WAVE_SAWS = 5;
 /*
- * Detune in Hz. The drift is the supersaw's phasing, wanted, and it is
- * deterministic: every offset is (detune x time since the hit), starting from
- * zero with the oscillator's phase-0 reset, so each kick phases identically.
+ * Each saw's largest offset from the oscillator, in cycles; the middle one is
+ * the anchor. The own-fundamental series in Process() needs offsets well
+ * under 0.05 cycles.
  */
-static constexpr float WAVE_SAW_DETUNE_HZ[WAVE_SAWS] = {-1.6f, -0.8f, 0.0f, 0.8f, 1.6f};
+static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.012f, -0.008f, 0.0f, 0.008f, 0.012f};
+/* Unrelated rates, so the top shimmers instead of sweeping as one. */
+static constexpr float WAVE_SAW_RATE_HZ[WAVE_SAWS] = {4.3f, 6.1f, 0.0f, 7.3f, 5.2f};
 static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
 static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
 /* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
@@ -1809,8 +1814,6 @@ static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
 static constexpr float WAVE_PUNCH_HARMONICS = 0.25f;
 static constexpr float WAVE_PUNCH_BOOST = 2.0f;             /* x3, +9.5 dB */
 
-/* The offsets move slowly, so their sin/cos are refreshed every 16 samples. */
-static constexpr uint32_t WAVE_OFFSET_REFRESH = 16;
 /*
  * WAVE adds the supersaw's harmonics on top of the untouched sine, so the
  * bass is identical at every setting. Scaled so that at full WAVE the
@@ -1958,6 +1961,16 @@ struct KickHitParams
 };
 
 
+/* sin(2 pi p) for p in [0, 1) as two parabolas: smooth, and within 6 %. */
+static inline float ParabolicSine(float p)
+{
+    float q = p < 0.5f ? p : p - 0.5f;
+    float y = 8.0f * q * (1.0f - 2.0f * q);
+
+    return p < 0.5f ? y : -y;
+}
+
+
 static inline float PolyBlepSaw(float phase, float dt)
 {
     float y = 2.0f * phase - 1.0f;
@@ -1998,8 +2011,7 @@ struct KickVoice
     /* WAVE: each saw's offset from the oscillator's phase, in cycles. */
     float saw_offset[WAVE_SAWS] = {};
     float saw_offset_start[WAVE_SAWS] = {};   /* glides to 0 over a handoff */
-    float saw_offset_sin[WAVE_SAWS] = {};
-    float saw_offset_cos[WAVE_SAWS] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    float saw_wobble_phase[WAVE_SAWS] = {};   /* 0 at the hit */
 
     float wave_morph = 0.0f;
     float carried_morph = 0.0f;
@@ -2338,15 +2350,17 @@ struct KickVoice
         /* A fresh hit starts at phase 0, where the old sharp attack is safe. */
         punch_sharp_attack = true;
 
+        /* Every hit, fresh or handed off, starts the saws' wobble over. */
+        for(int i = 0; i < WAVE_SAWS; i++)
+            saw_wobble_phase[i] = 0.0f;
+
         if(!hand_off || old_level <= KICK_VOICE_SILENT)
         {
-            /* Fresh: the saws start locked to the oscillator. */
+            /* Fresh: the saws start exactly on the oscillator. */
             for(int i = 0; i < WAVE_SAWS; i++)
             {
                 saw_offset[i] = 0.0f;
                 saw_offset_start[i] = 0.0f;
-                saw_offset_sin[i] = 0.0f;
-                saw_offset_cos[i] = 1.0f;
             }
 
 
@@ -2354,8 +2368,8 @@ struct KickVoice
         }
 
         /*
-         * Handed off: each saw's offset glides from where it was to zero over
-         * the handoff, and the carried sub keeps its own wave.
+         * Handed off: each saw's offset glides from where it was onto the
+         * new wobble over the handoff, and the carried sub keeps its own wave.
          */
         for(int i = 0; i < WAVE_SAWS; i++)
             saw_offset_start[i] = saw_offset[i];
@@ -2647,34 +2661,38 @@ struct KickVoice
                              static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS)))
                 : 0.0f;
 
-            float seconds = static_cast<float>(age) / SAMPLE_RATE;
             float dt = fminf(increment, 0.45f);
-            bool refresh = (age % WAVE_OFFSET_REFRESH) == 0 || handoff;
 
             float sine_cos = cosf(total_phase * TWO_PI);
             float harmonics = 0.0f;
 
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                /* Drift from the hit; a handoff glides from the old offsets. */
+                /* The wobble from the hit; a handoff glides off the old offsets. */
                 saw_offset[i] =
                     saw_offset_start[i] * glide +
-                    WAVE_SAW_DETUNE_HZ[i] * seconds;
+                    WAVE_SAW_SPREAD[i] * ParabolicSine(saw_wobble_phase[i]);
 
-                if(refresh)
-                {
-                    saw_offset_sin[i] = sinf(saw_offset[i] * TWO_PI);
-                    saw_offset_cos[i] = cosf(saw_offset[i] * TWO_PI);
-                }
+                saw_wobble_phase[i] += WAVE_SAW_RATE_HZ[i] / SAMPLE_RATE;
+
+                if(saw_wobble_phase[i] >= 1.0f)
+                    saw_wobble_phase[i] -= 1.0f;
 
                 /* Rising saw, zero at phase 0: its fundamental is in phase. */
                 float q = total_phase + saw_offset[i] + 0.5f;
                 q -= floorf(q);
 
-                /* This saw's own fundamental, sin(2 pi (phase + offset)). */
+                /*
+                 * This saw's own fundamental, sin(2 pi (phase + offset)). The
+                 * offset is small, so its sin and cos are short series, within
+                 * ~1e-6 up to 0.05 cycles.
+                 */
+                float x = saw_offset[i] * TWO_PI;
+                float x2 = x * x;
+
                 float own =
-                    sine * saw_offset_cos[i] +
-                    sine_cos * saw_offset_sin[i];
+                    sine * (1.0f - x2 * (0.5f - x2 * (1.0f / 24.0f))) +
+                    sine_cos * x * (1.0f - x2 * ((1.0f / 6.0f) - x2 * (1.0f / 120.0f)));
 
                 harmonics +=
                     WAVE_SAW_WEIGHT[i] *
@@ -3199,6 +3217,57 @@ static inline float OutputCeiling(float x)
 
     return x < 0.0f ? -shaped : shaped;
 }
+
+
+/*
+ * OUTPUT HIGH-PASS: 2nd-order Butterworth at 25 Hz, the last filter on both
+ * outputs, just before the kick's ceiling and the external lane's clamp.
+ * Nothing below 25 Hz is heard, but DC and sub-sonic energy (a PITCH glide
+ * an octave under a low note, the models' offsets) still take headroom.
+ * -0.2 dB at 55 Hz.
+ *
+ * On the whole output rather than one lane, so its phase shift is common to
+ * everything and nothing can cancel. A TPT state-variable filter, which stays
+ * accurate this close to DC in float, where a direct-form biquad does not.
+ * Never reset on a trigger.
+ */
+static constexpr float OUTPUT_HPF_HZ = 25.0f;
+
+struct OutputHighpass
+{
+    float g = 0.0f;
+    float k = 0.0f;
+    float a1 = 0.0f;
+
+    float ic1eq = 0.0f;
+    float ic2eq = 0.0f;
+
+
+    void Reset()
+    {
+        g = tanf(PI * OUTPUT_HPF_HZ / SAMPLE_RATE);
+        k = 1.41421356f;   /* 1 / Q, Q = 0.7071 */
+        a1 = 1.0f / (1.0f + g * (g + k));
+
+        ic1eq = 0.0f;
+        ic2eq = 0.0f;
+    }
+
+
+    float Process(float x)
+    {
+        float v1 = a1 * (ic1eq + g * (x - ic2eq));
+        float v2 = ic2eq + g * v1;
+
+        ic1eq = 2.0f * v1 - ic1eq;
+        ic2eq = 2.0f * v2 - ic2eq;
+
+        return x - k * v1 - v2;
+    }
+};
+
+static OutputHighpass kick_output_hpf;
+static OutputHighpass external_output_hpf;
 
 
 /* ============================================================
@@ -10558,6 +10627,13 @@ static void AudioCallback(
         }
 
 
+        /* OUTPUT HIGH-PASS: see OUTPUT_HPF_HZ. */
+        kick_output =
+            kick_output_hpf.Process(
+                kick_output
+            );
+
+
         kick_output =
             OutputCeiling(
                 kick_output
@@ -10604,6 +10680,13 @@ static void AudioCallback(
         external_output *=
             EXTERNAL_RETURN_GAIN *
             EXTERNAL_OUTPUT_LINEAR_GAIN;
+
+
+        /* OUTPUT HIGH-PASS: see OUTPUT_HPF_HZ. */
+        external_output =
+            external_output_hpf.Process(
+                external_output
+            );
 
 
         /*
@@ -10667,6 +10750,9 @@ static void ResetAudioDspState()
         final_hf_guard_state[p] = 0.0f;
 
     kick_onset_level = 1.0f;
+
+    kick_output_hpf.Reset();
+    external_output_hpf.Reset();
 
     added_performance_fx.Reset();
     added_kick_master_envelope.Reset();
