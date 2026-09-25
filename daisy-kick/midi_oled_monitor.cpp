@@ -1800,8 +1800,14 @@ static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6
 static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
 /* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
 static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
-/* At full WAVE the richer tail masks the punch; the punch gains up to this. */
-static constexpr float WAVE_PUNCH_BOOST = 0.6f;             /* x1.6, +4 dB */
+/*
+ * The punch keeps most of the clean sine sweep: with the saw's harmonics on
+ * it too, the transient smeared into the buzz and got lost at full WAVE. The
+ * supersaw lives in the body, which fades in as the punch hands over. The
+ * punch then gains up to WAVE_PUNCH_BOOST against the brighter body.
+ */
+static constexpr float WAVE_PUNCH_HARMONICS = 0.25f;
+static constexpr float WAVE_PUNCH_BOOST = 2.0f;             /* x3, +9.5 dB */
 
 /* The offsets move slowly, so their sin/cos are refreshed every 16 samples. */
 static constexpr uint32_t WAVE_OFFSET_REFRESH = 16;
@@ -2630,6 +2636,7 @@ struct KickVoice
          */
         float wave = sine;
         float carried_wave = sine;
+        float punch_wave = sine;
 
         if(wave_morph > 0.0f || (handoff && carried_morph > 0.0f))
         {
@@ -2679,11 +2686,12 @@ struct KickVoice
             /* The sine stays the fundamental; WAVE adds the saw harmonics. */
             wave = sine + harmonics * wave_morph;
             carried_wave = sine + harmonics * carried_morph;
+            punch_wave = sine + harmonics * wave_morph * WAVE_PUNCH_HARMONICS;
         }
 
         /* The punch filters run from its first sample so their state is real. */
         float punch_out =
-            ShapePunch(wave) * punch_level * gap_level *
+            ShapePunch(punch_wave) * punch_level * gap_level *
             (1.0f + WAVE_PUNCH_BOOST * wave_morph);
         float sub_out = wave * sub_level * gap_level;
         float carried_out = carried_wave * carried_level * gap_level;
