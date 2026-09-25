@@ -1780,22 +1780,22 @@ static constexpr float TAIL_MOD_FADE_IN_MS = 40.0f;
  *                matter how small the detune, which is what ate the bass. So
  *                each saw's own fundamental is subtracted exactly, leaving its
  *                harmonics, and those are added on top of the sine, which
- *                stays the fundamental: the bass cannot drift, phase or cancel.
- *   spread       fixed phase offsets rather than detune, so nothing moves;
- *                see WAVE_SAW_SPREAD.
+ *                stays the fundamental: the bass cannot drift, phase or cancel,
+ *                while the upper partials still shimmer (harmonic k of a saw
+ *                offset by d Hz beats at k * d Hz, as a real supersaw's do).
+ *   detune in Hz the offsets drift at a fixed rate in Hz, not a ratio, so a
+ *                3 kHz punch sweep does not turn it into a fast flutter, and
+ *                from zero at every hit, so the phasing is the same each time.
  *
  * On a retrigger each saw's offset glides back to zero over the handoff.
  */
 static constexpr int WAVE_SAWS = 5;
 /*
- * No detune: any detune that drifts over time is phasing, which across a
- * kick's short tail is heard as exactly that (measured: 2.3 dB wobble in
- * 100-700 Hz with Hz detune, 0.8 dB even with low harmonics from a locked
- * saw). The five saws are spread by FIXED phase offsets instead: they still
- * stack into a thicker, "super" waveform (some harmonics reinforced, others
- * thinned), but that timbre never moves.
+ * Detune in Hz. The drift is the supersaw's phasing, wanted, and it is
+ * deterministic: every offset is (detune x time since the hit), starting from
+ * zero with the oscillator's phase-0 reset, so each kick phases identically.
  */
-static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.06f, -0.03f, 0.0f, 0.03f, 0.06f};
+static constexpr float WAVE_SAW_DETUNE_HZ[WAVE_SAWS] = {-1.6f, -0.8f, 0.0f, 0.8f, 1.6f};
 static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
 static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
 /* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
@@ -2337,10 +2337,10 @@ struct KickVoice
             /* Fresh: the saws start locked to the oscillator. */
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                saw_offset[i] = WAVE_SAW_SPREAD[i];
-                saw_offset_start[i] = WAVE_SAW_SPREAD[i];
-                saw_offset_sin[i] = sinf(WAVE_SAW_SPREAD[i] * TWO_PI);
-                saw_offset_cos[i] = cosf(WAVE_SAW_SPREAD[i] * TWO_PI);
+                saw_offset[i] = 0.0f;
+                saw_offset_start[i] = 0.0f;
+                saw_offset_sin[i] = 0.0f;
+                saw_offset_cos[i] = 1.0f;
             }
 
 
@@ -2640,6 +2640,7 @@ struct KickVoice
                              static_cast<float>(MsToSamples(RETRIGGER_HANDOFF_MS)))
                 : 0.0f;
 
+            float seconds = static_cast<float>(age) / SAMPLE_RATE;
             float dt = fminf(increment, 0.45f);
             bool refresh = (age % WAVE_OFFSET_REFRESH) == 0 || handoff;
 
@@ -2648,10 +2649,10 @@ struct KickVoice
 
             for(int i = 0; i < WAVE_SAWS; i++)
             {
-                /* The fixed spread; a handoff glides from the old offsets. */
+                /* Drift from the hit; a handoff glides from the old offsets. */
                 saw_offset[i] =
                     saw_offset_start[i] * glide +
-                    WAVE_SAW_SPREAD[i] * (1.0f - glide);
+                    WAVE_SAW_DETUNE_HZ[i] * seconds;
 
                 if(refresh)
                 {
