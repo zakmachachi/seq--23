@@ -1855,6 +1855,31 @@ static constexpr float RETRIGGER_HANDOFF_MS = 80.0f;
  * heard as a slow phasing over many bars.
  */
 static constexpr bool KICK_RETRIGGER_HANDOFF = false;
+
+/*
+ * KICK LOOKAHEAD: how every kick is bit-identical from its first sample.
+ *
+ * The kick output runs KICK_LOOKAHEAD_MS behind the engine. When a note
+ * lands, the part of the old kick that has not been played yet is faded to
+ * silence across that window, so by the time the new kick is heard the old
+ * one has ended, cleanly, on its own. Then every piece of signal memory in
+ * the kick path is cleared (the voice, the Mackie / Tube models, the BPF
+ * resonators, the HF guards, the reverb tank, the 25 Hz high-pass) and the
+ * new kick is rendered from nothing, exactly as a hit from silence is.
+ *
+ * Without this, a kick landing on a ringing one starts on whatever that one
+ * left behind (the Tube's bias recovers over ~60 ms and the BPF resonators
+ * ring for tens of ms), and with the Teensy and Daisy on separate clocks
+ * that differs from kick to kick: heard as phasing, most with the supersaw,
+ * whose harmonics excite those stages hardest.
+ *
+ * Costs KICK_LOOKAHEAD_MS of latency on both outputs (the external lane is
+ * delayed by the same amount so the two stay aligned). 10 ms: with any punch
+ * a retrigger measures the same as a hit from silence in every band; a bare
+ * sub at DECAY INF restarts softly (-44 dB above 300 Hz, -70 dB above 1 kHz).
+ * At 5 ms that restart thumped (-32 dB above 300 Hz).
+ */
+static constexpr float KICK_LOOKAHEAD_MS = 10.0f;
 /*
  * 20 ms: at DECAY INF two full-level sines at unrelated phases overlap here,
  * and their sum wobbles in level. At 6 ms that thumped (+14 dB above 150 Hz
@@ -2918,14 +2943,17 @@ static void TriggerKickVoice(uint8_t velocity)
 
     if(!KICK_RETRIGGER_HANDOFF)
     {
-        /* Deterministic: the old kick fades out on its own, the new is fresh. */
-        if(kick_voice.active)
-        {
-            KickVoice& slot = FadingSlot();
-            slot = kick_voice;
-            slot.BeginFadeOut(false, KICK_CHOKE_MS);
-        }
+        /*
+         * Deterministic: the old kick was already faded out ahead of the
+         * output (KICK LOOKAHEAD), so it is simply dropped and every hit is
+         * a hit from silence.
+         */
+        kick_voice.Reset();
 
+        for(int i = 0; i < KICK_FADING_SLOTS; i++)
+            kick_voice_fading[i].Reset();
+
+        kick_fresh_hit = true;
         sounding = false;
     }
     else if(kick_voice.PunchSounding())
@@ -2996,6 +3024,23 @@ struct Biquad
 
 
         return y;
+    }
+
+
+    /* RBJ high-pass. */
+    void SetHighpass(float frequency,
+                     float q)
+    {
+        float w = TWO_PI * frequency / SAMPLE_RATE;
+        float c = cosf(w);
+        float alpha = sinf(w) / (2.0f * q);
+        float a0 = 1.0f + alpha;
+
+        b0 = (1.0f + c) * 0.5f / a0;
+        b1 = -(1.0f + c) / a0;
+        b2 = b0;
+        a1 = -2.0f * c / a0;
+        a2 = (1.0f - alpha) / a0;
     }
 
 
@@ -3251,6 +3296,35 @@ static KickSidechainReverb kick_reverb;
  * clamp would shatter a bass-heavy kick into hard digital clipping. Gain is
  * untouched below the knee, so this is not a compressor on the whole signal.
  */
+/*
+ * 25 Hz high-pass on everything the kick makes, just before the output
+ * ceiling. Second-order Butterworth: -0.2 dB at 55 Hz, -0.6 dB at 41 Hz,
+ * -3 dB at 25 Hz, 12 dB / octave below. Cleared with every kick.
+ */
+static constexpr float KICK_OUTPUT_HPF_HZ = 25.0f;
+static Biquad kick_output_hpf;
+
+/* KICK LOOKAHEAD (see its declaration): both outputs run this far behind. */
+static constexpr int KICK_LOOKAHEAD_SAMPLES =
+    static_cast<int>(KICK_LOOKAHEAD_MS * SAMPLE_RATE / 1000.0f);
+static float kick_lookahead[KICK_LOOKAHEAD_SAMPLES] = {};
+static float external_lookahead[KICK_LOOKAHEAD_SAMPLES] = {};
+static int lookahead_index = 0;
+
+/*
+ * The old kick's unplayed samples fade to exactly zero at the new kick's
+ * first sample, on a raised cosine across the whole window.
+ */
+static void FadeKickLookahead()
+{
+    for(int k = 0; k < KICK_LOOKAHEAD_SAMPLES; k++)
+    {
+        int j = (lookahead_index + k) % KICK_LOOKAHEAD_SAMPLES;
+        float x = static_cast<float>(k + 1) / KICK_LOOKAHEAD_SAMPLES;
+        kick_lookahead[j] *= 0.5f * (1.0f + cosf(PI * x));
+    }
+}
+
 static inline float OutputCeiling(float x)
 {
     constexpr float knee  = OUTPUT_CEILING_KNEE;
@@ -10103,6 +10177,9 @@ static void ServiceMidi()
    AUDIO CALLBACK
    ============================================================ */
 
+static void ResetKickSignalState();
+
+
 static void AudioCallback(
     AudioHandle::InputBuffer in,
     AudioHandle::OutputBuffer out,
@@ -10142,9 +10219,17 @@ static void AudioCallback(
 
 
         /*
-         * One sine voice, phase reset to zero. A voice still sounding is
-         * handed off rather than cut.
+         * KICK LOOKAHEAD: the old kick fades out ahead of the output and
+         * every signal state is cleared, so this kick is rendered from
+         * nothing and is identical to every other from its first sample.
          */
+        if(!KICK_RETRIGGER_HANDOFF)
+        {
+            FadeKickLookahead();
+            ResetKickSignalState();
+        }
+
+        /* One voice, every oscillator reset to phase 0. */
         TriggerKickVoice(
             last_velocity
         );
@@ -10626,9 +10711,23 @@ static void AudioCallback(
 
 
         kick_output =
+            kick_output_hpf.Process(
+                kick_output
+            );
+
+
+        kick_output =
             OutputCeiling(
                 kick_output
             );
+
+
+        /* KICK LOOKAHEAD: the kick is heard this far behind the engine. */
+        {
+            float ahead = kick_output;
+            kick_output = kick_lookahead[lookahead_index];
+            kick_lookahead[lookahead_index] = ahead;
+        }
 
 
         if(KICK_DAC_KEEPALIVE)
@@ -10690,6 +10789,17 @@ static void AudioCallback(
          * Out 1 = generated kick
          * Out 2 = Digitakt / external
          */
+        /* The external lane runs the same distance behind, so they align. */
+        {
+            float ahead = external_output;
+            external_output = external_lookahead[lookahead_index];
+            external_lookahead[lookahead_index] = ahead;
+        }
+
+        if(++lookahead_index >= KICK_LOOKAHEAD_SAMPLES)
+            lookahead_index = 0;
+
+
         out[KICK_OUTPUT_CHANNEL][i] =
             kick_output;
 
@@ -10717,6 +10827,58 @@ static void AudioCallback(
  * untouched filter keeps poisoning the output and the engine stays dead
  * until the board is power-cycled.
  */
+/*
+ * Per kick (KICK LOOKAHEAD): every piece of SIGNAL memory in the kick path,
+ * so each kick is rendered from nothing. Control state (knob slews, amount
+ * smoothing, coefficients, enables) is untouched, and so are the stutter,
+ * looper and reverse buffers, whose output is the past by design.
+ */
+static void ResetKickSignalState()
+{
+    macro_character_processor.mackie.Reset();
+    macro_character_processor.tube.Reset();
+
+    for(int i = 0; i < 3; i++)
+    {
+        macro_bpf_bank.drive_filters[i].Reset();
+        macro_bpf_bank.return_filters[i].Reset();
+    }
+
+    character_dirty_bus_manager.Reset();
+
+    character_delta_hp_state = 0.0f;
+    character_delta_hp_state_2 = 0.0f;
+
+    final_hf_guard_cutoff = OLD_FINAL_HF_SETTLED_HZ;
+
+    for(int p = 0; p < 3; p++)
+        final_hf_guard_state[p] = 0.0f;
+
+    kick_onset_level = 1.0f;
+
+    /* The tank empties; its duck then runs exactly as after silence. */
+    kick_reverb.ClearTank();
+    kick_reverb.send_hp_state = 0.0f;
+    kick_reverb.duck_gain = 1.0f;
+    kick_reverb.clear_pending = false;
+
+    added_performance_fx.dj_hpf.ic1eq = 0.0f;
+    added_performance_fx.dj_hpf.ic2eq = 0.0f;
+    macro_dj_lowpass.ic1eq = 0.0f;
+    macro_dj_lowpass.ic2eq = 0.0f;
+
+    /*
+     * The master envelope's attack only ever shaped the first kick after
+     * boot (nothing releases it), so it is parked at unity: that kick is
+     * like every other. The voice's own onset starts from zero anyway.
+     */
+    added_kick_master_envelope.state = AddedKickMasterEnvelope::State::HOLD;
+    added_kick_master_envelope.value = 1.0f;
+
+    kick_output_hpf.Reset();
+}
+
+
 static void ResetAudioDspState()
 {
     kick_voice.Reset();
@@ -10743,6 +10905,14 @@ static void ResetAudioDspState()
     character_dirty_bus_manager.Reset();
     kick_reverb.Reset();
     macro_whole_kick_reverse.Reset();
+
+    kick_output_hpf.Reset();
+
+    for(int k = 0; k < KICK_LOOKAHEAD_SAMPLES; k++)
+    {
+        kick_lookahead[k] = 0.0f;
+        external_lookahead[k] = 0.0f;
+    }
 }
 
 
@@ -10787,6 +10957,8 @@ int main(void)
     final_hf_gain = 1.0f;
 
 
+
+    kick_output_hpf.SetHighpass(KICK_OUTPUT_HPF_HZ, 0.70710678f);
 
     ResetAudioDspState();
 
