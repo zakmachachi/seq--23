@@ -136,7 +136,7 @@ void KickMixer::adjust(uint8_t knob, int delta){
 uint8_t KickMixer::percent(uint8_t v){ return ((unsigned)v * 100 + 63) / 127; }
 void KickMixer::valueText(uint8_t c, char* out, size_t size) const {
   // Must track TAIL_ATTACK_MIN_MS / _MAX_MS on the Daisy.
-  if (c == TAIL_ATTACK) snprintf(out,size,"%.0fms",8.f * powf(60.f / 8.f, value_[c]/127.f));
+  if (c == TAIL_ATTACK) snprintf(out,size,"%.0fms",6.f * powf(10.f, value_[c]/127.f));
   else snprintf(out,size,"%u%%",percent(value_[c]));
 }
 
