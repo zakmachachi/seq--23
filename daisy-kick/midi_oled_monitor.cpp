@@ -154,14 +154,15 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  * be dialled on the hardware instead of rebuilt. Defaults reproduce the
  * tuned values exactly, so behaviour is unchanged until a CC arrives.
  *
- * CC value 0..127 maps linearly to 0..MAX for each.
+ * CC value 0..127 maps linearly to 0..MAX for each, except PUNCH, which is
+ * squared: see PARAM_PUNCH_GAIN_MAX.
  */
 static volatile float param_line_gain    = 2.8184f; /* CC53, max 4.0  */
 static volatile float param_mackie_gain  = 1.01703f;/* CC54, max 2.0  */
 static volatile float param_tube_gain = 1.56710f;/* CC55, max 2.5  */
 static volatile float param_bpf_gain     = 4.0f;    /* CC56, max 8.0  */
 static volatile float param_sub_gain     = 0.95f;   /* CC57, max 1.6  */
-static volatile float param_punch_gain   = 1.0f;    /* CC58, max 2.0  */
+static volatile float param_punch_gain   = 1.0f;    /* CC58, max 4.0  */
 static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
@@ -169,7 +170,14 @@ static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
 static constexpr float PARAM_TUBE_GAIN_MAX = 2.5f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
-static constexpr float PARAM_PUNCH_GAIN_MAX   = 2.0f;
+/*
+ * PUNCH is squared, MAX x v^2: 50 % is still 1.0, as the old linear 0..2.0
+ * had it, while 100 % reaches 4.0 (+6 dB over the old top) and the low end
+ * goes quieter. Linear to 2.0, 0 -> 100 % moved the punch only 2 dB against
+ * the tail at Mackie 87 %: the Mackie is fed before this fader, so its punch
+ * never followed it. Now 3.3 dB into the ceiling at LINE 33 %, 4.1 dB below it.
+ */
+static constexpr float PARAM_PUNCH_GAIN_MAX   = 4.0f;
 
 /*
  * CC wrote these directly and they are read per sample, so every message
@@ -9424,7 +9432,7 @@ static bool HandleSixMacroCC(
             return true;
 
         case CC_MIX_PUNCH_GAIN:
-            param_punch_gain = v * PARAM_PUNCH_GAIN_MAX;
+            param_punch_gain = v * v * PARAM_PUNCH_GAIN_MAX;
             return true;
 
         /* v1.3.0 kick shaping: plain values, latched by the next hit. */

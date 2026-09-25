@@ -36,6 +36,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - Mackie sounds the way it did before the rebuild, and turning it up no longer eats the low end
 - The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
+- **PUNCH** on the mix page reaches twice as far: 50 % is where it was, 100 % is 6 dB hotter, and the lower half goes quieter, so the whole fader travel does something
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
 - The Digitakt return gets a 25 Hz high-pass at its input. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
 
