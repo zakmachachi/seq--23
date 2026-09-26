@@ -156,36 +156,28 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  *
  * CC value 0..127 maps linearly to 0..MAX for each, except PUNCH, which is
  * squared: see PARAM_PUNCH_GAIN_MAX.
- *
- * SUB and PUNCH are the dry lane, which is nearly everything under ~180 Hz
- * (the models' return is high-passed at 120 Hz). Both reach 6 dB further
- * than they did, at every fader position: 1.6 -> 3.2 and 4.0 -> 8.0, and
- * their power-on values with them. A gain, not a filter, so nothing after
- * the Mackie is reshaped. It reaches the output in full only below the
- * ceiling: at Mackie 87 %, DIST / SUB / PUNCH 100 % it gave +5.9 dB under
- * 180 Hz at LINE 10 %, +4.6 at 20 %, +2.3 at 33 %, the rest turned into
- * ceiling distortion. Turn LINE down for it.
  */
 static volatile float param_line_gain    = 2.8184f; /* CC53, max 4.0  */
 static volatile float param_mackie_gain  = 1.01703f;/* CC54, max 2.0  */
 static volatile float param_tube_gain = 1.56710f;/* CC55, max 2.5  */
 static volatile float param_bpf_gain     = 4.0f;    /* CC56, max 8.0  */
-static volatile float param_sub_gain     = 1.9f;    /* CC57, max 3.2  */
-static volatile float param_punch_gain   = 2.0f;    /* CC58, max 8.0  */
+static volatile float param_sub_gain     = 0.95f;   /* CC57, max 1.6  */
+static volatile float param_punch_gain   = 1.0f;    /* CC58, max 4.0  */
 static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 2.0f;
 static constexpr float PARAM_TUBE_GAIN_MAX = 2.5f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 8.0f;
-static constexpr float PARAM_SUB_GAIN_MAX     = 3.2f;
+static constexpr float PARAM_SUB_GAIN_MAX     = 1.6f;
 /*
- * PUNCH is squared, MAX x v^2, so the lower half goes quieter and the top
- * reaches further. Linear, 0 -> 100 % moved the punch only 2 dB against the
- * tail at Mackie 87 %: the Mackie is fed before this fader, so its punch
- * never followed it.
+ * PUNCH is squared, MAX x v^2: 50 % is still 1.0, as the old linear 0..2.0
+ * had it, while 100 % reaches 4.0 (+6 dB over the old top) and the low end
+ * goes quieter. Linear to 2.0, 0 -> 100 % moved the punch only 2 dB against
+ * the tail at Mackie 87 %: the Mackie is fed before this fader, so its punch
+ * never followed it. Now 3.3 dB into the ceiling at LINE 33 %, 4.1 dB below it.
  */
-static constexpr float PARAM_PUNCH_GAIN_MAX   = 8.0f;
+static constexpr float PARAM_PUNCH_GAIN_MAX   = 4.0f;
 
 /*
  * CC wrote these directly and they are read per sample, so every message
@@ -1588,9 +1580,7 @@ static constexpr bool KICK_OLD_WET_ONSET      = true;
 static constexpr bool KICK_OLD_SUB_DECAY      = true;
 static constexpr float OLD_SUB_DECAY_LINEARITY = 0.55f;
 static constexpr bool KICK_OLD_FINAL_HF_GUARD = true;
-/* Off: the dip sat right on the punch (-3.3 dB for 20 ms of every hit from
- * silence). Off, punch over tail +1.5 dB at SHAPE 64, Mackie 35 %. */
-static constexpr bool KICK_OLD_ONSET_LEVEL    = false;
+static constexpr bool KICK_OLD_ONSET_LEVEL    = true;
 
 static constexpr float OLD_WET_OPEN_MS      = 4.0f;
 static constexpr float OLD_WET_OPEN_FADE_MS = 6.0f;
@@ -2868,8 +2858,8 @@ struct KickVoice
 static KickVoice kick_voice;
 static KickVoice kick_voice_fading[KICK_FADING_SLOTS];
 
-static float kick_punch_gain_smoothed = 2.0f;
-static float kick_sub_gain_smoothed = 1.9f;
+static float kick_punch_gain_smoothed = 1.0f;
+static float kick_sub_gain_smoothed = 0.95f;
 
 /* This hit started from silence; see KICK_OLD_ONSET_LEVEL. */
 static bool kick_fresh_hit = true;
