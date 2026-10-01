@@ -1,4 +1,5 @@
 #include "KickPerformance.h"
+#include "KickShapeModel.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -360,15 +361,11 @@ float KickPerformance::frequency(Parameter p, uint8_t v){
   // or the displayed frequency is not the one being filtered.
   return 85.f * powf(3200.f/85.f,x);
 }
-float KickPerformance::releaseMs(uint8_t v){ return 8.f * powf(375.f,v/127.f); }
-// Must track PunchStartRatio / PunchSweepMs in the Daisy firmware: SHAPE is
-// the punch sweep's depth, 1x (no sweep) at 0 to a 30x laser at 127.
-void KickPerformance::shapeValues(uint8_t v, float& ratio, float& seconds){
-  float x = v/127.f;
-  ratio = powf(30.f, powf(x, 1.35f));
-  float ms = x <= .5f ? 20.f + (88.f-20.f)*(x/.5f) : 88.f + (110.f-88.f)*((x-.5f)/.5f);
-  seconds = ms/1000.f;
-}
+// The Daisy's MacroDecaySeconds: the body is ~30 dB down at this time.
+float KickPerformance::releaseMs(uint8_t v){ return kickdaisy::decaySeconds(v) * 1000.f; }
+// The Daisy's ShapeSweepTimeMs: SHAPE is the sweep's TIME (and character);
+// its depth is the kick channel's velocity, DEPTH on Menu 1.
+float KickPerformance::shapeSweepSeconds(uint8_t v){ return kickdaisy::shapeSweepMs(v/127.f) / 1000.f; }
 void KickPerformance::frequencyText(char* out, size_t size, float hz, bool compact){
   if (hz < 1000) snprintf(out,size,compact ? "%.0fH" : "%.0f Hz",hz);
   else snprintf(out,size,compact ? "%.1fK" : "%.1f kHz",hz/1000.f);
@@ -383,12 +380,9 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     if (v == 0) snprintf(out,size,"OFF");
     else frequencyText(out,size,frequency(p,v),compact);
   } else if (p == DECAY){
-    if (v >= 126) snprintf(out,size,"INF");
-    else {
-      float ms = releaseMs(v);
-      if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
-      else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
-    }
+    float ms = releaseMs(v);
+    if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
+    else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
   } else if (p == TAIL) snprintf(out,size,compact ? "%.1fS" : "%.2f STEP",2.f*v/127.f);
   else if (p >= BPF1 && p <= BPF3) frequencyText(out,size,frequency(p,v),compact);
   else if ((p == DELAY || p == REVERB) && v == 0) snprintf(out,size,"OFF");
@@ -493,15 +487,14 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
       float dip = t < .15f ? 0 : t < .23f ? (t-.15f)/.08f : expf(-(t-.23f)*6.f);
       amplitude = 1.f-depth*dip;
     } else if (p == DECAY){
-      amplitude = v >= 126 ? .9f : expf(-t/(.025f+.7f*x*x));
+      amplitude = expf(-t/(.025f+.7f*x*x));
     } else if (p == TAIL){
       float start = .08f+.65f*x;
       amplitude = t < .015f ? 1.f : t < start ? 0.f : .8f*expf(-(t-start)*12.f);
     } else if (p == SHAPE){
-      float ratio,seconds; shapeValues(v,ratio,seconds);
-      // Keep the smallest displacement visible on the 13-pixel plot.
-      float height = .17f + .83f*logf(ratio)/logf(30.f);
-      amplitude = height*expf(-t/(.025f+seconds*2.f));
+      // The sweep's length: short at 0 (a bass tone), long towards a laser.
+      float seconds = shapeSweepSeconds(v);
+      amplitude = .9f*expf(-t/(.004f+seconds*2.f));
     }
     int y = GRAPH_BOTTOM-(int)(amplitude*(GRAPH_BOTTOM-GRAPH_TOP));
     if (px > LEFT) d.drawLine(px-1,previousY,px,y,SH110X_WHITE);
@@ -553,8 +546,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
     snprintf(extra,sizeof(extra),"%s",v == 0 ? "DRY" : pct <= 25 ? "BASE DRIVE" : pct <= 48 ? "MID I" : pct < 73 ? "MID II" : "MID III");
     snprintf(footer,sizeof(footer),"%s %u%%",p == MACKIE ? "TUBE" : "MACKIE",percent(p == MACKIE ? state_.tubeAmount : state_.mackieAmount));
   } else {
-    float ratio,seconds; shapeValues(v,ratio,seconds);
-    snprintf(extra,sizeof(extra),"%.2fx  %.0f ms",ratio,seconds*1000.f);
+    snprintf(extra,sizeof(extra),"SWEEP %.0f ms",shapeSweepSeconds(v)*1000.f);
     snprintf(footer,sizeof(footer),"PUMP %s",state_.pumpEnabled ? "ON" : "OFF");
   }
   label(d,0,0,title);

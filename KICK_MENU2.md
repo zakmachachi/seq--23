@@ -25,9 +25,9 @@ One snapshot is sent after MIDI initialization: CC30–36=0; CC40=64; CC41–43=
 
 ## Tail delay and the mix page (v1.3.0)
 
-TAIL DELAY is an envelope over the whole kick: full level through the punch, then (when enabled) the whole voice drops out over 6 ms and comes back at the tail delay time, rising over TAIL ATTACK. A delay shorter than the punch leaves no gap. The mix page (FUNCTION + MENU2) holds TAIL ATTACK on pot 3 (CC61, 6–60 ms), where the Tube gain was, and DIST on pot 2 sets both distortion gains at once: Mackie CC54 at the dial's value and Tube CC55 at 80/65 of it, the ratio their separate defaults had.
+TAIL DELAY is an internal sidechain on the tail: the front of the kick plays as normal, then (when enabled) the tail window, clean and distorted together, is held down until the tail delay time and recovers over 2.5–26 ms while the oscillator keeps running underneath. DECAY (CC40) runs from 45 ms to 2.4 s, the body about 30 dB down at that time; there is no INF. The mix page (FUNCTION + MENU2) greys out pot 3 (TAIL ATTACK; CC61 is not sent, the new voice has no such control), and DIST on pot 2 sets both distortion gains at once: Mackie CC54 at the dial's value and Tube CC55 at 80/65 of it, the ratio their separate defaults had. PUNCH (CC58) lifts the body through the sweep's window, 0 = flat to +6 dB; SUB (CC57) is the whole dry kick's level.
 
-Three per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 2 is WAVE (CC64, sine to supersaw), pot 3 is SWEEP (CC62, the punch sweep time, 0.25x–4x SHAPE's own) and pot 5 is TMOD (CC63, a wobble macro: 0 off, rising to ±2 semitones at up to 12 Hz and increasingly irregular); pot 6's velocity is shown as PITCH, in semitones. The CCs are sent from the step engine just before each kick note, only when they change.
+Three per-hit kick controls live on Menu 1 rather than here. On a KICK channel, pot 2 is WAVE (CC64, sine to supersaw), pot 5 is SWEEP TIME (CC78, 0.65x–1.55x SHAPE's sweep time, shown in ms; the knob's 64 is sent as the Daisy's neutral 70) and pot 6's velocity is shown as DEPTH, 0–127: the sweep starts up to 48 semitones above the note. A kick never sends velocity 0. Pot 3 is greyed out. The CCs are sent from the step engine just before each kick note, only when they change.
 
 ## Motion lane
 

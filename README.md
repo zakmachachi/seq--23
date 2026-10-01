@@ -13,18 +13,17 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ## What's new in v1.3.0
 
-**The kick has been rebuilt from scratch, and the click is gone.** It is now a single sine whose pitch sweep (the punch) and bass tone (the sub) are two envelopes on the same oscillator, so they can no longer beat against each other. A hit that lands while the last one is still ringing picks up exactly where the old sine is and glides onto the new hit, instead of cutting it off.
+**The kick has been rebuilt from scratch.** It is one oscillator that starts the same way on every hit. Three things set its shape, the way they do on a dedicated drum machine: the **note** is the pitch the kick settles on, **DEPTH** is how far above that note the punch's pitch sweep starts, and **SHAPE** is how long the sweep lasts and how hard the front of the kick is.
 
 **Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
 - **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics. The saws are locked to the sub the way the sine is, so the body never phases against it and every kick starts the same; only the top shimmers. Their buzz is kept above 250 Hz, a sine sub under a high-passed supersaw, so SHAPE's punch cuts through and the low end stays put at full WAVE
-- **SWEEP** clicks into place at 1.00x on the way past, and **FUNCTION + pot 3** snaps it straight back there
-- **SWEEP** (pot 3) sets how long the punch sweep takes, from a quarter to four times SHAPE's own length. SHAPE still sets how deep it goes
-- **TMOD** (pot 5) is a wobble macro for the tail: turning it up makes the pitch move deeper (up to two semitones either way), faster and more irregular. Its button switches it off. Record it under FUNCTION like any Notes-page knob and it changes per step
-- **PITCH** (pot 6, formerly velocity) is the quick glide at the start of the tail, up to an octave down or up
+- **SWEEP TIME** (pot 5) stretches or shortens SHAPE's sweep, from 0.65x to 1.55x, and shows the result in milliseconds. It clicks into place at 1.00x on the way past, and its button snaps it straight back there. Record it under FUNCTION like any Notes-page knob and it changes per step
+- **DEPTH** (pot 6, formerly velocity) is where the sweep starts, 0 to 127: 0 is no sweep at all, 127 starts four octaves above the note
+- Pot 3 is greyed out for now
 - Gate is gone for the kick: the Daisy never used it
-- Screen 2 draws the kick you are about to hear: its pitch over time on top, with the note as a dotted line, and underneath the punch (hatched) handing over to the sub (solid)
+- Screen 2 shows the kick's waveform as a scope: the sweep's tight cycles at the front opening out onto the body. While a hit plays, a cursor runs across it in real time
 
-**Tail delay shapes the whole kick.** The kick plays at full level through the punch; with tail delay on, the whole kick — sub, pitch movement, distortion and all — then drops out and comes back in at the tail delay time, while it keeps evolving underneath. **TAIL ATTACK** on the mix page (FUNCTION + MENU2, pot 3) sets how fast it comes back, from a sharp 6 ms to a 60 ms swell.
+**Tail delay separates the punch from the bass.** The front of the kick plays as normal; with tail delay on, the tail, clean and distorted together, is held down and comes back in at the tail delay time, while it keeps running underneath. **DECAY** now runs from 45 ms to 2.4 s; there is no infinite setting any more.
 
 **One distortion dial.** On the mix page, **DIST** (pot 2) sets the Mackie and Tube levels together.
 
@@ -36,7 +35,8 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - Mackie sounds the way it did before the rebuild, and turning it up no longer eats the low end
 - The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
-- **PUNCH** on the mix page reaches twice as far: 50 % is where it was, 100 % is 6 dB hotter, and the lower half goes quieter, so the whole fader travel does something
+- **PUNCH** on the mix page lifts the front of the kick, through the sweep, by up to 6 dB: 0 % is a flat kick. **SUB** is the level of the whole kick
+- **TAIL ATTACK** on the mix page (pot 3) is greyed out: the new kick has no such control
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
 - The Digitakt return gets a 25 Hz high-pass at its input. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
 
@@ -84,7 +84,7 @@ It works on the kick page for every performance parameter except the two repeats
 **seq-23 now has a voice of its own.** Alongside sequencing external gear, it drives a dedicated kick synthesiser running on a Daisy Seed, played live from the sequencer's own knobs.
 
 **The kick**
-- Two distortion characters — *Mackie* and *Sherman* — on a parallel send, so the low end stays clean however hard you drive them
+- Two distortion characters — *Mackie* and *Tube* — on a parallel send, so the low end stays clean however hard you drive them
 - **SHAPE** sweeps the whole voice from a round body, through a tight punch, to a long descending laser
 - A three-layer resonant filter bank you can sweep and stack
 - A **sidechain reverb** that ducks and re-triggers on every hit, so tails bloom in the gaps instead of washing into the next kick

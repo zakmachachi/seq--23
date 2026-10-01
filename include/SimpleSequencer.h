@@ -49,9 +49,9 @@ class SimpleSequencer {
     // Kick fill steps emit CC47 from triggerChannel(), which runs in the 1 ms
     // engine ISR. A latest-value slot drained in the foreground like
     // KickPerformance's pending array, so a full UART is never spun on.
-    // Slot 0 is CC47 (BPF layers); 1..3 are the v1.3.0 per-hit kick shape
-    // CCs, CC62 SWEEP TIME, CC63 TAIL MOD and CC64 WAVE, sent just before
-    // each note-on.
+    // Slot 0 is CC47 (BPF layers); 1 and 3 are the per-hit kick shape CCs,
+    // CC78 SWEEP TIME and CC64 WAVE, sent just before each note-on. Slot 2
+    // (CC63, the old TAIL MOD) is no longer sent.
     static const uint8_t FILL_CC_COUNT = 4;
     volatile bool fillCCPending[FILL_CC_COUNT] = {};
     volatile uint8_t fillCCValue[FILL_CC_COUNT] = {};
@@ -176,12 +176,12 @@ class SimpleSequencer {
     uint32_t bpfRandomFocusEndMs = 0;
     // Kick-specific live-performance params (per channel)
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
-    // v1.3.0: on Menu 1 a KICK channel's pots 2, 3 and 5 drive the Daisy's
-    // waveform, punch sweep time and tail wobble instead of scale, spread and
-    // gate, and its velocity is shown as PITCH.
+    // On Menu 1 a KICK channel's pots 2 and 5 drive the Daisy's waveform and
+    // sweep time instead of scale and gate, pot 3 is greyed out, and its
+    // velocity is shown as DEPTH, the sweep's start.
     uint8_t kickWave[NUM_CHANNELS];           // CC64: 0 sine .. 127 supersaw
-    uint8_t kickSweepTime[NUM_CHANNELS];      // CC62: 64 = SHAPE's own, 0.25x..4x
-    uint8_t kickTailMod[NUM_CHANNELS];        // CC63: 0 off .. 127 +-2 st wobble
+    uint8_t kickSweepTime[NUM_CHANNELS];      // CC78 via sweepTimeCC: 64 = 1.00x, 0.65x..1.55x
+    uint8_t kickTailMod[NUM_CHANNELS];        // unused (the old TAIL MOD), kept for the save layout
     bool isKickChannel(uint8_t ch) const;
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held

@@ -55,12 +55,14 @@ struct FakeOled {
 int main(int argc, char** argv){
   const char* dir = argc > 1 ? argv[1] : ".";
   struct Case { const char* name; KickShapeInputs in; };
-  Case cases[5];
+  Case cases[7];
   cases[0].name = "default";
-  cases[1].name = "tail_delay_gap"; cases[1].in.shape = 64; cases[1].in.tailOn = true; cases[1].in.tailAmount = 90; cases[1].in.decay = 80;
-  cases[2].name = "pitch_down_tmod";  cases[2].in.velocity = 10; cases[2].in.tailMod = 100; cases[2].in.decay = 90;
-  cases[3].name = "round_long";       cases[3].in.shape = 0; cases[3].in.decay = 110; cases[3].in.sweepTime = 110;
-  cases[4].name = "punchy_short";     cases[4].in.shape = 90; cases[4].in.decay = 30; cases[4].in.wave = 127; cases[4].in.sweepTime = 30;
+  cases[1].name = "playing_40ms";    cases[1].in.elapsedMs = 40;
+  cases[2].name = "tail_delay";      cases[2].in.tailOn = true; cases[2].in.tailAmount = 90; cases[2].in.decay = 80;
+  cases[3].name = "no_sweep_bass";   cases[3].in.shape = 0; cases[3].in.decay = 110;
+  cases[4].name = "laser_long";      cases[4].in.shape = 127; cases[4].in.velocity = 127; cases[4].in.sweepTime = 110;
+  cases[5].name = "short_supersaw";  cases[5].in.shape = 90; cases[5].in.decay = 30; cases[5].in.wave = 127;
+  cases[6].name = "depth_low";       cases[6].in.velocity = 30; cases[6].in.note = 40;
   {
     // The WAVE icon across its range, as screen 1 shows it.
     FakeOled d;

@@ -103,7 +103,7 @@ private:
   static float smoothstep(float value);
   static float frequency(Parameter parameter, uint8_t value);
   static float releaseMs(uint8_t value);
-  static void shapeValues(uint8_t value, float& ratio, float& seconds);
+  static float shapeSweepSeconds(uint8_t value);
   static void frequencyText(char* out, size_t size, float hz, bool compact);
   void valueText(Parameter parameter, char* out, size_t size, bool compact) const;
   void drawOverview(Adafruit_SH1106G& display);

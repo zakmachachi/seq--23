@@ -7,7 +7,16 @@ namespace {
 constexpr uint8_t CC[] = {53,54,61,56,57,58,55};
 constexpr uint8_t CC_SLOTS = sizeof(CC);
 const char* const SHORT_NAMES[] = {"LINE","DIST","T.ATK","BPF","SUB","PUNCH"};
-const char* const LONG_NAMES[] = {"LINE OUT","DISTORTION","TAIL ATTACK","BPF MIX","SUB","PUNCH VOL"};
+const char* const LONG_NAMES[] = {"LINE OUT","DISTORTION","TAIL ATTACK","BPF MIX","SUB","PUNCH"};
+// The Daisy's new kick voice has no TAIL ATTACK: the control is greyed out,
+// its knob does nothing and CC61 is not sent.
+bool unused(uint8_t c){ return c == KickMixer::TAIL_ATTACK; }
+// Every other pixel knocked out, so what was drawn reads at half brightness.
+void greyOut(Adafruit_SH1106G& d, int x, int y, int w, int h){
+  for (int yy = y; yy < y + h; yy++)
+    for (int xx = x; xx < x + w; xx++)
+      if (((xx + yy) & 1) == 0) d.drawPixel(xx, yy, SH110X_BLACK);
+}
 // DIST keeps the Mackie/Tube balance their separate defaults had (65 / 80).
 constexpr float TUBE_PER_DIST = 80.f / 65.f;
 constexpr float PI_F = 3.14159265358979323846f;
@@ -41,6 +50,7 @@ void KickMixer::flushMidi(){
   }
 }
 void KickMixer::queueControl(uint8_t c){
+  if (unused(c)) return;
   queue(CC[c], value_[c]);
   if (c == DIST){
     int tube = (int)lroundf(value_[c] * TUBE_PER_DIST);
@@ -124,6 +134,7 @@ void KickMixer::sampleAngle(uint8_t knob, float angle){
 }
 void KickMixer::adjust(uint8_t knob, int delta){
   if (!active_ || knob >= 6 || delta == 0) return;
+  if (unused(knob)) return;
   focusControl(knob);
   uint8_t current = value_[knob];
   uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
@@ -135,8 +146,7 @@ void KickMixer::adjust(uint8_t knob, int delta){
 
 uint8_t KickMixer::percent(uint8_t v){ return ((unsigned)v * 100 + 63) / 127; }
 void KickMixer::valueText(uint8_t c, char* out, size_t size) const {
-  // Must track TAIL_ATTACK_MIN_MS / _MAX_MS on the Daisy.
-  if (c == TAIL_ATTACK) snprintf(out,size,"%.0fms",6.f * powf(10.f, value_[c]/127.f));
+  if (unused(c)) snprintf(out,size,"--");
   else snprintf(out,size,"%u%%",percent(value_[c]));
 }
 
@@ -148,6 +158,7 @@ void KickMixer::drawOverview(Adafruit_SH1106G& d){
     valueText(k,value,sizeof(value));
     if (focusKnob_ == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
     label(d,x+3,y+3,SHORT_NAMES[k]); label(d,x+3,y+13,value);
+    if (unused(k)) greyOut(d,x+3,y+3,36,18);
   }
   d.setTextWrap(true); d.display();
 }
@@ -159,6 +170,12 @@ void KickMixer::drawFocus(Adafruit_SH1106G& d){
   char value[16];
   valueText(focusKnob_,value,sizeof(value));
   label(d,0,13,LONG_NAMES[focusKnob_]);
+  if (unused(focusKnob_)){
+    label(d,0,30,"NOT USED BY");
+    label(d,0,40,"THIS KICK VOICE");
+    d.setTextWrap(true); d.display();
+    return;
+  }
   label(d,0,26,value,3);
   d.drawRect(LEFT,52,RIGHT-LEFT+1,10,SH110X_WHITE);
   int w = (RIGHT-LEFT-1)*v/127;

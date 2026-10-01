@@ -3,123 +3,143 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
-// The Daisy kick as screen 2 draws it: pitch and level over time, computed
-// with the same formulas the Daisy's KickVoice uses. Header-only and free of
-// Arduino types so a desktop preview can render the exact same picture.
-// Anything changed in the Daisy's KickVoice / KickHitParams must be mirrored
-// here, or the screen stops showing what is being played.
+// The Daisy kick as the Teensy shows it: the Daisy's own laws, and screen 2's
+// picture of the kick drawn from them. Header-only and free of Arduino types
+// so a desktop preview renders the exact same picture. Anything changed in
+// the Daisy's KickVoice (daisy-kick/midi_oled_monitor.cpp) must be mirrored
+// here, or the screens stop showing what is being played.
+
+namespace kickdaisy {
+
+inline float clamp01(float x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
+inline float smooth(float x){ x = clamp01(x); return x * x * (3.f - 2.f * x); }
+
+// KickVoice::ShapeMap: round / punch / hard values across SHAPE.
+inline float shapeMap(float x, float a, float b, float c){
+  x = clamp01(x);
+  return x <= .5f ? a + (b - a) * smooth(x * 2.f) : b + (c - b) * smooth((x - .5f) * 2.f);
+}
+
+// MIDI note = the settled body pitch, 30..120 Hz.
+inline float noteHz(uint8_t note){
+  float f = 440.f * powf(2.f, ((int)note - 69) / 12.f);
+  return f < 30.f ? 30.f : (f > 120.f ? 120.f : f);
+}
+
+// PitchMacroStartRatio: velocity is the sweep DEPTH, 1x at 1 to 16x at 127.
+inline float depthRatio(uint8_t velocity){
+  float p = clamp01(((velocity < 1 ? 1 : velocity) - 1) / 126.f);
+  return powf(2.f, 48.f * powf(p, .9f) / 12.f);
+}
+
+// ShapeSweepTimeMs: SHAPE owns the sweep TIME.
+inline float shapeSweepMs(float shape){
+  shape = clamp01(shape);
+  if (shape <= .25f) return .7f + (11.f - .7f) * smooth(shape / .25f);
+  if (shape <= .50f) return 11.f + (28.f - 11.f) * smooth((shape - .25f) / .25f);
+  if (shape <= .75f) return 28.f + (55.f - 28.f) * smooth((shape - .5f) / .25f);
+  return 55.f + (135.f - 55.f) * smooth((shape - .75f) / .25f);
+}
+
+// Menu 1 SWEEP TIME knob -> CC78. The knob keeps 64 as its neutral (and its
+// detent); the Daisy's neutral is 70, so each half maps onto its own side.
+inline uint8_t sweepTimeCC(uint8_t knob){
+  if (knob > 127) knob = 127;
+  return knob <= 64 ? (uint8_t)((knob * 70 + 32) / 64)
+                    : (uint8_t)(70 + ((knob - 64) * 57 + 31) / 63);
+}
+
+// SweepTimeTrim, on the CC78 value: 0.65x .. 1x at 70 .. 1.55x.
+inline float sweepTimeTrim(uint8_t cc){
+  float x = clamp01(cc / 127.f);
+  return x <= .55f ? .65f + .35f * (x / .55f) : 1.f + .55f * ((x - .55f) / .45f);
+}
+
+// The sweep's length, SHAPE and the SWEEP TIME knob together.
+inline float sweepMs(uint8_t shape, uint8_t sweepKnob){
+  float ms = shapeSweepMs(shape / 127.f) * sweepTimeTrim(sweepTimeCC(sweepKnob));
+  return ms < .5f ? .5f : (ms > 220.f ? 220.f : ms);
+}
+
+// MacroDecaySeconds: the body is ~30 dB down at this time. No INF.
+inline float decaySeconds(uint8_t decay){
+  float s = .045f * powf(53.3333333f, decay / 127.f);
+  return s < .04f ? .04f : (s > 3.5f ? 3.5f : s);
+}
+
+// MacroTailDelayMs: how long TAIL DELAY holds the tail down.
+inline float tailDelayMs(uint8_t amount, uint32_t bpm){
+  float quarter = 60000.f / (bpm ? bpm : 120);
+  return quarter * .5f * powf(amount / 127.f, 1.7f);
+}
+
+} // namespace kickdaisy
 
 struct KickShapeInputs {
-  uint8_t note = 33;          // MIDI note (channel root)
-  uint8_t shape = 64;         // K6 SHAPE: punch sweep depth
-  uint8_t sweepTime = 64;     // Menu 1 SWEEP: 64 = SHAPE's own time
-  uint8_t velocity = 64;      // Menu 1 PITCH
-  uint8_t tailMod = 0;        // Menu 1 TMOD: wobble intensity
+  uint8_t note = 33;          // MIDI note (channel root): the body pitch
+  uint8_t shape = 64;         // K6 SHAPE: sweep time and character
+  uint8_t sweepTime = 64;     // Menu 1 SWEEP TIME knob, 64 = neutral
+  uint8_t velocity = 100;     // Menu 1 DEPTH: the sweep's start
   uint8_t wave = 0;           // Menu 1 WAVE: sine -> supersaw
   uint8_t decay = 64;         // K2 DECAY
   bool tailOn = false;        // B3
   uint8_t tailAmount = 0;     // K3
-  uint8_t tailAttack = 0;     // mix page pot 3
   uint32_t bpm = 120;
+  int32_t elapsedMs = -1;     // since this channel's last hit; < 0 = idle
 };
 
+// The kick's body, sample by sample, as KickVoice::Process renders it (the
+// attack click and the output stage are left out: neither changes the shape).
 struct KickShape {
-  float f0 = 55, ratio = 1, sweepMs = 88, holdMs = 36, endMs = 82;
-  float decayS = .5f, delayMs = 0, pitchSt = 0, attackMs = 6, totalMs = 300;
-  float gapHoldMs = 82;   // TAIL DELAY: full through the punch, then a gap
-  float wobbleDepth = 0, wobbleHz = 2, wobbleIrregular = 0;
-  bool inf = false;
-
-  static float smooth(float x){
-    x = x < 0 ? 0 : (x > 1 ? 1 : x);
-    return x * x * (3.f - 2.f * x);
-  }
-  static float threePoint(float x, float a, float b, float c){
-    return x <= .5f ? a + (b - a) * smooth(x / .5f) : b + (c - b) * smooth((x - .5f) / .5f);
-  }
+  float f0 = 55, depth = 0, sweepMs = 28, decayS = .33f;
+  float morph = 0, asym = 0, belly = 0, bellyStart = 0, bellyPeak = 1, bellyEnd = 2;
+  float tailStart = 14, tailEnd = 34, holdMs = 0, riseMs = 2.5f, wave = 0;
+  bool tailActive = false;
 
   void compute(const KickShapeInputs& in){
-    f0 = 440.f * powf(2.f, ((int)in.note - 69) / 12.f);
-    f0 = f0 < 25.f ? 25.f : (f0 > 130.f ? 130.f : f0);
-    float p = in.shape / 127.f;
-    ratio = powf(30.f, powf(p, 1.35f));
-    if (f0 * ratio > 3000.f) ratio = 3000.f / f0;
-    float scale = powf(2.f, ((int)in.sweepTime - 64) / 32.f);
-    sweepMs = (p <= .5f ? 20.f + 68.f * (p / .5f) : 88.f + 22.f * ((p - .5f) / .5f)) * scale;
-    holdMs = threePoint(p, 20.f, 36.f, 115.f) * scale;
-    endMs = threePoint(p, 52.f, 82.f, 165.f) * scale;
-    float x = in.decay / 127.f;
-    inf = x >= .99f;
-    decayS = inf ? 2.f : .035f * powf(171.428571f, x);
-    delayMs = 0;
-    if (in.tailOn && in.tailAmount > 0){
-      float quarter = 60000.f / (in.bpm ? in.bpm : 120);
-      delayMs = quarter * .5f * powf(in.tailAmount / 127.f, 1.7f);
-    }
-    gapHoldMs = endMs;
-    uint8_t v = in.velocity < 1 ? 1 : in.velocity;
-    pitchSt = v <= 64 ? -12.f * (1.f - (v - 1) / 63.f) : 12.f * (v - 64) / 63.f;
-    float intensity = in.tailMod / 127.f;
-    wobbleDepth = 2.f * intensity;
-    wobbleHz = 2.f + 10.f * intensity * intensity;
-    wobbleIrregular = .6f * intensity;
-    attackMs = 6.f * powf(10.f, in.tailAttack / 127.f);
-    // The old blended sub decay empties in ~61 % of the DECAY time.
-    float subMs = inf ? 1200.f : .61f * decayS * 1000.f;
-    float end = subMs > delayMs + 60.f ? subMs : delayMs + 60.f;
-    if (end < endMs) end = endMs;
-    totalMs = end < 150.f ? 150.f : (end > 1200.f ? 1200.f : end);
+    using namespace kickdaisy;
+    float s = in.shape / 127.f;
+    f0 = noteHz(in.note);
+    float ratio = s <= .0025f ? 1.f : depthRatio(in.velocity);
+    if (f0 * ratio > 3200.f) ratio = 3200.f / f0;
+    depth = ratio - 1.f;
+    sweepMs = kickdaisy::sweepMs(in.shape, in.sweepTime);
+    decayS = decaySeconds(in.decay);
+    morph = shapeMap(s, 0.f, .44f, .88f);
+    asym = shapeMap(s, 0.f, .012f, .045f);
+    belly = shapeMap(s, 0.f, .16f, .11f);
+    bellyStart = shapeMap(s, 18.f, 12.f, 8.f);
+    bellyPeak = shapeMap(s, 72.f, 48.f, 36.f);
+    bellyEnd = shapeMap(s, 230.f, 170.f, 130.f);
+    tailStart = shapeMap(s, 10.f, 14.f, 18.f);
+    tailEnd = shapeMap(s, 28.f, 34.f, 44.f);
+    holdMs = in.tailOn && in.tailAmount > 0 ? tailDelayMs(in.tailAmount, in.bpm) : 0.f;
+    tailActive = holdMs > .05f;
+    float quarter = 60000.f / (in.bpm ? in.bpm : 120);
+    float d01 = clamp01(holdMs / (quarter * .5f));
+    riseMs = 2.5f + 24.f * sqrtf(d01);
+    wave = in.wave / 127.f;
   }
 
-  // TAIL DELAY: the whole kick's level, t ms after the hit (the Daisy's
-  // KickVoice::GapLevel).
-  float gapLevel(float t) const {
-    if (delayMs <= 0 || t < gapHoldMs) return 1.f;
-    float down = 1.f - smooth((t - gapHoldMs) / 6.f);
-    float up = t < delayMs ? 0.f : smooth((t - delayMs) / attackMs);
-    return 1.f - (1.f - down) * (1.f - up);
-  }
+  float tailWindow(float ms) const { return kickdaisy::smooth((ms - tailStart) / (tailEnd - tailStart)); }
 
-  // Pitch relative to the note, in semitones, t ms after the hit.
-  float pitchSemitones(float t) const {
-    float st = 0;
-    {
-      float ts = t;
-      st += pitchSt * smooth(ts / 115.f);
-      if (wobbleDepth > 0){
-        float c = wobbleHz * ts / 1000.f;
-        float shape = (sinf(c * 6.2831853f) + wobbleIrregular * sinf(c * 1.73f * 6.2831853f + 1.1f)) /
-                      (1.f + wobbleIrregular);
-        st += wobbleDepth * smooth(ts / 40.f) * shape;
-      }
-    }
-    float base = f0 * powf(2.f, st / 12.f);
-    base = base < 12.f ? 12.f : (base > 440.f ? 440.f : base);
-    float f = base * (1.f + (ratio - 1.f) * expf(-6.9078f * t / sweepMs));
-    return 12.f * log2f(f / f0);
-  }
-
-  // Punch and sub levels, 0..1, t ms after the hit (the old anatomy).
-  void levels(float t, float& punch, float& sub) const {
-    float a = t <= holdMs ? 0.f : smooth((t - holdMs) / (endMs - holdMs));
-    float g = gapLevel(t);
-    punch = cosf(a * 1.5707963f) * g;
-    float env = inf ? 1.f : 1.177f * expf(-3.1085f * t / (decayS * 1000.f)) - .177f;
-    if (env < 0) env = 0;
-    sub = sinf(a * 1.5707963f) * env * smooth(t / 6.f) * g;
+  // Body level (no waveform) t ms after the hit: decay, sweep compensation,
+  // the belly contour and TAIL DELAY's duck.
+  float level(float ms, float ratioNow) const {
+    float env = expf(-3.453877639f * ms / (decayS * 1000.f));
+    float comp = 1.f / sqrtf(1.f + .18f * (ratioNow - 1.f));
+    comp = comp < .52f ? .52f : (comp > 1.f ? 1.f : comp);
+    float b = 1.f;
+    if (belly > 0 && ms > bellyStart && ms < bellyEnd)
+      b += belly * (ms < bellyPeak ? kickdaisy::smooth((ms - bellyStart) / (bellyPeak - bellyStart))
+                                   : 1.f - kickdaisy::smooth((ms - bellyPeak) / (bellyEnd - bellyPeak)));
+    float tw = tailWindow(ms);
+    float gate = !tailActive ? 1.f : (ms <= holdMs ? 0.f : kickdaisy::smooth((ms - holdMs) / riseMs));
+    return env * comp * b * ((1.f - tw) + tw * gate);
   }
 };
-
-// Pitch display scale: exact semitones near the note, compressed above +14 so
-// a laser punch (up to ~+59) still fits while PITCH and the TMOD wobble keep
-// their resolution. Returns "display semitones", -14..+30.
-inline float kickShapeDisplaySt(float st){
-  if (st > 14.f) st = 14.f + (st - 14.f) * .35f;
-  if (st > 30.f) st = 30.f;
-  if (st < -14.f) st = -14.f;
-  return st;
-}
 
 // WAVE as a picture, w x h pixels at (x, y), in the style of the Elektron
 // Digitone 2 / Digitakt 2 wave displays: the waveform itself bends rather than
@@ -144,72 +164,91 @@ void drawWaveIcon(D& d, int x, int y, int w, int h, uint8_t wave, uint16_t white
   }
 }
 
-// Draws the 128x64 kick view. D is any Adafruit_GFX-like display with
-// clearDisplay, setTextSize, setTextColor, setCursor, print(const char*),
-// drawPixel, drawLine, drawFastHLine, drawFastVLine and fillTriangle, and
-// the colour constants passed in (white, inverse).
+// Screen 2's time axis: linear, so the sweep reads as it sounds, tight cycles
+// at the front opening out onto the body. The first 150 ms of the hit, or
+// with TAIL DELAY on, long enough to show the tail coming back.
+inline float kickViewMs(const KickShape& k){
+  float ms = k.tailActive ? k.holdMs + 50.f : 150.f;
+  return ms < 150.f ? 150.f : (ms > 400.f ? 400.f : ms);
+}
+
+// Draws the 128x64 kick view: the waveform the Daisy plays, as a scope.
+// While a hit is sounding, the part already played is solid, the rest is
+// dimmed, and a cursor runs across in real time. D is any Adafruit_GFX-like
+// display with clearDisplay, setTextSize, setTextColor, setCursor,
+// print(const char*), drawPixel and drawFastVLine.
 template <class D>
 void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inverse){
+  (void)inverse;
   KickShape k; k.compute(in);
   d.clearDisplay();
   d.setTextSize(1);
   d.setTextColor(white);
 
-  // Header: the kick channel's Menu 1 knobs, in pot order, in fixed
-  // six-character columns so they never run into each other.
-  char text[12];
-  drawWaveIcon(d, 2, 0, 24, 9, in.wave, white);
-  snprintf(text, sizeof(text), "SWP%.1f", powf(2.f, ((int)in.sweepTime - 64) / 32.f));
-  d.setCursor(46, 0); d.print(text);
-  snprintf(text, sizeof(text), "TMD%3d", (int)(in.tailMod * 100 + 63) / 127);
-  d.setCursor(92, 0); d.print(text);
+  // Header: the body pitch on the left, the sweep on the right.
+  static const char* const NOTE_NAMES[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  char text[16];
+  snprintf(text, sizeof(text), "%s%d %.0fHz", NOTE_NAMES[in.note % 12], (int)(in.note / 12) - 1, k.f0);
+  d.setCursor(0, 0); d.print(text);
+  if (k.depth > .005f) snprintf(text, sizeof(text), "%.1fx %.0fms", 1.f + k.depth, k.sweepMs);
+  else snprintf(text, sizeof(text), "NO SWEEP");
+  d.setCursor(128 - 6 * (int)strlen(text), 0); d.print(text);
 
-  // Pitch panel, y 11..35: the note is a dotted line, the curve is the punch
-  // sweep, the PITCH glide and the TMOD wobble.
-  const int pTop = 11, pBot = 35;
-  auto pitchY = [&](float st){
-    float v = kickShapeDisplaySt(st);           // -14..+30
-    return pBot - (int)lroundf((v + 14.f) / 44.f * (pBot - pTop));
-  };
-  int noteY = pitchY(0);
-  for (int x = 0; x < 128; x += 3) d.drawPixel(x, noteY, white);
+  // The body, rendered at 24 kHz into per-column min / max.
+  const int mid = 37, half = 26;
+  int8_t lo[128], hi[128];
+  for (int x = 0; x < 128; x++){ lo[x] = 127; hi[x] = -128; }
+  const float sr = 24000.f;
+  const float pitchCoef = expf(-6.907755f / (k.sweepMs * .001f * sr));
+  const float hpA = 1.f - expf(-6.2831853f * 250.f / sr);   // WAVE_BODY_HP_A at this rate
+  float phase = 0, pitchEnv = 1, hpLp = 0;
+  int prevX = 0, prevY = 0;
+  const float viewMs = kickViewMs(k);
+  const int n = (int)(viewMs * .001f * sr);
+  for (int i = 0; i < n; i++){
+    float ms = i * 1000.f / sr;
+    float ratioNow = 1.f + k.depth * pitchEnv;
+    float f = k.f0 * ratioNow;
+    f = f < 18.f ? 18.f : (f > 3000.f ? 3000.f : f);
 
-  // Level panel, y 40..62: punch as a 50 % hatch, the sub solid in front of
-  // it, and one outline over the top of the two.
-  const int aTop = 40, aBot = 62;
-  int prevPitch = -1, prevTop = -1;
+    float s1 = sinf(phase * 6.2831853f);
+    float a = fabsf(s1);
+    float para = (s1 >= 0 ? 1.f : -1.f) * (2.f * a - a * a);
+    float body = (s1 + k.morph * (para - s1) + k.asym * (s1 * s1 - .5f)) / (1.f + .151173637f * k.morph);
+    if (k.wave > 0){
+      float q = phase + .5f; q -= floorf(q);
+      float h = (2.f * q - 1.f - .63661977f * s1) / .63661977f;
+      hpLp += hpA * (h - hpLp);
+      body += (h - hpLp) * k.wave * (.25f + .75f * k.tailWindow(ms));
+    }
+    float y = body * k.level(ms, ratioNow);
+    int yy = mid - (int)lroundf((y > 1.2f ? 1.2f : (y < -1.2f ? -1.2f : y)) * half / 1.2f);
+    int x = (int)(127.f * ms / viewMs); if (x > 127) x = 127;
+
+    // Connect to the previous sample across any columns it skipped.
+    if (i == 0){ prevX = x; prevY = yy; }
+    for (int cx = prevX; cx <= x; cx++){
+      int cy = x == prevX ? yy : prevY + (yy - prevY) * (cx - prevX) / (x - prevX);
+      int y0 = cx == prevX ? prevY : cy;
+      if (cy < lo[cx]) lo[cx] = (int8_t)cy;
+      if (cy > hi[cx]) hi[cx] = (int8_t)cy;
+      if (y0 < lo[cx]) lo[cx] = (int8_t)y0;
+      if (y0 > hi[cx]) hi[cx] = (int8_t)y0;
+    }
+    prevX = x; prevY = yy;
+
+    phase += f / sr; phase -= floorf(phase);
+    pitchEnv *= pitchCoef;
+  }
+
+  // Played part solid, the rest dimmed, and the cursor, while it sounds.
+  bool playing = in.elapsedMs >= 0 && in.elapsedMs < (int32_t)viewMs;
+  int cursor = playing ? (int)(127.f * in.elapsedMs / viewMs) : 128;
   for (int x = 0; x < 128; x++){
-    float t = x / 127.f * k.totalMs;
-    int y = pitchY(k.pitchSemitones(t));
-    if (prevPitch >= 0) d.drawLine(x - 1, prevPitch, x, y, white);
-    prevPitch = y;
-
-    float punch, sub; k.levels(t, punch, sub);
-    int yp = aBot - (int)lroundf(punch * (aBot - aTop));
-    int ys = aBot - (int)lroundf(sub * (aBot - aTop));
-    if (punch > .01f)
-      for (int yy = yp; yy <= aBot; yy++)
-        if (((x + yy) & 1) == 0) d.drawPixel(x, yy, white);
-    if (sub > .01f) d.drawFastVLine(x, ys, aBot - ys + 1, white);
-
-    int top = yp < ys ? yp : ys;
-    if (punch <= .01f && sub <= .01f) top = aBot + 1;   // nothing sounding
-    if (prevTop >= 0 && top <= aBot && prevTop <= aBot) d.drawLine(x - 1, prevTop, x, top, white);
-    else if (top <= aBot) d.drawPixel(x, top, white);
-    prevTop = top;
+    if (hi[x] < lo[x]) continue;
+    if (x <= cursor) d.drawFastVLine(x, lo[x], hi[x] - lo[x] + 1, white);
+    else for (int y = lo[x]; y <= hi[x]; y++) if (((x + y) & 1) == 0) d.drawPixel(x, y, white);
   }
-
-  // Baseline under the panel, with a gap every 100 ms.
-  d.drawFastHLine(0, 63, 128, white);
-  for (float ms = 100; ms < k.totalMs; ms += 100){
-    int x = (int)lroundf(ms / k.totalMs * 127.f);
-    d.drawPixel(x, 63, inverse);
-  }
-
-  // Where the kick comes back, when the tail is delayed.
-  if (k.delayMs > 0){
-    int x = (int)lroundf(k.delayMs / k.totalMs * 127.f);
-    d.fillTriangle(x - 2, 36, x + 2, 36, x, 38, white);
-  }
+  if (playing) for (int y = 10; y < 64; y += 2) d.drawPixel(cursor, y, white);
 }
 #endif
