@@ -4839,6 +4839,7 @@ void SimpleSequencer::drawKickShapeView(){
   in.decay = ks.decay;
   in.tailOn = ks.tailDelayEnabled;
   in.tailAmount = ks.tailDelayAmount;
+  in.punch = kickMixer.punch();
   in.bpm = bpm;
   // The cursor runs across while this channel's last hit is sounding.
   uint32_t since = millis() - chTrigMs[ch];

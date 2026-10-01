@@ -2049,8 +2049,12 @@ static constexpr float KICK_RETRIGGER_DECLICK_MS = 0.60f;
  * tail window of the continuously-running body oscillator. The early
  * pitch-swept body remains intact; the later tail is ducked and then recovered.
  */
-static constexpr float KICK_TAIL_MIN_RISE_MS = 2.5f;
-static constexpr float KICK_TAIL_MAX_EXTRA_RISE_MS = 24.0f;
+/*
+ * The tail comes back like a sidechain's release, not a gate opening: a 2.5 ms
+ * return chopped the bass on and made the punch -> bass split sound choppy.
+ */
+static constexpr float KICK_TAIL_MIN_RISE_MS = 15.0f;
+static constexpr float KICK_TAIL_MAX_EXTRA_RISE_MS = 45.0f;
 
 /*
  * The character send is Shape-aware rather than having a fixed transient law.
@@ -2198,6 +2202,15 @@ struct KickVoice
      */
     uint32_t tail_window_start_samples = 0;
     uint32_t tail_window_end_samples = 1;
+
+    /*
+     * The PUNCH window: what TAIL DELAY leaves standing in front of the duck,
+     * and what PUNCH lifts. Longer than the tail window above, so the punch
+     * carries several cycles of the settled body (its belly) rather than just
+     * the sweep; the tail window still sets the Mackie / WAVE timing.
+     */
+    uint32_t punch_window_start_samples = 0;
+    uint32_t punch_window_end_samples = 1;
 
     /* Latched TAIL DELAY internal-sidechain timing for the tail window only. */
     uint32_t tail_hold_samples = 0;
@@ -2482,6 +2495,16 @@ struct KickVoice
             tail_window_end_samples = tail_window_start_samples + 1;
 
         /*
+         * The punch holds through about 50 ms, four cycles of an 80 Hz body
+         * after the sweep, and eases out over ~60 ms: a punch with a belly
+         * instead of a click, and no hard edge into the duck.
+         */
+        punch_window_start_samples = MsToSamples(ShapeMap(shape, 40.0f, 50.0f, 60.0f));
+        punch_window_end_samples   = MsToSamples(ShapeMap(shape, 95.0f, 110.0f, 125.0f));
+        if(punch_window_end_samples <= punch_window_start_samples)
+            punch_window_end_samples = punch_window_start_samples + 1;
+
+        /*
          * TAIL DELAY AMOUNT/STATE is an INTERNAL SIDECHAIN on the tail, not
          * a delay line. At zero/off the gate is exactly unity. As the amount rises, the already
          * running tail is held down until the requested musical time and then
@@ -2529,6 +2552,22 @@ struct KickVoice
         float t =
             static_cast<float>(age - tail_window_start_samples) /
             static_cast<float>(tail_window_end_samples - tail_window_start_samples);
+
+        return SmoothstepAdded(t);
+    }
+
+    /* 0 through the punch, rising to 1 as it eases out. */
+    float PunchWindowOut() const
+    {
+        if(age <= punch_window_start_samples)
+            return 0.0f;
+
+        if(age >= punch_window_end_samples)
+            return 1.0f;
+
+        float t =
+            static_cast<float>(age - punch_window_start_samples) /
+            static_cast<float>(punch_window_end_samples - punch_window_start_samples);
 
         return SmoothstepAdded(t);
     }
@@ -2755,15 +2794,18 @@ struct KickVoice
 
         /*
          * This is the key freetekno anatomy. TAIL DELAY AMOUNT/STATE
-         * (CC42/CC43) touches ONLY the tail window:
+         * (CC42/CC43) touches ONLY what follows the PUNCH window:
          *
-         *     amount=0/off: early + tail = 1, original body reconstructed.
-         *     amount>0/on: early body stays intact; tail ducks, then recovers.
+         *     amount=0/off: punch + rest = 1, original body reconstructed
+         *                   (times PUNCH's onset lift over the punch window).
+         *     amount>0/on: the punch and its belly stay intact; the rest
+         *                  ducks, then recovers like a sidechain release.
          *
          * The oscillator never pauses, restarts, delays or changes phase while
          * hidden.  When the bass returns it is the naturally elapsed tail.
          */
-        float body_gain = early_window * onset_lift + tail_window * tail_gate;
+        float punch_out = PunchWindowOut();
+        float body_gain = (1.0f - punch_out) * onset_lift + punch_out * tail_gate;
         float clean_body = body * body_gain;
 
         float correction = declick_residual;

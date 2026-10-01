@@ -86,6 +86,7 @@ struct KickShapeInputs {
   uint8_t decay = 64;         // K2 DECAY
   bool tailOn = false;        // B3
   uint8_t tailAmount = 0;     // K3
+  uint8_t punch = 64;         // mix page PUNCH: onset lift, 0 = flat .. +6 dB
   uint32_t bpm = 120;
   int32_t elapsedMs = -1;     // since this channel's last hit; < 0 = idle
 };
@@ -95,7 +96,8 @@ struct KickShapeInputs {
 struct KickShape {
   float f0 = 55, depth = 0, sweepMs = 28, decayS = .33f;
   float morph = 0, asym = 0, belly = 0, bellyStart = 0, bellyPeak = 1, bellyEnd = 2;
-  float tailStart = 14, tailEnd = 34, holdMs = 0, riseMs = 2.5f, wave = 0;
+  float tailStart = 14, tailEnd = 34, punchStart = 50, punchEnd = 110;
+  float holdMs = 0, riseMs = 15.f, wave = 0, lift = 1;
   bool tailActive = false;
 
   void compute(const KickShapeInputs& in){
@@ -115,18 +117,22 @@ struct KickShape {
     bellyEnd = shapeMap(s, 230.f, 170.f, 130.f);
     tailStart = shapeMap(s, 10.f, 14.f, 18.f);
     tailEnd = shapeMap(s, 28.f, 34.f, 44.f);
+    punchStart = shapeMap(s, 40.f, 50.f, 60.f);
+    punchEnd = shapeMap(s, 95.f, 110.f, 125.f);
+    lift = powf(10.f, 6.f * (in.punch / 127.f) / 20.f);
     holdMs = in.tailOn && in.tailAmount > 0 ? tailDelayMs(in.tailAmount, in.bpm) : 0.f;
     tailActive = holdMs > .05f;
     float quarter = 60000.f / (in.bpm ? in.bpm : 120);
     float d01 = clamp01(holdMs / (quarter * .5f));
-    riseMs = 2.5f + 24.f * sqrtf(d01);
+    riseMs = 15.f + 45.f * sqrtf(d01);
     wave = in.wave / 127.f;
   }
 
   float tailWindow(float ms) const { return kickdaisy::smooth((ms - tailStart) / (tailEnd - tailStart)); }
 
   // Body level (no waveform) t ms after the hit: decay, sweep compensation,
-  // the belly contour and TAIL DELAY's duck.
+  // the belly contour, PUNCH's lift over the punch window and TAIL DELAY's
+  // duck after it.
   float level(float ms, float ratioNow) const {
     float env = expf(-3.453877639f * ms / (decayS * 1000.f));
     float comp = 1.f / sqrtf(1.f + .18f * (ratioNow - 1.f));
@@ -135,9 +141,9 @@ struct KickShape {
     if (belly > 0 && ms > bellyStart && ms < bellyEnd)
       b += belly * (ms < bellyPeak ? kickdaisy::smooth((ms - bellyStart) / (bellyPeak - bellyStart))
                                    : 1.f - kickdaisy::smooth((ms - bellyPeak) / (bellyEnd - bellyPeak)));
-    float tw = tailWindow(ms);
+    float pw = kickdaisy::smooth((ms - punchStart) / (punchEnd - punchStart));
     float gate = !tailActive ? 1.f : (ms <= holdMs ? 0.f : kickdaisy::smooth((ms - holdMs) / riseMs));
-    return env * comp * b * ((1.f - tw) + tw * gate);
+    return env * comp * b * ((1.f - pw) * lift + pw * gate);
   }
 };
 
@@ -222,7 +228,7 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
       body += (h - hpLp) * k.wave * (.25f + .75f * k.tailWindow(ms));
     }
     float y = body * k.level(ms, ratioNow);
-    int yy = mid - (int)lroundf((y > 1.2f ? 1.2f : (y < -1.2f ? -1.2f : y)) * half / 1.2f);
+    int yy = mid - (int)lroundf((y > 1.8f ? 1.8f : (y < -1.8f ? -1.8f : y)) * half / 1.8f);
     int x = (int)(127.f * ms / viewMs); if (x > 127) x = 127;
 
     // Connect to the previous sample across any columns it skipped.

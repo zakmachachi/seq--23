@@ -24,6 +24,7 @@ public:
   void render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus, uint32_t now);
   void saveTo(SavedState& out) const;
   uint8_t tailAttack() const { return value_[TAIL_ATTACK]; }
+  uint8_t punch() const { return value_[PUNCH]; }
   void restoreFrom(const SavedState& in);
 private:
   struct PhysicalPot {
