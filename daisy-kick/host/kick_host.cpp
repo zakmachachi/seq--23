@@ -74,14 +74,14 @@ static void Render(size_t samples)
             static int n = 0;
             if((n++ % 250) == 0)
                 fprintf(stderr,
-                        "t=%7.3f gate=%d voice(act=%d age=%u level=%.4f "
-                        "handoff=%d) sub=%.3f punch=%.3f out=%.6f\n",
+                        "t=%7.3f gate=%d voice(act=%d age=%u env=%.4f "
+                        "residual=%.6f) sub=%.3f punch=%.3f out=%.6f\n",
                         g_samples_rendered / 48000.0,
                         (int)note_gate,
                         (int)kick_voice.active,
                         (unsigned)kick_voice.age,
-                        kick_voice.last_level,
-                        (int)kick_voice.handoff,
+                        kick_voice.body_env,
+                        kick_voice.declick_residual,
                         param_sub_gain,
                         param_punch_gain,
                         out_l[0]);
