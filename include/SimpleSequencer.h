@@ -49,9 +49,9 @@ class SimpleSequencer {
     // Kick fill steps emit CC47 from triggerChannel(), which runs in the 1 ms
     // engine ISR. A latest-value slot drained in the foreground like
     // KickPerformance's pending array, so a full UART is never spun on.
-    // Slot 0 is CC47 (BPF layers); 1 and 3 are the per-hit kick shape CCs,
-    // CC78 SWEEP TIME and CC64 WAVE, sent just before each note-on. Slot 2
-    // (CC63, the old TAIL MOD) is no longer sent.
+    // Slot 0 is CC47 (BPF layers); 1..3 are the per-hit kick shape CCs,
+    // CC78 SWEEP TIME, CC79 CURVE and CC64 WAVE, sent just before each
+    // note-on.
     static const uint8_t FILL_CC_COUNT = 4;
     volatile bool fillCCPending[FILL_CC_COUNT] = {};
     volatile uint8_t fillCCValue[FILL_CC_COUNT] = {};
@@ -176,12 +176,12 @@ class SimpleSequencer {
     uint32_t bpfRandomFocusEndMs = 0;
     // Kick-specific live-performance params (per channel)
     uint8_t kickNoteSpread[NUM_CHANNELS];     // 0..5 semitones added to non-base kicks
-    // On Menu 1 a KICK channel's pots 2 and 5 drive the Daisy's waveform and
-    // sweep time instead of scale and gate, pot 3 is greyed out, and its
+    // On Menu 1 a KICK channel's pots 2, 3 and 5 drive the Daisy's waveform,
+    // sweep curve and sweep time instead of scale, spread and gate, and its
     // velocity is shown as DEPTH, the sweep's start.
     uint8_t kickWave[NUM_CHANNELS];           // CC64: 0 sine .. 127 supersaw
     uint8_t kickSweepTime[NUM_CHANNELS];      // CC78 via sweepTimeCC: 64 = 1.00x, 0.65x..1.55x
-    uint8_t kickTailMod[NUM_CHANNELS];        // unused (the old TAIL MOD), kept for the save layout
+    uint8_t kickCurve[NUM_CHANNELS];          // CC79: 64 = exponential, 0 snap .. 127 laser (the old TAIL MOD slot)
     bool isKickChannel(uint8_t ch) const;
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
@@ -337,7 +337,7 @@ class SimpleSequencer {
       bool    slide[TOTAL_STEPS];
       uint8_t channelPitch = 0, channelVelocity = 0;
       uint8_t noteLenIdx = 0, randomSlideProb = 0;
-      uint8_t kickSweepTime = 64, kickTailMod = 0, kickWave = 0;
+      uint8_t kickSweepTime = 64, kickCurve = 64, kickWave = 0;
       uint8_t ch = 0;
       bool    valid = false;
     };
@@ -501,7 +501,7 @@ class SimpleSequencer {
       // reason: every older offset is unchanged, so a v13 image still loads.
       uint8_t savedV14Reserved[3];   // v14/v15: Function + K3's fine state
       uint8_t savedKickSweepTime[NUM_CHANNELS];
-      uint8_t savedKickTailMod[NUM_CHANNELS];
+      uint8_t savedKickCurve[NUM_CHANNELS];
       // v15: TAIL MOD became a 0..127 wobble intensity and WAVE was added.
       uint8_t savedKickWave[NUM_CHANNELS];
       // v16: the mix page's third slot is TAIL ATTACK (was the Tube gain);

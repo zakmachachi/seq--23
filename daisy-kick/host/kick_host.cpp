@@ -16,6 +16,7 @@
  *   taildelay=<0..1>               (K3, CC42; also enables it, CC43)
  *   tail=<ms of silence after the last hit>  vel=<1..127, default 100>
  *   note=<0..127, default 36>   reverse=<0|1> (CC41)
+ *   curve=<0..1> (CC79, 0.5 ~ neutral)   belly=<0..1> (CC61, 0.5 ~ neutral)
  */
 
 #include <stdint.h>
@@ -194,6 +195,8 @@ int main(int argc, char** argv)
     maybe("model",   CC_CHARACTER_MODEL);
     maybe("wave",    CC_WAVE);
     maybe("reverse", CC_REVERSE_STATE);   /* >= 0.5 = on */
+    maybe("curve",   CC_KICK_CURVE);
+    maybe("belly",   CC_KICK_BELLY);
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);

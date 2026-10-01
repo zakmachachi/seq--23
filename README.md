@@ -19,7 +19,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics. The saws are locked to the sub the way the sine is, so the body never phases against it and every kick starts the same; only the top shimmers. Their buzz is kept above 250 Hz, a sine sub under a high-passed supersaw, so SHAPE's punch cuts through and the low end stays put at full WAVE
 - **SWEEP TIME** (pot 5) stretches or shortens SHAPE's sweep, from 0.65x to 1.55x, and shows the result in milliseconds. It clicks into place at 1.00x on the way past, and its button snaps it straight back there. Record it under FUNCTION like any Notes-page knob and it changes per step
 - **DEPTH** (pot 6, formerly velocity) is where the sweep starts, 0 to 127: 0 is no sweep at all, 127 starts four octaves above the note
-- Pot 3 is greyed out for now
+- **CURVE** (pot 3) is how the sweep falls: turn it down for a snappy drop that settles fast (a hard tock), up for a pitch that hangs high and then falls (laser / boing). It clicks into place at the plain curve in the middle, and **FUNCTION + pot 3** snaps it back there. Drawn as a little falling curve
 - Gate is gone for the kick: the Daisy never used it
 - Screen 2 shows the kick's waveform as a scope: the sweep's tight cycles at the front opening out onto the body. While a hit plays, a cursor runs across it in real time
 
@@ -36,7 +36,8 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 - The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
 - **PUNCH** on the mix page lifts the front of the kick, through the sweep, by up to 6 dB: 0 % is a flat kick. **SUB** is the level of the whole kick
-- **TAIL ATTACK** on the mix page (pot 3) is greyed out: the new kick has no such control
+- **BELLY** on the mix page (pot 3) sets how long the punch carries the body before tail delay ducks it, from a tight 0.35x to a fat 2x: a short tock or a punch with a big belly. It also sets how far PUNCH's lift reaches
+- Reverse kicks (Menu 2, pot 2's click) no longer click: they start straight from the reversed kick and stay silent after it, instead of letting a sliver of the forward kick through at either end
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
 - The Digitakt return gets a 25 Hz high-pass at its input. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
 

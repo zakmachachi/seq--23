@@ -14,12 +14,21 @@ static volatile bool stepAdvanceRequested = false; // set by internalClockTick
 // forward wrapper so ISR stays tiny
 static void internalClockTickWrapper();
 
-// A greyed-out control on the mono OLED: every other pixel of the box is
-// knocked out, so what was drawn there reads at half brightness.
-static void greyOut(Adafruit_SH1106G& d, int x, int y, int w, int h){
-  for (int yy = y; yy < y + h; yy++)
-    for (int xx = x; xx < x + w; xx++)
-      if (((xx + yy) & 1) == 0) d.drawPixel(xx, yy, SH110X_BLACK);
+// A kick knob with a detent at 64 (its neutral): 4 per click, crossing 64
+// stops there, and it takes a couple more clicks the same way to move off.
+// One shared hold count: only one knob turns at a time.
+static uint8_t detentStep(uint8_t cur, int ticks){
+  static int8_t hold = 0;
+  int next = constrain((int)cur + ticks * 4, 0, 127);
+  if (cur == 64){
+    hold = (int8_t)constrain(hold + ticks, -3, 3);
+    if (abs(hold) < 3) next = 64;
+    else hold = 0;
+  } else if ((cur < 64 && next > 64) || (cur > 64 && next < 64)){
+    next = 64;
+    hold = 0;
+  }
+  return (uint8_t)next;
 }
 
 void sendClockISR() {
@@ -138,7 +147,7 @@ SimpleSequencer::SimpleSequencer()
     // Kick-specific defaults
     kickNoteSpread[c] = 0;
     kickSweepTime[c] = 64;
-    kickTailMod[c] = 0;
+    kickCurve[c] = 64;
     kickWave[c] = 0;
     kickRatchetProb[c] = 0;
     kickExtrasAreFills[c] = 0;
@@ -1272,9 +1281,11 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // --- GLOBAL MODIFIER: Function + Pot 3 (encoder 3) = melody contour bias ---
   // Clockwise -> ascending bias, anti-clockwise -> descending. Applied on the
   // next pattern generation. Shown as an arrow on the Menu 1 screen 2.
-  // On Menu 1's KICK channel pot 3 is greyed out (a kick has no melodic
-  // contour, and the Daisy's voice has no second sweep control).
+  // On Menu 1's KICK channel, Function + pot 3 snaps CURVE back to the plain
+  // exponential instead (a kick has no melodic contour).
   if (pot == 2 && isFunctionHeld() && activeMenu == 1 && isKickChannel(selectedChannel)){
+    kickCurve[selectedChannel] = 64;
+    Serial.println("KICK CURVE=64 (exponential)");
     return;
   }
   if (pot == 2 && isFunctionHeld() && activeMenu != 6){
@@ -1394,8 +1405,14 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
         break;
       }
       case 2: { // Pot 3: Octave spread 0..60 semitones — store only (next regenerate applies it)
-        // Kick channel: greyed out for now; SWEEP TIME lives on pot 5.
-        if (isKickChannel(ch)) break;
+        if (isKickChannel(ch)){
+          // Kick channel: CURVE (CC79), how the sweep falls, sent with the
+          // next hit: 0 snaps down, 64 = exponential, 127 holds high then
+          // falls (laser). Same detent at the middle as SWEEP TIME.
+          kickCurve[ch] = detentStep(kickCurve[ch], ticks);
+          Serial.print("KICK CURVE="); Serial.println(kickCurve[ch]);
+          break;
+        }
         octaveSpread[ch] = (uint8_t)constrain(
           (int)octaveSpread[ch] + ticks, 0, 60);
         Serial.print("SPRD="); Serial.println(octaveSpread[ch]);
@@ -1416,17 +1433,7 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
           // 4 per click, with a detent at 1.00x: crossing it stops there,
           // and it takes a couple more clicks the same way to move off it.
           // The Daisy ignores gate, so the knob is free.
-          static int8_t detentHold = 0;
-          int cur = kickSweepTime[ch], next = constrain(cur + ticks * 4, 0, 127);
-          if (cur == 64){
-            detentHold = (int8_t)constrain(detentHold + ticks, -3, 3);
-            if (abs(detentHold) < 3) next = 64;
-            else detentHold = 0;
-          } else if ((cur < 64 && next > 64) || (cur > 64 && next < 64)){
-            next = 64;
-            detentHold = 0;
-          }
-          kickSweepTime[ch] = (uint8_t)next;
+          kickSweepTime[ch] = detentStep(kickSweepTime[ch], ticks);
           Serial.print("KICK SWEEP TIME="); Serial.println(kickSweepTime[ch]);
           break;
         }
@@ -1756,10 +1763,15 @@ static const uint32_t SAVE_MAGIC_V15 = 13572481;
 // v16: the mix page's Tube gain slot became TAIL ATTACK, so an older image's
 // value there is not carried over (it would be a ~26 ms attack out of nowhere).
 static const uint32_t SAVE_MAGIC_V16 = 13572482;
+// v17: the per-channel TAIL MOD slot holds CURVE and the mix page's TAIL
+// ATTACK slot holds BELLY, both neutral at 64, so an older image's values
+// there are not carried over (mostly 0: the snappiest curve, the tightest
+// belly).
+static const uint32_t SAVE_MAGIC_V17 = 13572483;
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = SAVE_MAGIC_V16;
+  data.magicNumber = SAVE_MAGIC_V17;
   data.savedBpm = bpm;
   kickPerformance.saveTo(data.savedKickPerformance);
   kickMixer.saveTo(data.savedKickMixer);
@@ -1797,7 +1809,7 @@ void SimpleSequencer::saveState() {
     data.savedNumPages[c]           = numPages[c];
     data.savedNumSteps[c]           = numSteps[c];
     data.savedKickSweepTime[c]      = kickSweepTime[c];
-    data.savedKickTailMod[c]        = kickTailMod[c];
+    data.savedKickCurve[c]        = kickCurve[c];
     data.savedKickWave[c]           = kickWave[c];
   }
   // Write to EEPROM
@@ -1818,7 +1830,7 @@ void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
 
-  if (data.magicNumber == SAVE_MAGIC_V16 ||
+  if (data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
       data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14 ||
       data.magicNumber == SAVE_MAGIC_V13 || data.magicNumber == SAVE_MAGIC_V12 ||
       data.magicNumber == SAVE_MAGIC_V11) {
@@ -1867,20 +1879,22 @@ void SimpleSequencer::loadState() {
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
-    if (data.magicNumber == SAVE_MAGIC_V16 || data.magicNumber == SAVE_MAGIC_V15 ||
+    if (data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
+        data.magicNumber == SAVE_MAGIC_V15 ||
         data.magicNumber == SAVE_MAGIC_V14 || data.magicNumber == SAVE_MAGIC_V13) {
       // Restoring re-sends both pages; the Daisy boots to its own defaults.
       KickMixer::SavedState mix = data.savedKickMixer;
-      if (data.magicNumber != SAVE_MAGIC_V16) mix.value[KickMixer::TAIL_ATTACK] = 0;
+      if (data.magicNumber != SAVE_MAGIC_V17) mix.value[KickMixer::BELLY] = 64;
       kickPerformance.restoreFrom(data.savedKickPerformance);
       kickMixer.restoreFrom(mix);
     }
-    if (data.magicNumber == SAVE_MAGIC_V16 || data.magicNumber == SAVE_MAGIC_V15 ||
-        data.magicNumber == SAVE_MAGIC_V14) {
+    if (data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
+        data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14) {
       bool v15 = data.magicNumber != SAVE_MAGIC_V14;
+      bool v17 = data.magicNumber == SAVE_MAGIC_V17;
       for (uint8_t c = 0; c < NUM_CHANNELS; c++){
         kickSweepTime[c] = data.savedKickSweepTime[c] <= 127 ? data.savedKickSweepTime[c] : 64;
-        kickTailMod[c]   = (v15 && data.savedKickTailMod[c] <= 127) ? data.savedKickTailMod[c] : 0;
+        kickCurve[c]     = (v17 && data.savedKickCurve[c] <= 127) ? data.savedKickCurve[c] : 64;
         kickWave[c]      = (v15 && data.savedKickWave[c] <= 127)    ? data.savedKickWave[c]    : 0;
       }
     }
@@ -1953,7 +1967,7 @@ static uint8_t machinePoolMax(uint8_t machine){
 }
 
 // Per-step kick fill CCs: slot 0 = BPF layer count. Shape is not randomised.
-static const uint8_t FILL_CC[] = {47, 78, 63, 64};   // slot 2 (CC63) unused
+static const uint8_t FILL_CC[] = {47, 78, 79, 64};
 static const uint8_t KICK_COUNT_VALUES[] = {0, 42, 85, 127};
 
 // 255 means "use the dialled-in layer count", which is what every step got
@@ -2585,7 +2599,7 @@ void SimpleSequencer::captureChannel(ChannelSnapshot& out, uint8_t ch){
   out.noteLenIdx      = noteLenIdx[ch];
   out.randomSlideProb = randomSlideProb[ch];
   out.kickSweepTime   = kickSweepTime[ch];
-  out.kickTailMod     = kickTailMod[ch];
+  out.kickCurve     = kickCurve[ch];
   out.kickWave        = kickWave[ch];
   out.valid = true;
 }
@@ -2604,7 +2618,7 @@ void SimpleSequencer::restoreChannel(ChannelSnapshot& in){
   noteLenIdx[ch]      = in.noteLenIdx;
   randomSlideProb[ch] = in.randomSlideProb;
   kickSweepTime[ch]   = in.kickSweepTime;
-  kickTailMod[ch]     = in.kickTailMod;
+  kickCurve[ch]     = in.kickCurve;
   kickWave[ch]        = in.kickWave;
   // Deliberately still valid: several lanes can be committed inside one
   // Function hold, and each needs to undo its own gesture from the same
@@ -4419,8 +4433,8 @@ void SimpleSequencer::drawNotesView(){
 
   // ── 2x3 PARAM GRID (columns line up with the 6 pots) ────────────
   // Row 1 = pots 1-3 (KEY / SCALE / SPREAD), Row 2 = pots 4-6 (SLIDE / GATE / VEL).
-  // On a KICK channel SCALE, GATE and VEL become WAVE, SWEEP TIME and
-  // DEPTH; SPREAD's slot is greyed out.
+  // On a KICK channel SCALE, SPREAD, GATE and VEL become WAVE, CURVE,
+  // SWEEP TIME and DEPTH.
   const int colX[3] = {2, 45, 88};
   const int lblY1 = 21, valY1 = 31; // row 1
   const int lblY2 = 44, valY2 = 54; // row 2 (54..60 fits under 64)
@@ -4430,8 +4444,7 @@ void SimpleSequencer::drawNotesView(){
   display.setCursor(colX[0], lblY1); display.print("KEY");
   bool kick = isKickChannel(ch);
   display.setCursor(colX[1], lblY1); display.print(kick ? "WAVE" : "SCALE");
-  display.setCursor(colX[2], lblY1); display.print(kick ? "SWEEP" : "SPRD");
-  if (kick) greyOut(display, colX[2], lblY1, 30, 8);
+  display.setCursor(colX[2], lblY1); display.print(kick ? "CURVE" : "SPRD");
   // Row 1 values
   display.setCursor(colX[0], valY1);
   display.print(noteNames[p % 12]); display.print((int)(p / 12) - 1);
@@ -4439,7 +4452,7 @@ void SimpleSequencer::drawNotesView(){
   if (kick) drawWaveIcon(display, colX[1], valY1 - 1, 24, 9, kickWave[ch], SH110X_WHITE);
   else display.print(scaleNames[sm]);
   display.setCursor(colX[2], valY1);
-  if (kick){ display.print("--"); greyOut(display, colX[2], valY1, 12, 8); }
+  if (kick) drawCurveIcon(display, colX[2], valY1 - 1, 24, 9, kickCurve[ch], SH110X_WHITE);
   else display.print(octaveSpread[ch]);
 
   // Row 2 labels
@@ -4840,6 +4853,8 @@ void SimpleSequencer::drawKickShapeView(){
   in.tailOn = ks.tailDelayEnabled;
   in.tailAmount = ks.tailDelayAmount;
   in.punch = kickMixer.punch();
+  in.curve = kickCurve[ch];
+  in.belly = kickMixer.belly();
   in.bpm = bpm;
   // The cursor runs across while this channel's last hit is sounding.
   uint32_t since = millis() - chTrigMs[ch];
@@ -5570,13 +5585,15 @@ bool SimpleSequencer::isKickChannel(uint8_t ch) const {
   return ch < NUM_CHANNELS && trigMachine[ch] == TM_KICK;
 }
 
-// CC78 SWEEP TIME and CC64 WAVE for the hit about to fire. SWEEP TIME follows
+// CC78 SWEEP TIME, CC79 CURVE and CC64 WAVE for the hit about to fire. SWEEP TIME follows
 // its notes lane (pot 5 recorded under Function), so it can move per step.
 // ISR-safe for the same reason updateKickFillCC is.
 void SimpleSequencer::updateKickShapeCC(uint8_t ch){
   uint8_t knob = (uint8_t)constrain((int)kickSweepTime[ch] + notesLaneOffset(ch, NL_GATE), 0, 127);
   uint8_t sweep = kickdaisy::sweepTimeCC(knob);
   if (sweep != fillCCLastSent[1]){ fillCCLastSent[1] = sweep; queueFillCC(1, sweep); }
+  uint8_t curve = kickCurve[ch] & 0x7F;
+  if (curve != fillCCLastSent[2]){ fillCCLastSent[2] = curve; queueFillCC(2, curve); }
   uint8_t wave = kickWave[ch] & 0x7F;
   if (wave != fillCCLastSent[3]){ fillCCLastSent[3] = wave; queueFillCC(3, wave); }
 }

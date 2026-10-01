@@ -55,7 +55,7 @@ struct FakeOled {
 int main(int argc, char** argv){
   const char* dir = argc > 1 ? argv[1] : ".";
   struct Case { const char* name; KickShapeInputs in; };
-  Case cases[7];
+  Case cases[10];
   cases[0].name = "default";
   cases[1].name = "playing_40ms";    cases[1].in.elapsedMs = 40;
   cases[2].name = "tail_delay";      cases[2].in.tailOn = true; cases[2].in.tailAmount = 90; cases[2].in.decay = 80;
@@ -63,11 +63,15 @@ int main(int argc, char** argv){
   cases[4].name = "laser_long";      cases[4].in.shape = 127; cases[4].in.velocity = 127; cases[4].in.sweepTime = 110;
   cases[5].name = "short_supersaw";  cases[5].in.shape = 90; cases[5].in.decay = 30; cases[5].in.wave = 127;
   cases[6].name = "depth_low";       cases[6].in.velocity = 30; cases[6].in.note = 40;
+  cases[7].name = "curve_snap";      cases[7].in.curve = 0;
+  cases[8].name = "curve_laser";     cases[8].in.curve = 127;
+  cases[9].name = "belly_big_tail";  cases[9].in.belly = 127; cases[9].in.tailOn = true; cases[9].in.tailAmount = 110; cases[9].in.bpm = 90;
   {
     // The WAVE icon across its range, as screen 1 shows it.
     FakeOled d;
     const uint8_t waves[] = {0, 32, 64, 96, 127};
-    for (int i = 0; i < 5; i++) drawWaveIcon(d, 2 + i * 25, 28, 24, 9, waves[i], 1);
+    for (int i = 0; i < 5; i++) drawWaveIcon(d, 2 + i * 25, 18, 24, 9, waves[i], 1);
+    for (int i = 0; i < 5; i++) drawCurveIcon(d, 2 + i * 25, 38, 24, 9, waves[i], 1);
     char path[512]; snprintf(path, sizeof(path), "%s/wave_icons.pbm", dir); d.save(path);
     printf("%s\n", path);
   }

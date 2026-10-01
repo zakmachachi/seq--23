@@ -501,6 +501,19 @@ static constexpr uint8_t CC_KICK_SWEEP_TIME  = 78;
 /* WAVE: the body morphs from the sine to a locked supersaw, latched per hit. */
 static constexpr uint8_t CC_WAVE = 64;
 
+/*
+ * CURVE (Menu 1 pot 3, per hit): how the pitch sweep falls. 64 = the plain
+ * exponential; down is snappier (a fast drop, then a long settle), up holds
+ * the pitch high and then falls (laser / boing). DEPTH sets how far, SWEEP
+ * TIME how long, CURVE how.
+ *
+ * BELLY (mix page pot 3, latched per hit): how long the punch window holds
+ * the body before TAIL DELAY ducks it, and how far PUNCH's lift reaches.
+ * 64 = 40-60 ms hold (with SHAPE), 0 = 0.35x, 127 = 2x.
+ */
+static constexpr uint8_t CC_KICK_CURVE = 79;
+static constexpr uint8_t CC_KICK_BELLY = 61;
+
 
 /* ============================================================
    SIX PHYSICAL MACROS — MIDI CHANNEL 15
@@ -588,6 +601,8 @@ static constexpr uint8_t CC_WAVE = 64;
  *   CC77 SWEEP DEPTH TRIM       optional, 70~=neutral
  *   CC78 SWEEP TIME TRIM        optional, 70~=neutral
  *   CC64 WAVE                   0=sine, 127=supersaw
+ *   CC79 CURVE                  64 = exponential sweep; 0 snap, 127 laser
+ *   CC61 BELLY                  64 = 1x punch window; 0 = 0.35x, 127 = 2x
  *
  * Note velocity is the live PITCH macro / sweep-depth amount (1..127).
  *
@@ -868,6 +883,10 @@ static volatile float kick_sweep_time  = 0.55f;
 
 /* WAVE (CC64): 0 = the body's own sine, 1 = full supersaw harmonics. */
 static volatile float macro_wave = 0.0f;
+
+/* CURVE (CC79) and BELLY (CC61), raw values; 64 = neutral for both. */
+static volatile uint8_t kick_curve_cc = 64;
+static volatile uint8_t kick_belly_cc = 64;
 
 
 /*
@@ -1760,6 +1779,30 @@ static float ShapeSweepTimeMs(float shape)
     return 55.0f + (135.0f - 55.0f) * t;
 }
 
+/*
+ * CURVE: the sweep falls as exp(-6.9 u^g), u = time / sweep time, so it is
+ * always 60 dB down at the sweep time. g = 1 is the plain exponential (64);
+ * g = 0.5 drops fast and settles long (0), g = 2.5 holds high, then falls (127).
+ */
+static float KickCurveExponent(uint8_t cc)
+{
+    if(cc <= 64)
+        return 0.5f + 0.5f * static_cast<float>(cc) / 64.0f;
+
+    return 1.0f + 1.5f * static_cast<float>(cc - 64) / 63.0f;
+}
+
+
+/* BELLY: scale on the punch window's times. 64 = 1x. */
+static float KickBellyScale(uint8_t cc)
+{
+    if(cc <= 64)
+        return 0.35f + 0.65f * static_cast<float>(cc) / 64.0f;
+
+    return 1.0f + static_cast<float>(cc - 64) / 63.0f;
+}
+
+
 /* Optional CC78 time trim, neutral at 0.55, roughly 0.65x..1.55x. */
 static float SweepTimeTrim(float x)
 {
@@ -2169,6 +2212,12 @@ struct KickVoice
     float pitch_coeff = 0.0f;
     float pitch_depth = 0.0f; /* frequency multiplier = 1 + depth * env */
 
+    /* CURVE: off at 64, where the multiplicative pitch_env runs as before. */
+    bool curve_active = false;
+    float curve_g = 1.0f;
+    float curve_u_step = 0.0f;   /* 1 / sweep samples */
+    float curve_end_u = 1.0f;    /* past this the env is under 1e-5 */
+
     /* Main body VCA envelope: stateful so live DECAY changes alter slope, never level. */
     float body_env = 0.0f;
     float decay_coeff = 1.0f;
@@ -2291,7 +2340,9 @@ struct KickVoice
                  uint8_t velocity,
                  float character_delay_ms,
                  float decay_seconds,
-                 float wave)
+                 float wave,
+                 uint8_t curve_cc,
+                 uint8_t belly_cc)
     {
         /*
          * Preserve only ONE sample of history to cancel the discontinuity of
@@ -2354,6 +2405,11 @@ struct KickVoice
         pitch_depth = fmaxf(0.0f, actual_start_ratio - 1.0f);
         pitch_env = pitch_depth > 0.00001f ? 1.0f : 0.0f;
         pitch_coeff = Decay60Coefficient(sweep_ms * 0.001f);
+
+        curve_g = KickCurveExponent(curve_cc);
+        curve_active = pitch_env > 0.0f && curve_cc != 64;
+        curve_u_step = 1.0f / (sweep_ms * 0.001f * SAMPLE_RATE);
+        curve_end_u = powf(11.512925f / 6.907755f, 1.0f / curve_g);
 
         /* One coherent body envelope. */
         body_env = 1.0f;
@@ -2499,8 +2555,9 @@ struct KickVoice
          * after the sweep, and eases out over ~60 ms: a punch with a belly
          * instead of a click, and no hard edge into the duck.
          */
-        punch_window_start_samples = MsToSamples(ShapeMap(shape, 40.0f, 50.0f, 60.0f));
-        punch_window_end_samples   = MsToSamples(ShapeMap(shape, 95.0f, 110.0f, 125.0f));
+        float belly = KickBellyScale(belly_cc);
+        punch_window_start_samples = MsToSamples(ShapeMap(shape, 40.0f, 50.0f, 60.0f) * belly);
+        punch_window_end_samples   = MsToSamples(ShapeMap(shape, 95.0f, 110.0f, 125.0f) * belly);
         if(punch_window_end_samples <= punch_window_start_samples)
             punch_window_end_samples = punch_window_start_samples + 1;
 
@@ -2627,8 +2684,20 @@ struct KickVoice
         decay_coeff +=
             (decay_coeff_target - decay_coeff) * KICK_DECAY_COEFF_SMOOTH;
 
+        float sweep_env = pitch_env;
+
+        if(curve_active)
+        {
+            float u = static_cast<float>(age) * curve_u_step;
+
+            sweep_env =
+                u >= curve_end_u
+                ? 0.0f
+                : expf(-6.907755f * powf(u, curve_g));
+        }
+
         float pitch_ratio_now =
-            1.0f + pitch_depth * pitch_env;
+            1.0f + pitch_depth * sweep_env;
 
         float frequency =
             base_hz * pitch_ratio_now;
@@ -2908,7 +2977,9 @@ static void TriggerKickVoice(uint8_t velocity)
         velocity,
         TailSidechainHoldMs(),
         MacroDecaySeconds(macro_decay),
-        macro_wave
+        macro_wave,
+        kick_curve_cc,
+        kick_belly_cc
     );
 
     kick_age_samples = 0;
@@ -9434,6 +9505,18 @@ static bool HandleSixMacroCC(
         case CC_WAVE:
         {
             macro_wave = v;
+            return true;
+        }
+
+        case CC_KICK_CURVE:
+        {
+            kick_curve_cc = value;
+            return true;
+        }
+
+        case CC_KICK_BELLY:
+        {
+            kick_belly_cc = value;
             return true;
         }
 
