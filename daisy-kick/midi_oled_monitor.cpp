@@ -2890,9 +2890,16 @@ struct KickVoice
          * the dominant drive.  A tiny >~350 Hz feed from the dedicated attack
          * lets the Mackie crack appear at the front without dirtying the sub.
          */
+        /*
+         * The send ducks where the dry body does, after the PUNCH window,
+         * so Mackie / Tube stay on the punch's belly instead of dropping out
+         * at the old 34 ms and leaving it a clean, boomy fundamental. With
+         * TAIL DELAY off, tail_gate is 1 and this is unchanged.
+         */
+        float send_gate = (1.0f - punch_out) + punch_out * tail_gate;
         float character_body_gain =
             early_window * character_early_body_feed +
-            tail_window * tail_gate;
+            tail_window * send_gate;
 
         character_attack_lp +=
             KICK_CHARACTER_ATTACK_HP_A * (attack - character_attack_lp);
