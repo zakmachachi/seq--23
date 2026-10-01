@@ -143,7 +143,7 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  */
 static volatile float param_line_gain    = 1.00f;   /* CC53, max 1.5  */
 static volatile float param_mackie_gain  = 0.65f;   /* CC54, max 1.25 */
-static volatile float param_sherman_gain = 0.60f;   /* CC55, max 1.25 */
+static volatile float param_tube_gain = 0.60f;   /* CC55, max 1.25 */
 static volatile float param_bpf_gain     = 0.70f;   /* CC56, max 2.0  */
 static volatile float param_sub_gain     = 1.00f;   /* CC57, unity = full clean body */
 static volatile float param_punch_gain   = 1.00f;   /* CC58, max 1.5  */
@@ -151,7 +151,7 @@ static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 1.5f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 1.25f;
-static constexpr float PARAM_SHERMAN_GAIN_MAX = 1.25f;
+static constexpr float PARAM_TUBE_GAIN_MAX = 1.25f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 2.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.00f;
 static constexpr float PARAM_PUNCH_GAIN_MAX   = 1.5f;
@@ -164,7 +164,7 @@ static constexpr float PARAM_PUNCH_GAIN_MAX   = 1.5f;
  */
 static volatile float param_line_gain_target    = 1.00f;
 static volatile float param_mackie_gain_target  = 0.65f;
-static volatile float param_sherman_gain_target = 0.60f;
+static volatile float param_tube_gain_target = 0.60f;
 static volatile float param_bpf_gain_target     = 0.70f;
 static constexpr float PARAM_GAIN_SLEW = 0.06f;
 
@@ -195,13 +195,13 @@ static constexpr float REVERB_DUCK_RECOVER_A = 0.000298f;
 static constexpr float REVERB_DUCK_CUT_STEP  = 1.0f / (0.002f * SAMPLE_RATE);
 
 /* ============================================================
-   MUSICAL MACKIE / SHERMAN CHARACTER
+   MUSICAL MACKIE / TUBE CHARACTER
    ============================================================
 
    The models are PARALLEL SEND/RETURN processors:
 
        dry punch + sub ------------------------------------> dry lane
-              \-> wet send -> Mackie/Sherman + BPF -> 120 Hz HPF -> wet
+              \-> wet send -> Mackie/Tube + BPF -> 20 Hz HPF + f0 notch -> wet
        dry + wet -> kick FX
 
    This means character can be driven hard without replacing or phase-
@@ -230,28 +230,6 @@ static constexpr float MACKIE_POST_LP_HZ     = 10000.0f;
 static constexpr float MACKIE_INTERNAL_GAIN  = 7.40f;
 /* +3 dB: 0.72 * 10^(3/20). Drive/character untouched, level only. */
 
-static constexpr float SHERMAN_PRE_LP_HZ     = 12000.0f;
-static constexpr float SHERMAN_POST_LP_HZ    = 10000.0f;
-static constexpr float SHERMAN_FILTER_RESONANCE = 0.85f;
-static constexpr float SHERMAN_FEEDBACK      = 0.15f;
-static constexpr float SHERMAN_INPUT_DRIVE   = 3.05f;
-
-/*
- * VCF-4 controls. On the hardware these are front-panel; here they are
- * fixed until they are given CCs of their own.
- *
- * MODE       0 = LPF, 0.5 = BPF, 1 = HPF (one knob sweeps the three VCAs).
- * BP_POLARITY  -1..+1, the -BP/0/+BP switch summed on top of the blend.
- *              Fully negative nulls the bandpass instead of dulling it.
- * CLOCK_RATIO  Core B's clock divider against core A: 1 = 24 dB cascade,
- *              2 = octave, 3 = the "harmonics" setting.
- * SERIAL       A into B, versus the two cores in parallel.
- */
-static constexpr float SHERMAN_MODE        = 0.46f;
-static constexpr float SHERMAN_BP_POLARITY = 0.35f;
-static constexpr float SHERMAN_CLOCK_RATIO = 2.0f;
-static constexpr bool  SHERMAN_SERIAL_ROUTING = true;
-/* +7 dB: 0.70 * 10^(7/20). 4 dB to match Mackie, plus the shared 3 dB. */
 
 /*
  * How much the K5 amount drives the model, rather than only fading its
@@ -278,7 +256,7 @@ static constexpr float CHARACTER_AMOUNT_SMOOTH_MS = 18.0f;
    ============================================================ */
 
 /*
- * The previous build kept expensive Mackie/Sherman processing alive even
+ * The previous build kept expensive Mackie/Tube processing alive even
  * at exactly 0% wet, and kept BOTH DJ SVFs evaluating tanf() every sample
  * while bypassed.
  *
@@ -515,6 +493,9 @@ static constexpr uint8_t CC_FX_DELAY_WET = 76;
 static constexpr uint8_t CC_KICK_SWEEP_DEPTH = 77;
 static constexpr uint8_t CC_KICK_SWEEP_TIME  = 78;
 
+/* WAVE: the body morphs from the sine to a locked supersaw, latched per hit. */
+static constexpr uint8_t CC_WAVE = 64;
+
 
 /* ============================================================
    SIX PHYSICAL MACROS — MIDI CHANNEL 15
@@ -536,8 +517,8 @@ static constexpr uint8_t CC_KICK_SWEEP_TIME  = 78;
        KNOB 4   CC23    CURRENT BPF LAYER FREQUENCY
        BUTTON 4 CC103   BPF LAYERS 0 -> 1 -> 2 -> 3 -> 0
 
-       KNOB 5   CC24    MACKIE / SHERMAN WET
-       BUTTON 5 CC104   MACKIE <-> SHERMAN MODEL
+       KNOB 5   CC24    MACKIE / TUBE WET
+       BUTTON 5 CC104   MACKIE <-> TUBE MODEL
 
        KNOB 6   CC25    KICK SHAPE
        BUTTON 6 CC105   PUMP TOGGLE
@@ -595,12 +576,13 @@ static constexpr uint8_t CC_KICK_SWEEP_TIME  = 78;
  *   CC46 BPF LAYER 3 FREQ
  *   CC47 BPF LAYER COUNT        absolute 0..3
  *   CC48 MACKIE AMOUNT
- *   CC49 SHERMAN AMOUNT
- *   CC50 CHARACTER MODEL        0=MACKIE, 127=SHERMAN
+ *   CC49 TUBE AMOUNT
+ *   CC50 CHARACTER MODEL        0=MACKIE, 127=TUBE
  *   CC51 KICK SHAPE
  *   CC52 PUMP STATE             0=OFF, 127=ON
  *   CC77 SWEEP DEPTH TRIM       optional, 70~=neutral
  *   CC78 SWEEP TIME TRIM        optional, 70~=neutral
+ *   CC64 WAVE                   0=sine, 127=supersaw
  *
  * Note velocity is the live PITCH macro / sweep-depth amount (1..127).
  *
@@ -628,7 +610,7 @@ static constexpr uint8_t CC_BPF_LAYER2_FREQUENCY    = 45;
 static constexpr uint8_t CC_BPF_LAYER3_FREQUENCY    = 46;
 static constexpr uint8_t CC_BPF_LAYER_COUNT         = 47;
 static constexpr uint8_t CC_MACKIE_AMOUNT           = 48;
-static constexpr uint8_t CC_SHERMAN_AMOUNT          = 49;
+static constexpr uint8_t CC_TUBE_AMOUNT          = 49;
 static constexpr uint8_t CC_CHARACTER_MODEL         = 50;
 static constexpr uint8_t CC_KICK_SHAPE_ABSOLUTE     = 51;
 static constexpr uint8_t CC_PUMP_STATE              = 52;
@@ -636,7 +618,7 @@ static constexpr uint8_t CC_PUMP_STATE              = 52;
 /* Mix page: Teensy FUNCTION + MENU2. */
 static constexpr uint8_t CC_MIX_LINE_GAIN           = 53;
 static constexpr uint8_t CC_MIX_MACKIE_GAIN         = 54;
-static constexpr uint8_t CC_MIX_SHERMAN_GAIN        = 55;
+static constexpr uint8_t CC_MIX_TUBE_GAIN        = 55;
 static constexpr uint8_t CC_MIX_BPF_GAIN            = 56;
 static constexpr uint8_t CC_MIX_SUB_GAIN            = 57;
 static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
@@ -842,15 +824,15 @@ static volatile float macro_character_wet = 0.0f;
  * UI / requested character model.
  * Audio DSP owns its actual active model internally.
  */
-static volatile bool macro_character_sherman = false;
+static volatile bool macro_character_tube = false;
 
 /*
  * Main-loop MIDI code ONLY writes these request flags.
  * The audio callback consumes them and is the ONLY place allowed to
- * reset/switch Mackie/Sherman DSP state.
+ * reset/switch Mackie/Tube DSP state.
  */
 static volatile bool character_switch_pending = false;
-static volatile bool character_switch_target_sherman = false;
+static volatile bool character_switch_target_tube = false;
 
 /* Button-5 edge latch: repeated held CC values cannot retrigger switching. */
 static bool character_button_down = false;
@@ -878,6 +860,9 @@ static volatile float macro_kick_shape = 0.50f;
  */
 static volatile float kick_sweep_depth = 0.55f;
 static volatile float kick_sweep_time  = 0.55f;
+
+/* WAVE (CC64): 0 = the body's own sine, 1 = full supersaw harmonics. */
+static volatile float macro_wave = 0.0f;
 
 
 /*
@@ -938,7 +923,7 @@ static constexpr uint32_t MACRO_FX_LONG_PRESS_MS = 500;
  * K5 stores separate positions for the two models.
  */
 static volatile float macro_mackie_amount = 0.0f;
-static volatile float macro_sherman_amount = 0.0f;
+static volatile float macro_tube_amount = 0.0f;
 
 /*
  * true  = newly-selected model starts at 0
@@ -1044,7 +1029,7 @@ static inline float EqualPowerB(float t)
  * DECAY (CC40) — lifetime of the WHOLE generated kick body.
  *
  * This envelope is calculated before the body splits into clean and
- * Mackie/Sherman paths.  Therefore shortening DECAY shortens BOTH the clean
+ * Mackie/Tube paths.  Therefore shortening DECAY shortens BOTH the clean
  * bass and the material available to the parallel distorted tail.  It is not
  * a wet-return control.
  *
@@ -1492,7 +1477,7 @@ static float ProcessFinalHfDynamicTamer(
        click that appears the moment SUB leaves 0 %.
 
    KICK_BYPASS_WET
-       Skips Mackie/Sherman, BPF, dirty-bus manager and the wet HPF, so
+       Skips Mackie/Tube, BPF, dirty-bus manager and the wet HPF, so
        they are not even computed.
 
    KICK_BYPASS_POST
@@ -2066,7 +2051,7 @@ static constexpr float KICK_TAIL_MAX_EXTRA_RISE_MS = 24.0f;
  * The character send is Shape-aware rather than having a fixed transient law.
  *
  *   SHAPE=0:
- *       the body itself is the instrument, so the Mackie/Sherman may hear the
+ *       the body itself is the instrument, so the Mackie/Tube may hear the
  *       complete body from sample one and there is NO separate attack feed.
  *
  *   SHAPE -> 1:
@@ -2076,6 +2061,86 @@ static constexpr float KICK_TAIL_MAX_EXTRA_RISE_MS = 24.0f;
  *       increasingly obvious as the kick becomes hardcore/laser-like.
  */
 static constexpr float KICK_CHARACTER_ATTACK_HP_A = 0.04478124f; /* ~350 Hz */
+
+
+/*
+ * WAVE (CC64): the body morphs from the sine to a five-saw supersaw, locked
+ * to it the way v1.3.0's was:
+ *
+ *   one oscillator  every saw runs on the body's own phase plus a small
+ *                   offset, so it follows the sweep and starts the same way
+ *                   on every hit.
+ *   harmonics       each saw's own fundamental is subtracted exactly and the
+ *                   rest is added on top of the body, which stays the
+ *                   fundamental: WAVE never touches the bass.
+ *   bounded spread  a saw's offset only wobbles within WAVE_SAW_SPREAD of a
+ *                   cycle, on a slow wobble that restarts with the hit.
+ *
+ * The spread must stay bounded. Saws detuned in Hz drift without limit, so
+ * harmonic k of each walks k x the detune off the body's own harmonics: over
+ * a tail every harmonic swept through 20-34 dB nulls, a flanger on the sub,
+ * and through Mackie / Tube it beat against the body's distortion harmonics.
+ * Bounded, harmonic k moves by at most 2 pi k x spread radians: the body
+ * stays put and only the top shimmers.
+ */
+static constexpr int WAVE_SAWS = 5;
+/*
+ * Each saw's largest offset from the oscillator, in cycles; the middle one is
+ * the anchor. The own-fundamental series in Process() needs offsets well
+ * under 0.05 cycles. Set by v1.3.0's phasing sweep: at twice this spread a
+ * hard-driven Mackie folded 1.6 dB of band swing into harmonics 7-16.
+ */
+static constexpr float WAVE_SAW_SPREAD[WAVE_SAWS] = {-0.006f, -0.004f, 0.0f, 0.004f, 0.006f};
+/* Unrelated rates, so the top shimmers instead of sweeping as one. */
+static constexpr float WAVE_SAW_RATE_HZ[WAVE_SAWS] = {4.3f, 6.1f, 0.0f, 7.3f, 5.2f};
+static constexpr float WAVE_SAW_WEIGHT[WAVE_SAWS] = {0.6f, 0.8f, 1.0f, 0.8f, 0.6f};
+static constexpr float WAVE_SAW_WEIGHT_SUM = 3.8f;
+/* The rising saw's fundamental is (2 / pi) sin(2 pi phase). */
+static constexpr float WAVE_SAW_FUNDAMENTAL = 0.63661977f;
+/* At full WAVE the harmonics stand to the body as a real saw's do to its fundamental. */
+static constexpr float WAVE_HARMONICS_SCALE = 1.0f / WAVE_SAW_FUNDAMENTAL;
+/*
+ * The pitch-swept early body keeps most of its clean sweep: with the full
+ * harmonics on it the transient smears into the buzz and gets lost at full
+ * WAVE. The supersaw fades up to full across the tail window.
+ */
+static constexpr float WAVE_PUNCH_HARMONICS = 0.25f;
+/*
+ * The harmonics, not the sine, go through a one-pole high-pass at 250 Hz: a
+ * sine sub under a high-passed supersaw. Locked, the saw's low harmonics sat
+ * at full level through the whole tail, right where the SHAPE sweep lives.
+ * 1 - expf(-2 pi 250 / 48000).
+ */
+static constexpr float WAVE_BODY_HP_A = 0.032195f;
+
+
+/* sin(2 pi p) for p in [0, 1) as two parabolas: smooth, and within 6 %. */
+static inline float ParabolicSine(float p)
+{
+    float q = p < 0.5f ? p : p - 0.5f;
+    float y = 8.0f * q * (1.0f - 2.0f * q);
+
+    return p < 0.5f ? y : -y;
+}
+
+
+static inline float PolyBlepSaw(float phase, float dt)
+{
+    float y = 2.0f * phase - 1.0f;
+
+    if(phase < dt)
+    {
+        float t = phase / dt;
+        y -= t + t - t * t - 1.0f;
+    }
+    else if(phase > 1.0f - dt)
+    {
+        float t = (phase - 1.0f) / dt;
+        y -= t * t + t + t + 1.0f;
+    }
+
+    return y;
+}
 
 
 struct KickVoice
@@ -2154,6 +2219,11 @@ struct KickVoice
     uint32_t body_belly_peak_samples = 1;
     uint32_t body_belly_end_samples = 2;
 
+    /* WAVE, latched at the trigger; the wobbles restart with every hit. */
+    float wave_morph = 0.0f;
+    float saw_wobble_phase[WAVE_SAWS] = {};
+    float harmonics_lp = 0.0f;   /* WAVE_BODY_HP_A's state */
+
     /* Sub-millisecond continuity correction; never becomes a second voice. */
     float declick_residual = 0.0f;
     float declick_coeff = 0.0f;
@@ -2196,7 +2266,8 @@ struct KickVoice
                  float sweep_time_control,
                  uint8_t velocity,
                  float character_delay_ms,
-                 float decay_seconds)
+                 float decay_seconds,
+                 float wave)
     {
         /*
          * Preserve only ONE sample of history to cancel the discontinuity of
@@ -2217,6 +2288,11 @@ struct KickVoice
         noise_lp = 0.0f;
         noise_band_lp = 0.0f;
         character_attack_lp = 0.0f;
+
+        wave_morph = Clamp01Added(wave);
+        for(int i = 0; i < WAVE_SAWS; i++)
+            saw_wobble_phase[i] = 0.0f;
+        harmonics_lp = 0.0f;
 
         base_hz = ClampAdded(frequency, KICK_CHROMATIC_MIN_HZ, KICK_CHROMATIC_MAX_HZ);
         shape = Clamp01Added(kick_shape);
@@ -2520,6 +2596,61 @@ struct KickVoice
                 body_shape_asymmetry
             );
 
+        /*
+         * WAVE. At 0 this is exactly the body, bit for bit. The saws take the
+         * body's actual step (sweep included), so they stay locked to its
+         * pitch, and each starts at zero on phase 0 like the sine.
+         */
+        if(wave_morph > 0.0f)
+        {
+            float dt = fminf(frequency / SAMPLE_RATE, 0.45f);
+            float c1 = cosf(p);
+            float harmonics = 0.0f;
+
+            for(int i = 0; i < WAVE_SAWS; i++)
+            {
+                float offset =
+                    WAVE_SAW_SPREAD[i] * ParabolicSine(saw_wobble_phase[i]);
+
+                saw_wobble_phase[i] += WAVE_SAW_RATE_HZ[i] / SAMPLE_RATE;
+
+                if(saw_wobble_phase[i] >= 1.0f)
+                    saw_wobble_phase[i] -= 1.0f;
+
+                /* Rising saw, zero at phase 0: its fundamental is in phase. */
+                float q = phase + offset + 0.5f;
+                q -= floorf(q);
+
+                /*
+                 * This saw's own fundamental, sin(2 pi (phase + offset)). The
+                 * offset is small, so its sin and cos are short series, within
+                 * ~1e-6 up to 0.05 cycles.
+                 */
+                float x = offset * TWO_PI;
+                float x2 = x * x;
+
+                float own =
+                    s1 * (1.0f - x2 * (0.5f - x2 * (1.0f / 24.0f))) +
+                    c1 * x * (1.0f - x2 * ((1.0f / 6.0f) - x2 * (1.0f / 120.0f)));
+
+                harmonics +=
+                    WAVE_SAW_WEIGHT[i] *
+                    (PolyBlepSaw(q, dt) - WAVE_SAW_FUNDAMENTAL * own);
+            }
+
+            harmonics *= WAVE_HARMONICS_SCALE / WAVE_SAW_WEIGHT_SUM;
+
+            /* Out of the sub's and the sweep's way; see WAVE_BODY_HP_A. */
+            harmonics_lp += WAVE_BODY_HP_A * (harmonics - harmonics_lp);
+            harmonics -= harmonics_lp;
+
+            float sweep_share =
+                WAVE_PUNCH_HARMONICS +
+                (1.0f - WAVE_PUNCH_HARMONICS) * TailWindow();
+
+            body_wave += harmonics * wave_morph * sweep_share;
+        }
+
         float sweep_level =
             SweepAmplitudeCompensation(
                 pitch_ratio_now
@@ -2632,7 +2763,7 @@ struct KickVoice
 
         /*
          * Character path: the same oscillator at the same instant.  The early
-         * pitch-swept body drives the Mackie/Sherman at a reduced level so the
+         * pitch-swept body drives the Mackie/Tube at a reduced level so the
          * overload still belongs to this kick, while the sidechained tail is
          * the dominant drive.  A tiny >~350 Hz feed from the dedicated attack
          * lets the Mackie crack appear at the front without dirtying the sub.
@@ -2723,7 +2854,8 @@ static void TriggerKickVoice(uint8_t velocity)
         kick_sweep_time,
         velocity,
         TailSidechainHoldMs(),
-        MacroDecaySeconds(macro_decay)
+        MacroDecaySeconds(macro_decay),
+        macro_wave
     );
 
     kick_age_samples = 0;
@@ -2881,7 +3013,7 @@ struct Biquad
  * 1) A very gentle ~20 Hz one-pole HPF removes DC/infrasonic wander created
  *    by nonlinear stages without stripping the 2nd/3rd kick harmonics.
  * 2) A tracking NOTCH sits at the clean body's fundamental.  The clean body
- *    therefore owns sub weight and phase, while the Mackie/Sherman keeps the
+ *    therefore owns sub weight and phase, while the Mackie/Tube keeps the
  *    crucial ~2f, 3f, 4f... harmonic stack instead of losing it to an 85 Hz
  *    broadband high-pass.
  */
@@ -6521,7 +6653,7 @@ struct MacroBpfBank
         /*
          * Compensation for the parallel energy each extra layer adds. This
          * is the ONLY layer-count attenuation: the dirty bus used to
-         * subtract a second one, which also dimmed Mackie and Sherman even
+         * subtract a second one, which also dimmed Mackie and Tube even
          * though they had gained no energy.
          */
         float count_compensation =
@@ -6580,10 +6712,35 @@ static MacroBpfBank macro_bpf_bank;
    No tanh, no random modulation, no feedback.
    ============================================================ */
 
+/*
+ * Past the base drive, the first stage is already fully saturated, so more
+ * drive only squares the same shape a little more: the knob stopped doing
+ * anything. Instead, above MACKIE_BRIGHT_FROM the amount reshapes the tone
+ * around the clippers, all scaled by one "brightness" that is 0 through the
+ * base drive and 1 at full:
+ *
+ *   pre-emphasis   highs above ~1.2 kHz lifted INTO the first clipper, up
+ *                  to +11 dB, so it generates denser, brighter harmonics
+ *   presence / air the 1 kHz presence band grows and a 4.2 kHz air band
+ *                  joins it, while the 340 Hz body band eases off
+ *   second stage   driven harder for more harmonic density
+ *   top end        the output low-pass opens from 10 kHz to 16 kHz
+ *
+ * The bass is not involved: the dry kick never passes through here, and the
+ * return has the kick's fundamental notched out before it is added back.
+ */
+static constexpr float MACKIE_BRIGHT_FROM = 0.25f;
+static constexpr float MACKIE_EMPHASIS_GAIN = 2.5f;       /* +11 dB above ~1.2 kHz */
+static constexpr float MACKIE_EMPHASIS_LP_A = 0.14543f;    /* 1 - expf(-2pi 1200/48000) */
+static constexpr float MACKIE_POST_A_DARK = 0.72990000f;   /* 10 kHz, as before */
+static constexpr float MACKIE_POST_A_BRIGHT = 0.87670000f; /* 16 kHz */
+
 struct MacroMackieProcessor
 {
     Biquad body_band;
     Biquad presence_band;
+    Biquad air_band;
+    float emphasis_lp = 0.0f;
 
     float previous_input = 0.0f;
     float pre_lp_1 = 0.0f;
@@ -6615,6 +6772,9 @@ struct MacroMackieProcessor
         presence_band.Reset();
         body_band.SetBandpass(340.0f, 0.78f);
         presence_band.SetBandpass(1050.0f, 0.92f);
+        air_band.Reset();
+        air_band.SetBandpass(4200.0f, 0.70f);
+        emphasis_lp = 0.0f;
 
         previous_input = 0.0f;
         pre_lp_1 = pre_lp_2 = 0.0f;
@@ -6634,21 +6794,37 @@ struct MacroMackieProcessor
             dc_x1 = dc_y1 = 0.0f;
             body_band.Process(0.0f);
             presence_band.Process(0.0f);
+            air_band.Process(0.0f);
+            emphasis_lp = input;
             return 0.0f;
         }
+
+        /* 0 through the base drive, 1 at full; see MACKIE_BRIGHT_FROM. */
+        float bright =
+            SmoothstepAdded(
+                Clamp01Added(
+                    (amount - MACKIE_BRIGHT_FROM) / (1.0f - MACKIE_BRIGHT_FROM)
+                )
+            );
 
         constexpr float pre_a = 0.79210000f; /* MACKIE_PRE_LP_HZ */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
+        /* Pre-emphasis into the first clipper. */
+        emphasis_lp += MACKIE_EMPHASIS_LP_A * (pre_lp_2 - emphasis_lp);
+        float emphasised =
+            pre_lp_2 +
+            (pre_lp_2 - emphasis_lp) * MACKIE_EMPHASIS_GAIN * bright;
+
         float accumulated = 0.0f;
         for(int os = 1; os <= 4; ++os)
         {
             float t = static_cast<float>(os) * 0.25f;
-            float x = previous_input + (pre_lp_2 - previous_input) * t;
+            float x = previous_input + (emphasised - previous_input) * t;
             accumulated += Core(x * MACKIE_INTERNAL_GAIN);
         }
-        previous_input = pre_lp_2;
+        previous_input = emphasised;
 
         float stage1 = accumulated * 0.25f;
 
@@ -6660,12 +6836,18 @@ struct MacroMackieProcessor
         /* overload -> broad desk EQ boosts -> overload again */
         float body = body_band.Process(dc_blocked);
         float presence = presence_band.Process(dc_blocked);
+        float air = air_band.Process(dc_blocked);
         float eq_driven =
-            dc_blocked + body * 0.62f + presence * 0.25f;
+            dc_blocked +
+            body * 0.62f * (1.0f - 0.4f * bright) +
+            presence * (0.25f + 0.75f * bright) +
+            air * 0.9f * bright;
 
-        float stage2 = Core(eq_driven * 1.65f);
+        float stage2 = Core(eq_driven * 1.65f * (1.0f + 0.8f * bright));
 
-        constexpr float post_a = 0.72990000f; /* MACKIE_POST_LP_HZ */
+        float post_a =
+            MACKIE_POST_A_DARK +
+            (MACKIE_POST_A_BRIGHT - MACKIE_POST_A_DARK) * bright;
         post_lp_1 += post_a * (stage2 - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
@@ -6674,281 +6856,218 @@ struct MacroMackieProcessor
 };
 
 /* ============================================================
-   SHERMAN — VCF-4 SWITCHED-CAPACITOR MODEL
+   TUBE — TWO-STAGE TRIODE PREAMP
    ============================================================
 
-   Modelled on the VCF-4 dual switched capacitor audio filter by
-   Skull & Circuits (c)2023.
-   https://www.skullandcircuits.com/blog/write-ups-2/vcf-4-2
+   Replaces the Sherman VCF-4 model on K5's second slot (CC49 amount,
+   CC55 mixer gain, CC50 model switch). A musical model of two cascaded
+   common-cathode triode stages, not a circuit simulation. What makes it
+   read as a tube rather than another clipper:
 
-   The hardware pairs two LTC1060 switched-capacitor filter cores. An
-   LTC1060 has no voltage or current cutoff control at all: cutoff is set
-   purely by a square-wave clock running at 100x the wanted frequency, so
-   a 10 Hz cutoff needs a 1 kHz clock and 10 kHz needs 1 MHz.
+       asymmetric transfer     the grid starts conducting on positive
+                               swings, so they flatten early and hard;
+                               negative swings run into cutoff on a much
+                               softer knee. The mismatch is even-order
+                               harmonics, the "warm" part.
+       blocking bias shift     grid current charges the coupling cap, so
+                               a loud hit drags the operating point
+                               negative and the stage compresses and
+                               sags, recovering over ~60 ms. Level
+                               dependent, so the drive responds to the
+                               kick's envelope instead of clipping flat.
+       two inverting stages    each triode inverts, and the second is
+                               biased differently, so the pair does not
+                               simply cancel its own asymmetry.
+       coupling caps           ~20 Hz high-pass between stages.
+       roll-off                a gentle 2-pole top end at ~7.5 kHz, and a
+                               low-mid bump at ~180 Hz from the plate load.
 
-   That constraint is the whole character. Because the ratio is fixed by
-   the topology, the integrator coefficient is a CONSTANT and the cutoff
-   moves entirely with the clock. And because the core only updates on a
-   clock edge, at low cutoffs the clock falls under the audio rate and the
-   output visibly steps between edges -- the write-up describes it as "a
-   bit crusher kind of effect on low filter settings".
-
-   That artefact lands exactly in a kick's range: at 48 kHz the clock drops
-   below the host rate once the cutoff is under ~480 Hz, so the crunch
-   appears on its own as the filter sweeps down into the body.
-
-   Resonance is BP fed back to the input through a VCA, which self
-   oscillates at the top of its range, as on the hardware.
+   Nonlinear stages run 4x oversampled, as the Mackie does.
    ============================================================ */
 
-struct MacroShermanSVF
+/* Stage operating points, as a fraction of the grid swing. */
+static constexpr float TUBE_STAGE1_BIAS = -0.18f;
+static constexpr float TUBE_STAGE2_BIAS = -0.32f;
+
+/* Input drive into stage 1 at full amount (the amount knob adds more). */
+static constexpr float TUBE_INPUT_GAIN = 3.2f;
+static constexpr float TUBE_INTERSTAGE_GAIN = 2.4f;
+
+/* Blocking: how much grid current shifts the bias, and how fast it recovers. */
+static constexpr float TUBE_BLOCKING_DEPTH = 0.45f;
+static constexpr float TUBE_BLOCKING_CHARGE_A = 0.0052f;    /* ~1 ms at the 4x rate */
+static constexpr float TUBE_BLOCKING_RECOVER_A = 0.0000868f; /* ~60 ms at the 4x rate */
+
+/*
+ * Output staging, and polarity. Negative on purpose: with it positive the
+ * return came back out of phase with the dry kick around 100-150 Hz and
+ * cancelled 2-3 dB of it (measured with the host harness). Negative, the
+ * tube's low harmonics add to the dry kick instead, about +4 dB below 150 Hz.
+ */
+static constexpr float TUBE_OUTPUT_GAIN = -1.0f;
+
+
+struct MacroTubeProcessor
 {
-    float ic1eq = 0.0f;
-    float ic2eq = 0.0f;
-    float k = 1.0f;
+    Biquad plate_bump;
 
-    /* Clock phase, in cycles. One wrap = one capacitor switch. */
-    float clock_phase = 0.0f;
-    float clock_hz = 20000.0f;
+    float previous_input = 0.0f;
+    float pre_lp_1 = 0.0f;
+    float pre_lp_2 = 0.0f;
 
-    /* Held outputs: the core only moves on a clock edge. */
-    float held_low = 0.0f;
-    float held_band = 0.0f;
-    float held_high = 0.0f;
+    /* Coupling caps: input, interstage, output. */
+    float couple_in = 0.0f;
+    float couple_mid = 0.0f;
+    float couple_out_x = 0.0f;
+    float couple_out_y = 0.0f;
+
+    /* Blocking bias shift, per stage. */
+    float block_1 = 0.0f;
+    float block_2 = 0.0f;
+
+    float post_lp_1 = 0.0f;
+    float post_lp_2 = 0.0f;
+
 
     /*
-     * Clock is always 100x cutoff, so g = tan(pi * fc / clock) is fixed.
-     * This is why the real chip needs no frequency-dependent trimming.
+     * One triode stage, inverting. x is the grid swing, bias the operating
+     * point. Above the grid-conduction point the curve flattens hard; below
+     * it runs into cutoff on a soft knee. Normalised so the output is zero
+     * at the operating point, whatever the bias.
      */
-    static constexpr float SC_CLOCK_RATIO = 100.0f;
-    static constexpr float SC_G = 0.031426266f; /* tanf(PI / 100) */
-
-    void ResetState()
+    static float Triode(float x, float bias)
     {
-        ic1eq = 0.0f;
-        ic2eq = 0.0f;
-        clock_phase = 0.0f;
-        held_low = held_band = held_high = 0.0f;
-    }
+        float v = x + bias;
 
-    void Set(float frequency, float resonance, bool immediate = false)
-    {
-        frequency = ClampAdded(frequency, 55.0f, 6000.0f);
-        resonance = ClampAdded(resonance, 0.0f, 0.98f);
+        float plate;
 
-        /* k is 1/Q. Reaching ~0.10 lets the core self-oscillate. */
-        float new_k = 1.62f - resonance * 1.55f;
-        if(new_k < 0.10f)
-            new_k = 0.10f;
-
-        k = immediate ? new_k : k + (new_k - k) * 0.25f;
-        clock_hz = frequency * SC_CLOCK_RATIO;
-    }
-
-    /* One switched-capacitor core step, evaluated at the clock rate. */
-    void Tick(float input)
-    {
-        float denom = 1.0f + SC_G * (SC_G + k);
-
-        float v3 = input - ic2eq;
-        float v1 = (ic1eq + SC_G * v3) / denom;
-        float v2 = ic2eq + SC_G * v1;
-        ic1eq = 2.0f * v1 - ic1eq;
-        ic2eq = 2.0f * v2 - ic2eq;
-
-        held_low = v2;
-        held_band = v1;
-        held_high = input - k * held_band - held_low;
-    }
-
-    void Process(float input, float& low, float& band, float& high)
-    {
-        /*
-         * Advance the clock across this audio sample and run one core step
-         * per switch. Below ~480 Hz cutoff there is less than one switch
-         * per sample, so the previous output is HELD and the signal steps:
-         * the bit-crusher artefact, arising from the topology rather than
-         * being added on afterwards.
-         *
-         * Capped at 8 steps: above that the clock is far past the audio
-         * rate, nothing is audibly stepping, and the extra iterations only
-         * cost cycles.
-         */
-        clock_phase += clock_hz * (1.0f / SAMPLE_RATE);
-
-        int steps = static_cast<int>(clock_phase);
-        if(steps > 8)
+        if(v >= 0.0f)
         {
-            steps = 8;
-            clock_phase = 0.0f;
+            /* Grid conduction: early, firm compression. */
+            plate = v / (1.0f + 2.2f * v);
         }
         else
         {
-            clock_phase -= static_cast<float>(steps);
+            /* Towards cutoff: a much softer knee. */
+            float u = -v;
+            plate = -u / sqrtf(1.0f + 0.55f * u * u);
         }
 
-        for(int s = 0; s < steps; ++s)
-            Tick(input);
+        float rest =
+            bias >= 0.0f
+            ? bias / (1.0f + 2.2f * bias)
+            : bias / sqrtf(1.0f + 0.55f * bias * bias);
 
-        low = held_low;
-        band = held_band;
-        high = held_high;
-    }
-};
-
-struct MacroShermanProcessor
-{
-    MacroShermanSVF f1;
-    MacroShermanSVF f2;
-
-    float pre_lp_1 = 0.0f;
-    float pre_lp_2 = 0.0f;
-    float post_lp_1 = 0.0f;
-    float post_lp_2 = 0.0f;
-    float feedback_memory = 0.0f;
-    float input_hp_state = 0.0f;
-    float prepared_fundamental = -1.0f;
-
-    void PrepareForPitch(float fundamental, bool immediate = false)
-    {
-        fundamental = ClampAdded(fundamental, 25.0f, 130.0f);
-
-        /*
-         * Core A sits over the body. Core B follows it at the selected
-         * clock ratio, exactly as the hardware's frequency dividers lock
-         * the second LTC1060 to the first: 1:1 cascades to 24 dB, 2:1 and
-         * 3:1 give the octave spacing the write-up calls "incredibly
-         * useful" and acid-like.
-         */
-        float f1_frequency =
-            ClampAdded(fundamental * 5.5f, 220.0f, 760.0f);
-        float f2_frequency =
-            ClampAdded(f1_frequency * SHERMAN_CLOCK_RATIO, 220.0f, 4800.0f);
-
-        f1.Set(f1_frequency, SHERMAN_FILTER_RESONANCE, immediate);
-        f2.Set(f2_frequency, SHERMAN_FILTER_RESONANCE * 0.94f, immediate);
-        prepared_fundamental = fundamental;
+        return -(plate - rest);
     }
 
-    /*
-     * One knob sweeping LPF -> BPF -> HPF, as the hardware does with three
-     * VCAs fed from a single pot. The bipolar -BP/0/+BP term is summed on
-     * top: the Nord Lead trick the write-up cites, where subtracting the
-     * bandpass from the blend nulls it out rather than just dulling it.
-     */
-    static float ModeMix(float low, float band, float high)
-    {
-        float mode = SHERMAN_MODE;
-
-        float low_gain = Clamp01Added(1.0f - mode * 2.0f);
-        float high_gain = Clamp01Added(mode * 2.0f - 1.0f);
-        float band_gain = 1.0f - fabsf(mode * 2.0f - 1.0f);
-
-        return low * low_gain +
-               band * band_gain +
-               high * high_gain +
-               band * SHERMAN_BP_POLARITY;
-    }
 
     void Reset()
     {
-        f1.ResetState();
-        f2.ResetState();
+        plate_bump.Reset();
+        plate_bump.SetBandpass(180.0f, 0.70f);
+
+        previous_input = 0.0f;
         pre_lp_1 = pre_lp_2 = 0.0f;
+        couple_in = couple_mid = 0.0f;
+        couple_out_x = couple_out_y = 0.0f;
+        block_1 = block_2 = 0.0f;
         post_lp_1 = post_lp_2 = 0.0f;
-        feedback_memory = 0.0f;
-        input_hp_state = 0.0f;
-        PrepareForPitch(kick_frequency, true);
     }
 
-    void Trigger()
-    {
-        PrepareForPitch(kick_frequency, false);
-    }
+
+    void Trigger() {}
+
 
     float Process(float input, float amount)
     {
         if(amount <= CHARACTER_HEAVY_PROCESS_EPSILON)
         {
+            previous_input = input;
             pre_lp_1 = pre_lp_2 = input;
+            couple_in = input;
+            couple_mid = 0.0f;
+            couple_out_x = couple_out_y = 0.0f;
+            block_1 = block_2 = 0.0f;
             post_lp_1 = post_lp_2 = 0.0f;
-            feedback_memory = 0.0f;
-            input_hp_state = input;
-            f1.ResetState();
-            f2.ResetState();
+            plate_bump.Process(0.0f);
             return 0.0f;
         }
 
-        if(prepared_fundamental < 0.0f)
-            PrepareForPitch(kick_frequency, false);
-
-        constexpr float pre_a = 0.79210000f; /* SHERMAN_PRE_LP_HZ */
+        constexpr float pre_a = 0.79210000f; /* 12 kHz, as the Mackie */
         pre_lp_1 += pre_a * (input - pre_lp_1);
         pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
 
-        constexpr float hp_a = 0.00680f;
-        input_hp_state += hp_a * (pre_lp_2 - input_hp_state);
-        float source = pre_lp_2 - input_hp_state;
+        /* Input coupling cap, ~20 Hz. */
+        constexpr float couple_a = 0.00261f;
+        couple_in += couple_a * (pre_lp_2 - couple_in);
+        float grid = pre_lp_2 - couple_in;
 
-        /*
-         * Resonance is the BANDPASS fed back to the input through a VCA,
-         * not a filter coefficient -- the hardware replaces the resonance
-         * pot with an AS3360 VCA in that path, and self-oscillates when it
-         * is driven far enough.
-         */
-        float feedback_signal = SoftClip(feedback_memory * 1.35f);
-        float driven =
-            SoftClip(
-                source * SHERMAN_INPUT_DRIVE +
-                feedback_signal * SHERMAN_FEEDBACK
-            );
+        float stage2_sum = 0.0f;
 
-        float l1, b1, h1;
-        f1.Process(driven, l1, b1, h1);
-        float f1_mix = ModeMix(l1, b1, h1);
+        for(int os = 1; os <= 4; ++os)
+        {
+            float t = static_cast<float>(os) * 0.25f;
+            float x =
+                (previous_input + (grid - previous_input) * t) *
+                TUBE_INPUT_GAIN;
 
-        /*
-         * SERIAL routing: core A into core B. At a 1:1 ratio this is the
-         * 24 dB cascade; at 2:1 or 3:1 the second core tracks an octave or
-         * more above and the pair reads as a formant pair rather than one
-         * steeper filter.
-         */
-        float f2_input =
-            SHERMAN_SERIAL_ROUTING
-            ? SoftClip(f1_mix * 1.45f)
-            : SoftClip(driven * 1.45f);
+            /* Stage 1, with its bias dragged down by grid current. */
+            float bias_1 = TUBE_STAGE1_BIAS - block_1 * TUBE_BLOCKING_DEPTH;
+            float s1 = Triode(x, bias_1);
 
-        float l2, b2, h2;
-        f2.Process(f2_input, l2, b2, h2);
-        float f2_mix = ModeMix(l2, b2, h2);
+            float grid_current_1 = fmaxf(0.0f, x + bias_1);
+            block_1 +=
+                (grid_current_1 > block_1 ? TUBE_BLOCKING_CHARGE_A
+                                          : TUBE_BLOCKING_RECOVER_A) *
+                (grid_current_1 - block_1);
 
-        float wet =
-            SHERMAN_SERIAL_ROUTING
-            ? SoftClip(f2_mix * 2.15f)
-            : SoftClip((f1_mix + f2_mix) * 1.30f);
+            /* Interstage coupling cap, ~20 Hz, at the oversampled rate. */
+            constexpr float mid_a = 0.000654f;
+            couple_mid += mid_a * (s1 - couple_mid);
+            float x2 = (s1 - couple_mid) * TUBE_INTERSTAGE_GAIN;
 
-        /* Only the bandpass returns to the resonance VCA. */
-        float resonance_return =
-            SHERMAN_SERIAL_ROUTING ? b2 : (b1 + b2) * 0.5f;
+            float bias_2 = TUBE_STAGE2_BIAS - block_2 * TUBE_BLOCKING_DEPTH;
+            float s2 = Triode(x2, bias_2);
 
-        constexpr float fb_post_a = 0.32f;
-        feedback_memory += fb_post_a * (resonance_return - feedback_memory);
+            float grid_current_2 = fmaxf(0.0f, x2 + bias_2);
+            block_2 +=
+                (grid_current_2 > block_2 ? TUBE_BLOCKING_CHARGE_A
+                                          : TUBE_BLOCKING_RECOVER_A) *
+                (grid_current_2 - block_2);
 
-        constexpr float post_a = 0.72990000f; /* SHERMAN_POST_LP_HZ */
-        post_lp_1 += post_a * (wet - post_lp_1);
+            stage2_sum += s2;
+        }
+
+        previous_input = grid;
+
+        float stage2 = stage2_sum * 0.25f;
+
+        /* Output coupling cap / DC block. */
+        constexpr float dc_r = 0.99935f;
+        float coupled = stage2 - couple_out_x + dc_r * couple_out_y;
+        couple_out_x = stage2;
+        couple_out_y = coupled;
+
+        /* Plate-load low-mid bump. */
+        float voiced = coupled + plate_bump.Process(coupled) * 0.35f;
+
+        constexpr float post_a = 0.62500000f; /* ~7.5 kHz */
+        post_lp_1 += post_a * (voiced - post_lp_1);
         post_lp_2 += post_a * (post_lp_1 - post_lp_2);
 
-        return post_lp_2 * param_sherman_gain;
+        return post_lp_2 * TUBE_OUTPUT_GAIN * param_tube_gain;
     }
 };
+
 
 struct MacroCharacterProcessor
 {
     MacroMackieProcessor mackie;
-    MacroShermanProcessor sherman;
+    MacroTubeProcessor tube;
 
     float mackie_amount_smoothed = 0.0f;
-    float sherman_amount_smoothed = 0.0f;
+    float tube_amount_smoothed = 0.0f;
 
     enum class SwitchState
     {
@@ -6958,8 +7077,8 @@ struct MacroCharacterProcessor
     };
 
     SwitchState switch_state = SwitchState::STABLE;
-    bool active_sherman = false;
-    bool desired_sherman = false;
+    bool active_tube = false;
+    bool desired_tube = false;
     float transition_gain = 1.0f;
 
     static bool AudioValueSafe(float x)
@@ -6968,20 +7087,20 @@ struct MacroCharacterProcessor
     }
 
     void PrepareMackie() { mackie.Reset(); }
-    void PrepareSherman() { sherman.Reset(); }
+    void PrepareTube() { tube.Reset(); }
 
     void Reset()
     {
         PrepareMackie();
-        PrepareSherman();
+        PrepareTube();
         mackie_amount_smoothed = 0.0f;
-        sherman_amount_smoothed = 0.0f;
-        active_sherman = macro_character_sherman;
-        desired_sherman = active_sherman;
+        tube_amount_smoothed = 0.0f;
+        active_tube = macro_character_tube;
+        desired_tube = active_tube;
         switch_state = SwitchState::STABLE;
         transition_gain = 1.0f;
         character_switch_pending = false;
-        character_switch_target_sherman = active_sherman;
+        character_switch_target_tube = active_tube;
     }
 
     void Trigger()
@@ -6992,8 +7111,8 @@ struct MacroCharacterProcessor
          * itself is deliberately reduced and high-frequency weighted, so this
          * reset does not become a second bass transient.
          */
-        if(active_sherman)
-            PrepareSherman();
+        if(active_tube)
+            PrepareTube();
         else
             PrepareMackie();
     }
@@ -7003,9 +7122,9 @@ struct MacroCharacterProcessor
         if(!character_switch_pending)
             return;
 
-        desired_sherman = character_switch_target_sherman;
+        desired_tube = character_switch_target_tube;
         character_switch_pending = false;
-        if(desired_sherman != active_sherman)
+        if(desired_tube != active_tube)
             switch_state = SwitchState::FADE_TO_ZERO;
     }
 
@@ -7017,24 +7136,24 @@ struct MacroCharacterProcessor
 
     float CurrentSmoothedAmount() const
     {
-        return active_sherman ? sherman_amount_smoothed : mackie_amount_smoothed;
+        return active_tube ? tube_amount_smoothed : mackie_amount_smoothed;
     }
 
     float ProcessSelectedWet(float input)
     {
-        if(active_sherman)
+        if(active_tube)
         {
-            float target = Clamp01Added(macro_sherman_amount);
-            sherman_amount_smoothed = SmoothAmount(sherman_amount_smoothed, target);
+            float target = Clamp01Added(macro_tube_amount);
+            tube_amount_smoothed = SmoothAmount(tube_amount_smoothed, target);
             float drive =
-                1.0f + sherman_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
-            float wet = sherman.Process(input * drive, sherman_amount_smoothed);
+                1.0f + tube_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+            float wet = tube.Process(input * drive, tube_amount_smoothed);
             if(!AudioValueSafe(wet))
             {
-                PrepareSherman();
+                PrepareTube();
                 return 0.0f;
             }
-            return wet * sherman_amount_smoothed;
+            return wet * tube_amount_smoothed;
         }
 
         float target = Clamp01Added(macro_mackie_amount);
@@ -7062,13 +7181,13 @@ struct MacroCharacterProcessor
             if(transition_gain <= 0.0f)
             {
                 transition_gain = 0.0f;
-                active_sherman = desired_sherman;
+                active_tube = desired_tube;
 
-                if(active_sherman)
+                if(active_tube)
                 {
                     if(CHARACTER_RESET_ON_MODEL_SWITCH)
-                        sherman_amount_smoothed = 0.0f;
-                    PrepareSherman();
+                        tube_amount_smoothed = 0.0f;
+                    PrepareTube();
                 }
                 else
                 {
@@ -9142,24 +9261,24 @@ static bool HandleSixMacroCC(
 
 
         /* ====================================================
-           K5 — MACKIE/SHERMAN HAVE SEPARATE AMOUNT CCs
+           K5 — MACKIE/TUBE HAVE SEPARATE AMOUNT CCs
            ==================================================== */
 
         case CC_MACKIE_AMOUNT:
         {
             macro_mackie_amount = v;
 
-            if(!macro_character_sherman)
+            if(!macro_character_tube)
                 macro_character_wet = v;
 
             return true;
         }
 
-        case CC_SHERMAN_AMOUNT:
+        case CC_TUBE_AMOUNT:
         {
-            macro_sherman_amount = v;
+            macro_tube_amount = v;
 
-            if(macro_character_sherman)
+            if(macro_character_tube)
                 macro_character_wet = v;
 
             return true;
@@ -9176,12 +9295,12 @@ static bool HandleSixMacroCC(
              * No toggle ambiguity and no button edge-state dependency.
              */
             if(requested !=
-               macro_character_sherman)
+               macro_character_tube)
             {
-                macro_character_sherman =
+                macro_character_tube =
                     requested;
 
-                character_switch_target_sherman =
+                character_switch_target_tube =
                     requested;
 
                 character_switch_pending =
@@ -9191,7 +9310,7 @@ static bool HandleSixMacroCC(
 
             macro_character_wet =
                 requested
-                ? macro_sherman_amount
+                ? macro_tube_amount
                 : macro_mackie_amount;
 
             return true;
@@ -9224,6 +9343,13 @@ static bool HandleSixMacroCC(
             return true;
         }
 
+        /* Plain value, latched by the next hit. */
+        case CC_WAVE:
+        {
+            macro_wave = v;
+            return true;
+        }
+
 
         /* ====================================================
            MIX PAGE — FUNCTION + MENU2 on the Teensy
@@ -9237,8 +9363,8 @@ static bool HandleSixMacroCC(
             param_mackie_gain_target = v * PARAM_MACKIE_GAIN_MAX;
             return true;
 
-        case CC_MIX_SHERMAN_GAIN:
-            param_sherman_gain_target = v * PARAM_SHERMAN_GAIN_MAX;
+        case CC_MIX_TUBE_GAIN:
+            param_tube_gain_target = v * PARAM_TUBE_GAIN_MAX;
             return true;
 
         case CC_MIX_BPF_GAIN:
@@ -9398,8 +9524,8 @@ static bool HandleSixMacroCC(
         {
             if(ENABLE_LEGACY_K5_CHARACTER_CONTROLS)
             {
-                if(macro_character_sherman)
-                    macro_sherman_amount = v;
+                if(macro_character_tube)
+                    macro_tube_amount = v;
                 else
                     macro_mackie_amount = v;
                 macro_character_wet = v;
@@ -9407,7 +9533,7 @@ static bool HandleSixMacroCC(
             return true;
         }
 
-        /* K5 button: Mackie <-> Sherman, press edge only. */
+        /* K5 button: Mackie <-> Tube, press edge only. */
         case CC_BUTTON_CHARACTER_LEGACY:
         {
             bool down = value >= 64;
@@ -9420,14 +9546,14 @@ static bool HandleSixMacroCC(
                  */
                 float live_amount = Clamp01Added(macro_character_wet);
 
-                macro_character_sherman = !macro_character_sherman;
+                macro_character_tube = !macro_character_tube;
 
-                if(macro_character_sherman)
-                    macro_sherman_amount = live_amount;
+                if(macro_character_tube)
+                    macro_tube_amount = live_amount;
                 else
                     macro_mackie_amount = live_amount;
 
-                character_switch_target_sherman = macro_character_sherman;
+                character_switch_target_tube = macro_character_tube;
                 character_switch_pending = true;
                 macro_character_wet = live_amount;
             }
@@ -10105,7 +10231,7 @@ static void AudioCallback(
     /* Slew the mix gains toward their CC targets; see their declarations. */
     param_line_gain    += (param_line_gain_target    - param_line_gain)    * PARAM_GAIN_SLEW;
     param_mackie_gain  += (param_mackie_gain_target  - param_mackie_gain)  * PARAM_GAIN_SLEW;
-    param_sherman_gain += (param_sherman_gain_target - param_sherman_gain) * PARAM_GAIN_SLEW;
+    param_tube_gain += (param_tube_gain_target - param_tube_gain) * PARAM_GAIN_SLEW;
     param_bpf_gain     += (param_bpf_gain_target     - param_bpf_gain)     * PARAM_GAIN_SLEW;
 
 
@@ -10161,7 +10287,7 @@ static void AudioCallback(
 
         /*
          * Final CLEAN drum-machine output stage.  This happens before the
-         * clean/dirty buses are recombined, so Mackie/Sherman remains a
+         * clean/dirty buses are recombined, so Mackie/Tube remains a
          * distinct colour path rather than forcing every effect return through
          * another hidden limiter.  It is deliberately mild: at round settings
          * it is effectively transparent, while harder Shape settings get
@@ -10175,13 +10301,13 @@ static void AudioCallback(
 
 
         /* ====================================================
-           WET: DISTORTION (MACKIE / SHERMAN + BPF)
+           WET: DISTORTION (MACKIE / TUBE + BPF)
            ====================================================
 
            The send is synchronous with the ONE deterministic body oscillator.
            TAIL DELAY AMOUNT/STATE (CC42/43) never delays audio: it ducks only
            the tail window while oscillator phase/pitch continue underneath.  A reduced early-body feed plus a tiny
-           high-passed transient feed keeps the Mackie/Sherman sounding like part
+           high-passed transient feed keeps the Mackie/Tube sounding like part
            of the same drum without asking the dirty branch to provide sub weight.
 
            The RETURN is NOT broadly high-passed at 85/120 Hz.  Instead a gentle
@@ -10208,7 +10334,7 @@ static void AudioCallback(
              * Return-only LF management.  First remove DC/infrasonics, then
              * reject only the settled kick fundamental.  The distortion was
              * still DRIVEN full-band, so f0 can generate all of its normal
-             * Mackie/Sherman harmonics before we remove f0 from the return.
+             * Mackie/Tube harmonics before we remove f0 from the return.
              */
             wet =
                 HighPassFixedPole(
@@ -10235,13 +10361,15 @@ static void AudioCallback(
 
 
             /*
-             * Amount-aware management begins around MID I and becomes
-             * increasingly assertive as Mackie/Sherman amount rises.
+             * The dirty-bus manager's compression (from 28 % of K5: up to
+             * 8:1 and an 18 % static trim) is what dulled MID I..III, so it
+             * is held off. It still runs, at zero strength, so re-enabling
+             * it cannot jump.
              */
             wet =
                 character_dirty_bus_manager.Process(
                     wet,
-                    macro_character_processor.CurrentSmoothedAmount()
+                    0.0f
                 );
 
 
@@ -10690,11 +10818,11 @@ int main(void)
     macro_pump_enabled = false;
 
     macro_mackie_amount = 0.0f;
-    macro_sherman_amount = 0.0f;
+    macro_tube_amount = 0.0f;
     macro_character_wet = 0.0f;
 
-    character_switch_target_sherman =
-        macro_character_sherman;
+    character_switch_target_tube =
+        macro_character_tube;
 
     character_switch_pending = false;
 

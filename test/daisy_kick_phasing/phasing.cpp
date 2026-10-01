@@ -22,7 +22,7 @@
  *   band_swing_2_8 band_swing_7_16 single_harmonic_swing after_handoff_db inside_handoff_db
  *
  * Keys as the kick_host harness: line mackamt tubeamt model mackie tube sub
- * punch decay shape wave tailmod sweeptime layers bpf1 taildelay vel note
+ * punch decay shape wave layers bpf1 taildelay vel note
  * hits spacing_ms jitter_ms seed tail_ms.
  */
 #include <stdint.h>
@@ -59,7 +59,7 @@ static void Render(size_t samples)
     {
         hw.callback(in, out, 1);
         g_out.push_back(out_l[0]);
-        g_phase.push_back(kick_voice.last_phase);
+        g_phase.push_back(kick_voice.phase);  /* one step ahead: a fixed offset, the same in the static build */
         g_n++;
         daisy::System::now_ms = (uint32_t)(g_n * 1000ull / 48000ull);
     }
@@ -194,8 +194,8 @@ int main(int argc, char** argv)
     cc("sub", CC_MIX_SUB_GAIN);    cc("punch", CC_MIX_PUNCH_GAIN);
     cc("decay", CC_DECAY_ABSOLUTE); cc("shape", CC_KICK_SHAPE_ABSOLUTE);
     cc("mackamt", CC_MACKIE_AMOUNT); cc("tubeamt", CC_TUBE_AMOUNT);
-    cc("model", CC_CHARACTER_MODEL); cc("tailmod", CC_TAIL_MOD);
-    cc("wave", CC_WAVE);           cc("sweeptime", CC_PUNCH_SWEEP_TIME);
+    cc("model", CC_CHARACTER_MODEL);
+    cc("wave", CC_WAVE);
     cc("layers", CC_BPF_LAYER_COUNT); cc("bpf1", CC_BPF_LAYER1_FREQUENCY);
     cc("taildelay", CC_TAIL_DELAY_ABSOLUTE);
     if(Arg("taildelay", -1.0) >= 0.0) Midi3(0xB0 | MIDI_CHANNEL_KICK, CC_TAIL_DELAY_STATE, 127);

@@ -42,7 +42,6 @@ configs=(
   "Tube 50%:model=1 tubeamt=0.5 mackamt=0"                   "Tube 100%:model=1 tubeamt=1.0 mackamt=0"
   "SHAPE 0:shape=0"             "SHAPE 33%:shape=0.33"       "SHAPE 100%:shape=1.0"
   "PITCH down:vel=1"            "PITCH up:vel=127"
-  "TAIL MOD 50%:tailmod=0.5"    "TAIL MOD 100%:tailmod=1.0"
   "note 33 Hz:note=24"          "note 41 Hz:note=28"         "note 82 Hz:note=40"   "note 110 Hz:note=45"
   "BPF 2 layers:layers=0.67 bpf1=0.4"
   "WAVE 50%:wave=0.5"
