@@ -7336,6 +7336,13 @@ struct MacroWholeKickReverse
     float last_reversed_sample = 0.0f;
     float last_output_sample = 0.0f;
 
+    /*
+     * The reversed hit has run out while reverse is on: stay silent until
+     * the next kick rather than fading the live hit's tail back in under it
+     * (an 8 ms swell of a full-level tail, heard as a thump).
+     */
+    bool reverse_finished = false;
+
 
     /*
      * A new captured hit can begin at a waveform value completely
@@ -7381,6 +7388,7 @@ struct MacroWholeKickReverse
         play_index = 0;
 
         playing = false;
+        reverse_finished = false;
 
         last_reversed_sample = 0.0f;
         last_output_sample = 0.0f;
@@ -7455,6 +7463,8 @@ struct MacroWholeKickReverse
         }
 
 
+        reverse_finished = false;
+
         if(reverse_bass_enabled &&
            valid_samples[
                playback_bank
@@ -7466,6 +7476,18 @@ struct MacroWholeKickReverse
                 ];
 
             playing = true;
+
+            /*
+             * Go straight to the reversed bank. Crossfading into it from the
+             * live signal let ~8 ms of the NEW forward hit (its attack and
+             * sweep) through in front of every reverse kick: a click. The
+             * bridge starts on the exact last output sample instead, so
+             * nothing steps whatever was sounding before.
+             */
+            bank_handoff_active = true;
+            bank_handoff_from = last_output_sample;
+            bank_handoff_pos = 0;
+            wet.wet = 1.0f;
         }
         else
         {
@@ -7504,6 +7526,15 @@ struct MacroWholeKickReverse
             valid_samples[
                 playback_bank
             ] > 64;
+
+
+        if(!want_reverse && reverse_bass_enabled && reverse_finished)
+        {
+            /* Already ~0 after the end-edge fade; settle the rest to silence. */
+            last_reversed_sample *= 0.995f;
+            last_output_sample = last_reversed_sample;
+            return last_reversed_sample;
+        }
 
 
         if(!want_reverse)
@@ -7684,7 +7715,10 @@ struct MacroWholeKickReverse
 
 
         if(play_index == 0)
+        {
             playing = false;
+            reverse_finished = true;
+        }
 
 
         /*

@@ -15,7 +15,7 @@
  *   model=<0|1>  (CC50: 0 = Mackie, 1 = Tube)   wave=<0..1> (CC64)
  *   taildelay=<0..1>               (K3, CC42; also enables it, CC43)
  *   tail=<ms of silence after the last hit>  vel=<1..127, default 100>
- *   note=<0..127, default 36>
+ *   note=<0..127, default 36>   reverse=<0|1> (CC41)
  */
 
 #include <stdint.h>
@@ -193,6 +193,7 @@ int main(int argc, char** argv)
     maybe("tubeamt", CC_TUBE_AMOUNT);
     maybe("model",   CC_CHARACTER_MODEL);
     maybe("wave",    CC_WAVE);
+    maybe("reverse", CC_REVERSE_STATE);   /* >= 0.5 = on */
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);
