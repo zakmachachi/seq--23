@@ -143,18 +143,23 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  */
 static volatile float param_line_gain    = 1.00f;   /* CC53, max 1.5  */
 static volatile float param_mackie_gain  = 0.65f;   /* CC54, max 1.25 */
-static volatile float param_tube_gain = 0.60f;   /* CC55, max 1.25 */
+static volatile float param_tube_gain    = 0.60f;   /* CC55, max 1.25 */
 static volatile float param_bpf_gain     = 0.70f;   /* CC56, max 2.0  */
 static volatile float param_sub_gain     = 1.00f;   /* CC57, unity = full clean body */
-static volatile float param_punch_gain   = 1.00f;   /* CC58, max 1.5  */
+static volatile float param_punch_gain   = 1.00f;   /* CC58, onset lift x1..+6 dB */
 static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
 static constexpr float PARAM_LINE_GAIN_MAX    = 1.5f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 1.25f;
-static constexpr float PARAM_TUBE_GAIN_MAX = 1.25f;
+static constexpr float PARAM_TUBE_GAIN_MAX    = 1.25f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 2.0f;
 static constexpr float PARAM_SUB_GAIN_MAX     = 1.00f;
-static constexpr float PARAM_PUNCH_GAIN_MAX   = 1.5f;
+/*
+ * PUNCH (CC58) is not a fader on a lane: it lifts the one body oscillator
+ * through the pitch sweep's window, 0 = flat, 127 = this many dB louder at
+ * the front, linear in dB. See KickVoice::onset_lift.
+ */
+static constexpr float PUNCH_ONSET_MAX_DB     = 6.0f;
 
 /*
  * CC wrote these directly and they are read per sample, so every message
@@ -1982,7 +1987,7 @@ static inline uint32_t MsToSamples(float ms)
 struct KickVoiceOut
 {
     float punch = 0.0f;     /* dedicated short deterministic attack generator */
-    float sub = 0.0f;       /* same body, with only its TAIL sidechained by TAIL DELAY */
+    float sub = 0.0f;       /* the body, PUNCH-lifted early, TAIL sidechained late */
     float send = 0.0f;      /* synchronous body/attack feed into character path */
     float bpf_punch = 0.0f; /* excitation for the character BPF bank */
 };
@@ -2223,6 +2228,12 @@ struct KickVoice
     float wave_morph = 0.0f;
     float saw_wobble_phase[WAVE_SAWS] = {};
     float harmonics_lp = 0.0f;   /* WAVE_BODY_HP_A's state */
+
+    /*
+     * PUNCH: the gain on the early window, set by the mixer every sample.
+     * One oscillator under one gain contour, so it cannot phase.
+     */
+    float onset_lift = 1.0f;
 
     /* Sub-millisecond continuity correction; never becomes a second voice. */
     float declick_residual = 0.0f;
@@ -2752,7 +2763,7 @@ struct KickVoice
          * The oscillator never pauses, restarts, delays or changes phase while
          * hidden.  When the bass returns it is the naturally elapsed tail.
          */
-        float body_gain = early_window + tail_window * tail_gate;
+        float body_gain = early_window * onset_lift + tail_window * tail_gate;
         float clean_body = body * body_gain;
 
         float correction = declick_residual;
@@ -9376,7 +9387,7 @@ static bool HandleSixMacroCC(
             return true;
 
         case CC_MIX_PUNCH_GAIN:
-            param_punch_gain = v * PARAM_PUNCH_GAIN_MAX;
+            param_punch_gain = powf(10.0f, PUNCH_ONSET_MAX_DB * v / 20.0f);
             return true;
 
 
@@ -10278,12 +10289,16 @@ static void AudioCallback(
 
         KickVoiceOut voices;
 
+        kick_voice.onset_lift = kick_punch_gain_smoothed;
         kick_voice.Process(voices);
 
-        /* The mixer gains set the dry level only. */
+        /*
+         * The mixer gains set the dry level only. SUB is the whole kick's
+         * level, its attack included, so SUB 0 is silent; PUNCH is already
+         * inside the body as its onset lift.
+         */
         float dry =
-            voices.punch * kick_punch_gain_smoothed +
-            voices.sub * kick_sub_gain_smoothed;
+            (voices.punch + voices.sub) * kick_sub_gain_smoothed;
 
         /*
          * Final CLEAN drum-machine output stage.  This happens before the
