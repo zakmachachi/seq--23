@@ -19,6 +19,10 @@ struct ErosionFx {
             frequency+=(Frequency(frequency_position)-frequency)*.0327839f;
             g=std::tan(3.14159265359f*frequency/48000.f);
         }
+        if(amount==0){ // settled bypass: the delay is zero, output is exact dry
+            buffer[write]=input;write=(write+1)&63;
+            return input;
+        }
         rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;
         float noise=float(rng>>8)*(2.f/16777215.f)-1.f;
         // Topology-preserving state-variable bandpass, bandwidth increases

@@ -309,7 +309,7 @@ static constexpr float REVERSE_BANK_HANDOFF_MS = 9.0f;
  * make a crystalline gain-modulation transient when character/filter
  * energy crossed its detector threshold.
  */
-static bool ENABLE_FINAL_HF_DYNAMIC_TAMER = false;
+static constexpr bool ENABLE_FINAL_HF_DYNAMIC_TAMER = false;
 
 static constexpr float FINAL_HF_DYNAMIC_CROSSOVER_HZ = 8000.0f;
 
@@ -788,21 +788,21 @@ static bool macro_pump_enabled = false;
  * Six-macro controller is the authoritative performance control path.
  * Old direct/debug CC70..80 handling stays in the source but is OFF.
  */
-static bool ENABLE_LEGACY_DIRECT_FX_CCS = false;
+static constexpr bool ENABLE_LEGACY_DIRECT_FX_CCS = false;
 
 /*
  * Old one-CC bank routing is deliberately disabled.
  * Turn this on ONLY if using an old Teensy build that still sends CC20
  * for every FX page.
  */
-static bool ENABLE_BANKED_K1_CC20_COMPAT = false;
+static constexpr bool ENABLE_BANKED_K1_CC20_COMPAT = false;
 
 /* Old ambiguous macro/button CCs are OFF by default. */
-static bool ENABLE_LEGACY_AMBIGUOUS_MACRO_CCS = false;
+static constexpr bool ENABLE_LEGACY_AMBIGUOUS_MACRO_CCS = false;
 
 /* Physical controller K4/K5 compatibility remains intentionally enabled. */
-static bool ENABLE_LEGACY_K4_BPF_CONTROLS = true;
-static bool ENABLE_LEGACY_K5_CHARACTER_CONTROLS = true;
+static constexpr bool ENABLE_LEGACY_K4_BPF_CONTROLS = true;
+static constexpr bool ENABLE_LEGACY_K5_CHARACTER_CONTROLS = true;
 static bool legacy_bpf_button_down = false;
 
 
@@ -841,7 +841,7 @@ static volatile float macro_tube_amount = 0.0f;
  * true  = newly-selected model starts at 0
  * false = newly-selected model recalls its own previous amount
  */
-static bool CHARACTER_RESET_ON_MODEL_SWITCH = false;
+static constexpr bool CHARACTER_RESET_ON_MODEL_SWITCH = false;
 
 static constexpr float CHARACTER_BASE_FULL_POINT = 0.30f;
 
@@ -865,7 +865,7 @@ static constexpr float CHARACTER_BASE_FULL_POINT = 0.30f;
    Later these timings can become CC parameters.
    ============================================================ */
 
-static bool ENABLE_KICK_MASTER_GATE_ENVELOPE = false;
+static constexpr bool ENABLE_KICK_MASTER_GATE_ENVELOPE = false;
 
 static volatile float kick_master_attack_ms = 0.15f;
 static volatile float kick_master_release_ms = 14.0f;
@@ -1580,9 +1580,15 @@ static float SweepAmplitudeCompensation(float instantaneous_ratio)
  * coefficient, not the waveform peak.  Turning Shape therefore adds body
  * character without making the 50-ish-Hz authority disappear.
  */
+static float DrumBodyFundamentalNorm(float morph)
+{
+    return 1.0f / (1.0f + 0.151173637f * Clamp01Added(morph));
+}
+
 static float DrumBodyWaveshape(float sine_sample,
                                float morph,
-                               float asymmetry)
+                               float asymmetry,
+                               float fundamental_norm)
 {
     morph = Clamp01Added(morph);
     asymmetry = ClampAdded(asymmetry, 0.0f, 0.08f);
@@ -1607,12 +1613,8 @@ static float DrumBodyWaveshape(float sine_sample,
     /*
      * Fundamental coefficient of the parabolic waveform is ~1.151173637.
      * Divide by the interpolated coefficient so f0 stays almost invariant
-     * through the entire Shape macro.
+     * through the entire Shape macro (DrumBodyFundamentalNorm, per hit).
      */
-    float fundamental_norm =
-        1.0f /
-        (1.0f + 0.151173637f * morph);
-
     return y * fundamental_norm;
 }
 
@@ -1641,6 +1643,8 @@ static inline float RaisedCosine01(float t)
 {
     return 0.5f - 0.5f * cosf(Clamp01Added(t) * PI);
 }
+// The settled value, so finished ramps skip the cosine bit-identically.
+static const float RAISED_COSINE_END = RaisedCosine01(1.0f);
 static inline uint32_t MsToSamples(float ms)
 {
     return static_cast<uint32_t>(fmaxf(ms, 0.0f) * .001f * SAMPLE_RATE);
@@ -1680,8 +1684,6 @@ struct KickVoice
     float instantaneous_hz = KICK_FIXED_FREQUENCY_HZ;
     float shape = .5f;
     float pitch_env = 0.0f, pitch_coeff = 0.0f, pitch_depth = 0.0f;
-    bool curve_active = false;
-    float curve_g = 1.0f, curve_u_step = 0.0f, curve_end_u = 1.0f;
     float body_env = 0.0f, decay_coeff = 1.0f, decay_coeff_target = 1.0f;
     uint32_t body_hold_samples = 1;
     float attack_env = 0.0f, attack_coeff = 0.0f, attack_level = 0.0f;
@@ -1690,6 +1692,7 @@ struct KickVoice
     uint32_t noise_state = 0x5A17C9E3u;
     float noise_lp = 0.0f, noise_band_lp = 0.0f;
     float body_shape_morph = 0.0f, body_shape_asymmetry = 0.0f;
+    float body_fundamental_norm = 1.0f, tail_lfo_increment = 0.0f;
     float wave_morph = 0.0f;
     uint32_t onset_samples = 384;
     bool tail_gate_active = false;
@@ -1734,10 +1737,6 @@ struct KickVoice
         pitch_env = pitch_depth > .00001f ? 1.0f : 0.0f;
         float sweep_ms = KickSweepTimeMs(sweep_time_control);
         pitch_coeff = Decay60Coefficient(sweep_ms * .001f);
-        curve_g = 1.f;
-        curve_active = false;
-        curve_u_step = 1.0f / (sweep_ms * .001f * SAMPLE_RATE);
-        curve_end_u = powf(11.512925f / 6.907755f, 1.0f / curve_g);
         // Pitch timing is independent of DECAY and of the amplitude hold.
         float settle_u = pitch_depth > .05f
             ? logf(pitch_depth / .05f) / 6.907755f : 0.0f;
@@ -1749,6 +1748,8 @@ struct KickVoice
         decay_coeff = decay_coeff_target;
         body_shape_morph = ShapeMap(shape, 0.0f, .44f, .88f);
         body_shape_asymmetry = ShapeMap(shape, 0.0f, .012f, .045f);
+        body_fundamental_norm = DrumBodyFundamentalNorm(body_shape_morph);
+        tail_lfo_increment = tail_rate_hz / SAMPLE_RATE;
         attack_level = ShapeMap(shape, 0.0f, .070f, .165f);
         attack_noise_mix = ShapeMap(shape, 0.0f, .14f, .42f);
         attack_pulse_width_samples = MsToSamples(ShapeMap(shape, 4.5f, 1.6f, .42f));
@@ -1785,33 +1786,35 @@ struct KickVoice
     {
         if(!active) return;
         decay_coeff += (decay_coeff_target-decay_coeff) * KICK_DECAY_COEFF_SMOOTH;
-        float sweep_env = pitch_env;
-        if(curve_active)
-        {
-            float u = age * curve_u_step;
-            sweep_env = u >= curve_end_u ? 0.0f : expf(-6.907755f * powf(u, curve_g));
-        }
-        float ratio = 1.0f + pitch_depth * sweep_env;
+        float ratio = 1.0f + pitch_depth * pitch_env;
         float tail_position = 0.f;
         if(age >= tail_start_samples)
         {
-            tail_position = tail_rate_hz > 0.f
-                ? .5f - .5f*cosf(TWO_PI * tail_lfo_phase)
-                : RaisedCosine01(float(age-tail_start_samples) / tail_glide_samples);
-            tail_lfo_phase += tail_rate_hz / SAMPLE_RATE;
+            if(tail_rate_hz > 0.f)
+                tail_position = .5f - .5f*cosf(TWO_PI * tail_lfo_phase);
+            else
+            {
+                float t = float(age-tail_start_samples) / tail_glide_samples;
+                tail_position = t >= 1.0f ? RAISED_COSINE_END : RaisedCosine01(t);
+            }
+            tail_lfo_phase += tail_lfo_increment;
             tail_lfo_phase -= floorf(tail_lfo_phase);
         }
-        float frequency = base_hz * ratio * powf(2.f, tail_semitones * tail_position / 12.f);
+        float tail_exponent = tail_semitones * tail_position / 12.f;
+        float frequency = base_hz * ratio
+            * (tail_exponent == 0.f ? 1.f : powf(2.f, tail_exponent));
         instantaneous_hz = frequency;
+        const float dt = frequency / SAMPLE_RATE;
         float sine = sinf(body_phase * TWO_PI);
-        float body_wave = DrumBodyWaveshape(sine, body_shape_morph, body_shape_asymmetry);
+        float body_wave = DrumBodyWaveshape(sine, body_shape_morph, body_shape_asymmetry,
+                                            body_fundamental_norm);
         if(wave_morph > 0.0f)
         {
             // Single phase-derived, anti-aliased saw; subtract its own
             // fundamental so WAVE cannot double/cancel the pitched body.
             float q = body_phase + .5f;
             if(q >= 1.0f) q -= 1.0f;
-            float harmonics = PolyBlepSaw(q, frequency / SAMPLE_RATE) * (PI * .5f) - sine;
+            float harmonics = PolyBlepSaw(q, dt) * (PI * .5f) - sine;
             body_wave += harmonics * wave_morph;
         }
         float pulse = 0.0f;
@@ -1826,11 +1829,13 @@ struct KickVoice
         float attack = ((1.0f-attack_noise_mix)*pulse + attack_noise_mix*noise_band_lp)
                        * attack_env * attack_level;
         // Eight ms at the bass endpoint, smoothly reaching .5 ms for kicks.
-        float onset = RaisedCosine01(float(age) / onset_samples);
-        o.punch = (body_wave * body_env * KICK_BODY_INTERNAL_LEVEL * SweepAmplitudeCompensation(ratio)
+        float onset = age >= onset_samples ? RAISED_COSINE_END
+                                           : RaisedCosine01(float(age) / onset_samples);
+        float sweep_gain = ratio <= 1.0f ? 1.0f : SweepAmplitudeCompensation(ratio);
+        o.punch = (body_wave * body_env * KICK_BODY_INTERNAL_LEVEL * sweep_gain
                    + attack) * onset;
         o.gate = TailGate();
-        phase += frequency / SAMPLE_RATE;
+        phase += dt;
         phase -= floorf(phase);
         body_phase = phase;
         pitch_env *= pitch_coeff;
@@ -2076,6 +2081,8 @@ struct KickCrossover
             else stage.SetLowpass(240.f, .70710678f);
         }
     }
+    // Per hit: the 240 Hz coefficients are fixed, only history is cleared.
+    void ClearState(){ for(auto& stage : stages) stage.Reset(); }
     float Process(float x)
     {
         return stages[1].Process(stages[0].Process(x));
@@ -2087,6 +2094,7 @@ struct CleanBassShelf
 {
     Biquad eq;
     void Reset(){eq.Reset();eq.SetLowShelf(120.f,15.f);}
+    void ClearState(){eq.Reset();}
     float Process(float x,float amount)
     {
         float boosted=eq.Process(x);
@@ -2212,8 +2220,11 @@ struct KickSidechainReverb
     float lp0=0,lp1=0,lp2=0,lp3=0,send_lp=0,echo_lp=0;
     float amount_smooth=0,detector=0,duck_gain=0;
     float tap=0,next_tap=0,tap_fade=0;
-    uint32_t duck_hold=0,clock_divider=0;
+    uint32_t duck_hold=0,clock_divider=0,idle_samples=0;
     bool changing_tap=false;
+    // At zero amount the wet is muted; after the tank has rung below
+    // -120 dB (combs .86, echo .35 per repeat of up to 1.2 s) stop it.
+    static constexpr uint32_t IDLE_AFTER_SAMPLES=15u*48000u;
 
     float* delay_buffer=nullptr;
     Biquad *return_hp=nullptr,*echo_hp=nullptr,*echo_filter=nullptr;
@@ -2233,7 +2244,7 @@ struct KickSidechainReverb
         ci0=ci1=ci2=ci3=ai0=ai1=write=0;
         lp0=lp1=lp2=lp3=send_lp=echo_lp=0;
         amount_smooth=detector=0;duck_gain=1;
-        duck_hold=clock_divider=0;changing_tap=false;tap_fade=0;
+        duck_hold=clock_divider=idle_samples=0;changing_tap=false;tap_fade=0;
         tap=next_tap=ClampAdded(perf_quarter_note_ms*(SAMPLE_RATE*.001f)*REVERB_ECHO_QUARTER_NOTES,48.f,48000.f);
         return_hp->Reset();return_hp->SetHighpass(180.f,.70710678f);
         echo_hp->Reset();echo_hp->SetHighpass(240.f,.70710678f);
@@ -2284,6 +2295,13 @@ struct KickSidechainReverb
             if(!changing_tap && fabsf(wanted-tap)>fmaxf(24.f,tap*.01f))
             {next_tap=wanted;tap_fade=0;changing_tap=true;}
         }
+        if(x==0.f && idle_samples>=IDLE_AFTER_SAMPLES)
+        {
+            send_lp+=(dry-send_lp)*.03851f;
+            UpdateDuck(dry);
+            return dry;
+        }
+        idle_samples=x==0.f?idle_samples+1:0;
         float echo=ReadTap(tap);
         if(changing_tap)
         {
@@ -2305,12 +2323,16 @@ struct KickSidechainReverb
                        +Comb(feed,comb2,C2,ci2,lp2,fb)+Comb(feed,comb3,C3,ci3,lp3,fb));
         wet=Allpass(wet,ap0,A0,ai0);wet=Allpass(wet,ap1,A1,ai1);
         wet=return_hp->Process(wet*.70f+echo_lp*echo_mix*REVERB_ECHO_RETURN);
+        UpdateDuck(dry);
+        return dry+wet*duck_gain*x;
+    }
+    void UpdateDuck(float dry)
+    {
         float level=fabsf(dry);
         detector+=(level-detector)*(level>detector?.0103626f:.000347162f);
         float target=1.f/(1.f+30.f*detector);
         if(duck_hold){--duck_hold;target=fminf(target,.18f);}
         duck_gain+=(target-duck_gain)*(target<duck_gain?.0103626f:.0002083116f);
-        return dry+wet*duck_gain*x;
     }
 };
 
@@ -2790,6 +2812,7 @@ struct AddedPump
         hold_samples = 0;
 
         samples_since_trigger = 0xFFFFFFFFu;
+        cached_macro = cached_quarter_ms = -1.0f;
     }
 
 
@@ -2869,6 +2892,30 @@ struct AddedPump
     }
 
 
+    float cached_macro = -1.0f, cached_quarter_ms = -1.0f;
+    float minimum_gain = 1.0f, attack_a = 0.0f, release_a = 0.0f;
+    uint32_t attack_samples = 0;
+
+    void Configure(float macro, float quarter_note_ms)
+    {
+        cached_macro = macro;
+        cached_quarter_ms = quarter_note_ms;
+
+        float depth = 0.22f + 0.74f * powf(macro, 0.82f);
+        minimum_gain = 1.0f - depth;
+
+        float attack_ms = 2.5f + macro * 1.5f;
+        attack_a = expf(-5.0f / (SAMPLE_RATE * attack_ms / 1000.0f));
+        attack_samples = static_cast<uint32_t>(
+            SAMPLE_RATE * (attack_ms + 0.8f) / 1000.0f);
+
+        float release_fraction = 0.10f + 0.58f * powf(macro, 1.22f);
+        float release_ms = quarter_note_ms * release_fraction;
+        if(release_ms < 32.0f)
+            release_ms = 32.0f;
+        release_a = expf(-5.0f / (SAMPLE_RATE * release_ms / 1000.0f));
+    }
+
     float Process(
         float input,
         float quarter_note_ms)
@@ -2921,18 +2968,10 @@ struct AddedPump
         }
 
 
-        float depth =
-            0.22f +
-            0.74f *
-            powf(
-                macro,
-                0.82f
-            );
-
-
-        float minimum_gain =
-            1.0f -
-            depth;
+        // Everything below depends only on the macro and the tempo: derive
+        // it when either changes, not on every sample.
+        if(macro != cached_macro || quarter_note_ms != cached_quarter_ms)
+            Configure(macro, quarter_note_ms);
 
 
         if(attacking)
@@ -2940,45 +2979,16 @@ struct AddedPump
             /*
              * Smooth duck onset.
              */
-            float attack_ms =
-                2.5f +
-                macro *
-                1.5f;
-
-
-            float a =
-                expf(
-                    -5.0f /
-                    (
-                        SAMPLE_RATE *
-                        attack_ms /
-                        1000.0f
-                    )
-                );
-
-
             gain =
                 minimum_gain +
                 (
                     gain -
                     minimum_gain
                 ) *
-                a;
+                attack_a;
 
 
             attack_age++;
-
-
-            uint32_t attack_samples =
-                static_cast<uint32_t>(
-                    SAMPLE_RATE *
-                    (
-                        attack_ms +
-                        0.8f
-                    )
-                    /
-                    1000.0f
-                );
 
 
             if(attack_age >= attack_samples)
@@ -3028,42 +3038,13 @@ struct AddedPump
             /*
              * Musical recovery after the transient/sweep window.
              */
-            float release_fraction =
-                0.10f +
-                0.58f *
-                powf(
-                    macro,
-                    1.22f
-                );
-
-
-            float release_ms =
-                quarter_note_ms *
-                release_fraction;
-
-
-            if(release_ms < 32.0f)
-                release_ms = 32.0f;
-
-
-            float a =
-                expf(
-                    -5.0f /
-                    (
-                        SAMPLE_RATE *
-                        release_ms /
-                        1000.0f
-                    )
-                );
-
-
             gain =
                 1.0f +
                 (
                     gain -
                     1.0f
                 ) *
-                a;
+                release_a;
         }
 
 
@@ -3088,6 +3069,8 @@ struct AddedClockedDelay
     uint32_t valid_written = 0;
 
     float macro_smoothed = 0.0f;
+    float cached_quarter_ms = -1.0f, cached_m = -1.0f, feedback = 0.18f;
+    uint32_t delay_samples = 0;
 
     AddedSmoothWet wet;
 
@@ -3104,6 +3087,8 @@ struct AddedClockedDelay
         write = 0;
         valid_written = 0;
         macro_smoothed = 0.0f;
+
+        cached_quarter_ms = cached_m = -1.0f;
 
         wet.Reset();
     }
@@ -3162,39 +3147,21 @@ struct AddedClockedDelay
         }
 
 
-        float delay_ms =
-            quarter_note_ms *
-            1.5f;
+        if(quarter_note_ms != cached_quarter_ms)
+        {
+            cached_quarter_ms = quarter_note_ms;
+            float delay_ms =
+                ClampAdded(quarter_note_ms * 1.5f, 20.0f, 840.0f);
+            delay_samples =
+                static_cast<uint32_t>(delay_ms * SAMPLE_RATE / 1000.0f);
+            if(delay_samples >= MAX_SAMPLES)
+                delay_samples = MAX_SAMPLES - 1;
+        }
 
 
-        delay_ms =
-            ClampAdded(
-                delay_ms,
-                20.0f,
-                840.0f
-            );
-
-
-        uint32_t delay_samples =
-            static_cast<uint32_t>(
-                delay_ms *
-                SAMPLE_RATE /
-                1000.0f
-            );
-
-
-        if(delay_samples >= MAX_SAMPLES)
-            delay_samples = MAX_SAMPLES - 1;
-
-
-        uint32_t read =
-            (
-                write +
-                MAX_SAMPLES -
-                delay_samples
-            )
-            %
-            MAX_SAMPLES;
+        uint32_t read = write + MAX_SAMPLES - delay_samples;
+        if(read >= MAX_SAMPLES)
+            read -= MAX_SAMPLES;
 
 
         float delayed =
@@ -3209,13 +3176,11 @@ struct AddedClockedDelay
             );
 
 
-        float feedback =
-            0.18f +
-            0.60f *
-            powf(
-                m,
-                1.25f
-            );
+        if(m != cached_m)
+        {
+            cached_m = m;
+            feedback = 0.18f + 0.60f * powf(m, 1.25f);
+        }
 
 
         float user_wet =
@@ -5036,16 +5001,19 @@ struct MackieOversampling
     {
         float y=0.f;
         for(int k=phase,j=0;k<97;k+=4,++j)
-            y+=4.f*MACKIE_FIR[k]*input_history[input_pos+j];
-        return y;
+            y+=MACKIE_FIR[k]*input_history[input_pos+j];
+        return 4.f*y; // interpolation gain once; power-of-two scaling is exact
+
     }
     float Downsample(float x, bool emit)
     {
         if(--output_pos<0)output_pos=96;
         output_history[output_pos]=output_history[output_pos+97]=x;
         if(!emit)return 0.f;
-        float y=0.f;
-        for(int k=0;k<97;++k)y+=MACKIE_FIR[k]*output_history[output_pos+k];
+        // Symmetric taps: 49 multiplies instead of 97.
+        const float* h=output_history+output_pos;
+        float y=MACKIE_FIR[48]*h[48];
+        for(int k=0;k<48;++k)y+=MACKIE_FIR[k]*(h[k]+h[96-k]);
         return y;
     }
 };
@@ -5072,24 +5040,36 @@ struct MacroMackieProcessor
         float u=shaped/rail;
         return rail*u/sqrtf(1.f+u*u);
     }
+    bool idle=false;
     void Reset()
     {
         os.Reset(); output_lowpass.Reset();
         output_lowpass.SetLowpass(12000.f,.70710678f,SAMPLE_RATE*4.f);
         for(int i=0;i<3;++i){dc_x[i]=dc_y[i]=0.f;macro_bpf_bank.oversampled_filters[i].Reset();}
+        idle=false;
     }
+    // At zero amount the wet is muted anyway: keep only the input history,
+    // so the interpolator is primed when the amount rises again.
+    void Idle(float input){ os.Push(input); idle=true; }
     float Process(float input,float amount)
     {
+        if(idle)
+        {
+            MackieOversampling primed=os;
+            Reset();
+            os=primed;
+        }
         os.Push(input);
         float result=0.f;
-        int count=macro_bpf_layer_count_latched;
+        const int layers=macro_bpf_layer_count_latched;
+        int count=layers;
         if(count<1)count=1;
         for(int phase=0;phase<4;++phase)
         {
             float x=os.Upsample(phase);
             for(int channel=0;channel<count;++channel)
             {
-                if(channel<macro_bpf_layer_count_latched)
+                if(channel<layers)
                     x=macro_bpf_bank.oversampled_filters[channel].Process(x);
                 float drive=channel==0 ? MACKIE_INTERNAL_GAIN : 1.f+2.f*amount;
                 x=Core(x*drive);
@@ -5409,6 +5389,13 @@ struct MacroCharacterProcessor
         mackie_amount_smoothed = SmoothAmount(mackie_amount_smoothed, target);
         float drive =
             1.0f + mackie_amount_smoothed * CHARACTER_AMOUNT_DRIVE_RANGE;
+        // Below -120 dB the muted 4x cascade is skipped entirely.
+        if(target == 0.0f && mackie_amount_smoothed < 1e-6f)
+        {
+            mackie_amount_smoothed = 0.0f;
+            mackie.Idle(input * drive);
+            return 0.0f;
+        }
         float wet = mackie.Process(input * drive, mackie_amount_smoothed);
         if(!AudioValueSafe(wet))
         {
@@ -5489,8 +5476,10 @@ struct WetBitcrusher
         int lower=static_cast<int>(bits);
         float fraction=bits-lower;
         float levels=static_cast<float>(1u << (lower-1));
-        float coarse=roundf(x*levels)/levels;
-        float fine=roundf(x*(2.f*levels))/(2.f*levels);
+        // Powers of two: the reciprocal multiply is exact, no divides.
+        float step=static_cast<float>(1.0 / (1u << (lower-1)));
+        float coarse=roundf(x*levels)*step;
+        float fine=roundf(x*(2.f*levels))*(.5f*step);
         float crushed=coarse+(fine-coarse)*fraction;
         return x+(crushed-x)*wet;
     }
@@ -8380,9 +8369,9 @@ static void AudioCallback(
         // to a single finite bridge after the final filter, not bass layers.
         kick_output_bridge.Trigger();
         final_infrasonic_hpf.Reset();
-        character_highpass.Reset(true);
-        clean_lowpass.Reset(false);
-        clean_bass_shelf.Reset();
+        character_highpass.ClearState();
+        clean_lowpass.ClearState();
+        clean_bass_shelf.ClearState();
         clean_alignment.Reset();
         macro_bpf_bank.Reset();
 

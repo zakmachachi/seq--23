@@ -21,6 +21,7 @@ struct ExternalPitchFx {
         // Limit ultrasonic folding on upward shifts; only the wet signal is filtered.
         lp1+=(input-lp1)*.65f;lp2+=(lp1-lp2)*.65f;
         buffer[write]=lp2;
+        if(wet==0){write=(write+1)&4095;return input;} // exact dry, history kept
         phase+=(1.f-ratio)/2048.f;
         if(phase<0)phase+=1.f;else if(phase>=1)phase-=1.f;
         float other=phase+.5f;if(other>=1)other-=1;
