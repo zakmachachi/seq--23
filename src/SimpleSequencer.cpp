@@ -3921,9 +3921,9 @@ void SimpleSequencer::bootAnimation() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(46, 20); display.print("seq-23");
   display.setCursor(7,  34); display.print("made by Bob and Zak");
-  // Size-2 (12px per char): "v1.3.0" is 72px, so x=28 centres it on the card.
+  // Size-2 (12px per char): "v1.4.0" is 72px, so x=28 centres it on the card.
   display.setTextSize(2);
-  display.setCursor(28, 48); display.print("v1.3.0");
+  display.setCursor(28, 48); display.print("v1.4.0");
   display.setTextSize(1);
   display.display();
 
@@ -3934,7 +3934,7 @@ void SimpleSequencer::bootAnimation() {
     display2.setCursor(46, 20); display2.print("seq-23");
     display2.setCursor(7,  34); display2.print("made by Bob and Zak");
     display2.setTextSize(2);
-    display2.setCursor(28, 48); display2.print("v1.3.0");
+    display2.setCursor(28, 48); display2.print("v1.4.0");
     display2.setTextSize(1);
     display2.display();
   }
