@@ -6,9 +6,10 @@
 // Controller state, physical input, focus and outgoing MIDI have separate owners.
 class KickPerformance {
 public:
+  static constexpr uint8_t CC_SLOTS = 27; // one per entry of CC[] in the .cpp
   enum Parameter : uint8_t {
     STUT, LOOP, DELAY, HPF, LPF, PUMP, REVERB, DECAY, TAIL,
-    BPF1, BPF2, BPF3, MACKIE, SHERMAN, SHAPE, PARAM_COUNT
+    BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, BITCRUSH, EROSION, EROSION_FREQ, PITCH, PARAM_COUNT
   };
   struct RepeatState {
     uint8_t position = 0;
@@ -26,7 +27,7 @@ public:
     bool tailDelayEnabled = false;
     uint8_t bpfLayerCount = 0, editedBpfLayer = 0;
     uint8_t bpfFrequencyValue[3] = {35,65,95};
-    uint8_t mackieAmount = 0, shermanAmount = 0;
+    uint8_t mackieAmount = 0, tubeAmount = 0;
     bool selectedCharacterModel = false;
     uint8_t kickShape = 64;
     bool pumpEnabled = false;
@@ -34,6 +35,20 @@ public:
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
+  struct FxState { uint8_t repeat=0, filter=0, routes=14; }; // DLY, HPF; pump EXT, others E+I. Routes bit4: reverb INT only.
+  void setFxMenu(bool enabled);
+  void setFunctionHeld(bool held);
+  void transport(bool running, uint32_t bar);
+  FxState fxState() const { return fx_; }
+  void restoreFx(const FxState& state);
+  bool resetPending(Parameter p) const;
+  uint32_t takeResetParameters();
+  // A Function revert restores values, but a bar-end reset requested before
+  // it must still happen.
+  uint16_t pendingResetMask() const { return resetMask_; }
+  void restorePendingResets(uint16_t mask);
+  bool idleOverview(uint32_t now) const { return fxMenu_ && uint32_t(now-lastTouchMs_)>=5000; }
+
   void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
   void buttonEdge(uint8_t button, bool pressed, uint32_t now);
   void service(uint32_t now);
@@ -53,8 +68,8 @@ public:
     return parameter != STUT && parameter != LOOP && parameter < PARAM_COUNT;
   }
   void setParameterValue(Parameter parameter, uint8_t value);
-  // ControllerState is a flat POD, so the patch persists it as-is instead of
-  // reaching into the controller.
+  // Legacy ControllerState stays a flat POD with stable EEPROM offsets.
+  // The appended BITCRUSH value is saved separately through parameterValue().
   void saveTo(ControllerState& out) const;
   void restoreFrom(const ControllerState& in);
 private:
@@ -73,17 +88,30 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[20] = {};
-    uint8_t value[20] = {};
+    bool pending[CC_SLOTS] = {};
+    uint8_t value[CC_SLOTS] = {};
   };
   ControllerState state_;
+  FxState fx_;
+  bool fxMenu_=false, functionHeld_=false, running_=false;
+  uint16_t resetMask_=0;
+  uint32_t resetParameters_=0, bar_=0, now_=0, lastTouchMs_=0;
+  void queueResetMask();
+  void requestReset(uint8_t knob);
+  void zeroEffect(Parameter p, bool send);
+  Parameter fxAssignment(uint8_t knob) const;
+  void drawFxOverview(Adafruit_SH1106G& display);
+  void drawFxFocus(Adafruit_SH1106G& display, bool idle);
+
+  uint8_t erosion_=0, erosionFrequency_=64, pitch_=64;
+  uint8_t bitcrush_ = 0; // saved separately to preserve legacy EEPROM offsets
   PhysicalPot physical_[6];
   ButtonState buttons_[6];
   FocusState focus_;
   MidiState midi_;
   uint8_t userEdited_ = PARAM_COUNT;
-  bool active_ = false, dirty_ = true, rendered_ = false;
-  uint32_t lastFrameMs_ = 0, renderedBpm_ = 0;
+  bool active_ = false, dirty_ = true, rendered_ = false, idleShown_ = false;
+  uint32_t lastFrameMs_ = 0, renderedBpm_ = 0, idleDotStep_ = 0;
 
   Parameter assignment(uint8_t knob) const;
   uint8_t& position(Parameter parameter);
@@ -103,7 +131,6 @@ private:
   static float smoothstep(float value);
   static float frequency(Parameter parameter, uint8_t value);
   static float releaseMs(uint8_t value);
-  static void shapeValues(uint8_t value, float& ratio, float& seconds);
   static void frequencyText(char* out, size_t size, float hz, bool compact);
   void valueText(Parameter parameter, char* out, size_t size, bool compact) const;
   void drawOverview(Adafruit_SH1106G& display);
