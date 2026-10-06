@@ -25,6 +25,7 @@ public:
   void saveTo(SavedState& out) const;
   uint8_t belly() const { return value_[BELLY]; }
   uint8_t punch() const { return value_[PUNCH]; }
+  uint8_t sub() const { return value_[SUB]; }
   void restoreFrom(const SavedState& in);
 private:
   struct PhysicalPot {

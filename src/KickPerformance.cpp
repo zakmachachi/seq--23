@@ -5,9 +5,10 @@
 #include <string.h>
 
 namespace {
-constexpr uint8_t CC[] = {30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52};
+constexpr uint8_t CC[] = {90,91,92,93,30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,37,38,39};
 constexpr uint8_t CC_SLOTS = sizeof(CC);
-constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51};
+constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51,37,38,39,93};
+static_assert(sizeof(PARAM_CC)==KickPerformance::PARAM_COUNT, "Missing parameter CC");
 constexpr uint8_t STUT_VALUES[] = {16,48,80,112};
 constexpr uint8_t LOOP_VALUES[] = {13,38,63,88,114};
 constexpr uint8_t COUNT_VALUES[] = {0,42,85,127};
@@ -20,7 +21,8 @@ void divisionLabel(char* out, size_t size, bool loop, uint8_t division){
   if (loop) snprintf(out,size,"1/%u",2u << division);
   else snprintf(out,size,"%s",STUT_LABELS[division]);
 }
-const char* const FX_NAMES[] = {"STUT","LOOP","DLY","HPF","LPF","PUMP","REV"};
+const char* const FX_NAMES[] = {"STUT","LOOP","DLY","HPF","LPF","PUMP","REV","BITCRUSH","EROSION","PITCH"};
+constexpr KickPerformance::Parameter FX_PARAMS[] = {KickPerformance::STUT, KickPerformance::LOOP, KickPerformance::DELAY, KickPerformance::HPF, KickPerformance::LPF, KickPerformance::PUMP, KickPerformance::REVERB, KickPerformance::BITCRUSH, KickPerformance::EROSION, KickPerformance::PITCH};
 constexpr uint8_t FX_PAGES = sizeof(FX_NAMES)/sizeof(FX_NAMES[0]);
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr int LEFT = 4, RIGHT = 123, GRAPH_TOP = 36, GRAPH_BOTTOM = 48;
@@ -39,8 +41,9 @@ void KickPerformance::begin(SendCC send, void* context){
 }
 
 KickPerformance::Parameter KickPerformance::assignment(uint8_t knob) const {
+  if(fxMenu_) return knob==5 && functionHeld_ ? EROSION_FREQ : fxAssignment(knob);
   switch (knob){
-    case 0: return (Parameter)state_.selectedFx;
+    case 0: return PARAM_COUNT; // Effects now live on the dedicated FX menu.
     case 1: return DECAY;
     case 2: return TAIL;
     case 3: return (Parameter)(BPF1 + state_.editedBpfLayer);
@@ -57,6 +60,10 @@ uint8_t& KickPerformance::position(Parameter p){
     case LPF: return state_.lpf;
     case PUMP: return state_.pumpAmount;
     case REVERB: return state_.reverb;
+    case BITCRUSH: return bitcrush_;
+    case EROSION: return erosion_;
+    case EROSION_FREQ: return erosionFrequency_;
+    case PITCH: return pitch_;
     case DECAY: return state_.decay;
     case TAIL: return state_.tailDelayAmount;
     case BPF1: case BPF2: case BPF3: return state_.bpfFrequencyValue[p - BPF1];
@@ -78,8 +85,9 @@ KickPerformance::Parameter KickPerformance::takeUserEditedParameter(){
 }
 uint8_t KickPerformance::parameterValue(Parameter p) const { return position(p); }
 void KickPerformance::setParameterValue(Parameter p, uint8_t value){
-  if (!parameterIsLaneable(p)) return;
+  if (!parameterIsLaneable(p) || resetPending(p)) return;
   if (value > 127) value = 127;
+  if(p==PUMP && value && !state_.pumpEnabled){state_.pumpEnabled=true;queue(52,127);}
   if (position(p) == value) return;
   position(p) = value;
   queue(PARAM_CC[p], value);
@@ -114,21 +122,25 @@ void KickPerformance::snapshot(){
   queue(47, COUNT_VALUES[state_.bpfLayerCount]);
   queue(50, state_.selectedCharacterModel ? 127 : 0);
   queue(52, state_.pumpEnabled ? 127 : 0);
+  queue(92,fx_.routes);
+  queueResetMask();
 }
 void KickPerformance::saveTo(ControllerState& out) const { out = state_; }
 void KickPerformance::restoreFrom(const ControllerState& in){
+  resetMask_=0;
   state_ = in;
   // A corrupted or partially written image must not index the canonical rate
   // tables out of bounds, so every restored field is re-bounded here.
   clampRepeat(state_.stutter,STUT_DIVISIONS);
   clampRepeat(state_.looper,LOOP_DIVISIONS);
-  if (state_.selectedFx > REVERB) state_.selectedFx = STUT;
+  if (state_.selectedFx >= FX_PAGES) state_.selectedFx = STUT;
   if (state_.bpfLayerCount > 3) state_.bpfLayerCount = 0;
   if (state_.editedBpfLayer > 2) state_.editedBpfLayer = 0;
   for (uint8_t p = 0; p < PARAM_COUNT; ++p){
     uint8_t& v = position((Parameter)p);
     if (v > 127) v = 0;
   }
+  state_.pumpEnabled=state_.pumpAmount>0;
   // The Daisy keeps no state of its own, so a restore re-sends every CC
   // through the pending array; service() retries whatever the UART refused.
   snapshot();
@@ -150,12 +162,14 @@ void KickPerformance::setActive(bool active){
   // Leaving a mode is not a reset. Cancel unfinished local button gestures.
   for (auto& button : buttons_) button = ButtonState{};
   if (active){
+    lastTouchMs_=now_;
     for (auto& pot : physical_) pot.initialized = false;
     dirty_ = true;
     rendered_ = false;
   }
 }
 void KickPerformance::focusControl(uint8_t knob){
+  lastTouchMs_=now_;
   focus_.knob = knob;
   // A new deliberate action may dismiss an older transient status.
   focus_.resetOverlay = false;
@@ -168,7 +182,32 @@ void KickPerformance::reassign(uint8_t knob){
 }
 void KickPerformance::buttonEdge(uint8_t button, bool pressed, uint32_t now){
   if (!active_ || button >= 6) return;
+  now_=now;
   ButtonState& b = buttons_[button];
+  if(fxMenu_){
+    if(pressed==b.down)return;
+    if(pressed){b.down=true;b.longFired=false;b.pressedMs=now;focusControl(button);}
+    else {
+      if(!b.longFired && uint32_t(now-b.pressedMs)>=1000)requestReset(button);
+      else if(!b.longFired){
+        if(button<2){
+          if(button==0)fx_.repeat=(fx_.repeat+1)%4;else fx_.filter^=1;
+          reassign(button);
+        }else {
+          if(button==3){ // Reverb: EXT -> EXT+INT -> INT -> EXT.
+            if(fx_.routes&16)fx_.routes&=~18u;
+            else if(fx_.routes&2)fx_.routes|=16u;
+            else fx_.routes|=2u;
+          }else fx_.routes^=1u<<(button-2);
+          queue(92,fx_.routes);
+        }
+      }
+      b.down=false;dirty_=true;
+    }
+    flushMidi();return;
+  }
+  if(button==0)return;
+
   if (pressed == b.down) return;
   if (pressed){
     b.down = true; b.longFired = false; b.pressedMs = now;
@@ -182,6 +221,7 @@ void KickPerformance::buttonEdge(uint8_t button, bool pressed, uint32_t now){
         state_.tailDelayEnabled = !state_.tailDelayEnabled;
         queue(43, state_.tailDelayEnabled ? 127 : 0); break;
       case 3: {
+        if(assignment(3)==EROSION_FREQ)break;
         uint8_t previous = state_.editedBpfLayer;
         state_.bpfLayerCount = (state_.bpfLayerCount + 1) % 4;
         state_.editedBpfLayer = state_.bpfLayerCount ? state_.bpfLayerCount - 1 : 0;
@@ -193,19 +233,9 @@ void KickPerformance::buttonEdge(uint8_t button, bool pressed, uint32_t now){
         state_.selectedCharacterModel = !state_.selectedCharacterModel;
         queue(50, state_.selectedCharacterModel ? 127 : 0);
         reassign(4); break;
-      case 5:
-        state_.pumpEnabled = !state_.pumpEnabled;
-        queue(52, state_.pumpEnabled ? 127 : 0); break;
+      case 5: break;
     }
   } else {
-    if (button == 0 && !b.longFired){
-      if ((uint32_t)(now - b.pressedMs) >= 500){
-        b.longFired = true; resetFx(now);
-      } else {
-        state_.selectedFx = (state_.selectedFx + 1) % FX_PAGES;
-        reassign(0);
-      }
-    }
     b.down = false;
   }
   flushMidi();
@@ -222,16 +252,19 @@ void KickPerformance::resetFx(uint32_t now){
   }
   // PUMP sits between LPF and REVERB in page order but keeps its amount/enable.
   queue(PARAM_CC[REVERB], 0);
+  bitcrush_ = 0; queue(PARAM_CC[BITCRUSH], 0);
+  erosion_=0;queue(PARAM_CC[EROSION],0);
   physical_[0] = PhysicalPot{};
   focus_.knob = 0;
   focus_.resetOverlay = true; focus_.resetMs = now;
   dirty_ = true;
 }
 void KickPerformance::service(uint32_t now){
-  if (active_ && buttons_[0].down && !buttons_[0].longFired &&
-      (uint32_t)(now - buttons_[0].pressedMs) >= 500){
-    buttons_[0].longFired = true;
-    resetFx(now);
+  now_=now;
+  if(active_ && fxMenu_)for(uint8_t k=0;k<6;++k){
+    if(buttons_[k].down && !buttons_[k].longFired && uint32_t(now-buttons_[k].pressedMs)>=1000){
+      requestReset(k);buttons_[k].longFired=true;
+    }
   }
   if (focus_.resetOverlay && (uint32_t)(now - focus_.resetMs) >= 700){
     focus_.resetOverlay = false; dirty_ = true;
@@ -240,7 +273,7 @@ void KickPerformance::service(uint32_t now){
 }
 
 void KickPerformance::sampleAngle(uint8_t knob, float angle){
-  if (!active_ || knob >= 6) return;
+  if (!active_ || knob >= 6 || assignment(knob)==PARAM_COUNT) return;
   PhysicalPot& pot = physical_[knob];
   if (!pot.initialized){
     pot.initialized = true;
@@ -255,7 +288,7 @@ void KickPerformance::sampleAngle(uint8_t knob, float angle){
   // Clockwise increases; a full revolution spans 128 value units. Unwrap
   // angle differences so crossing the atan2 seam continues in the same direction.
   float movement = -delta * (128.f / (2.f * PI_F));
-  if (knob == 0 && buttons_[0].down){
+  if (buttons_[knob].down){
     pot.accumulated = 0;
     return;
   }
@@ -276,9 +309,13 @@ void KickPerformance::sampleAngle(uint8_t knob, float angle){
   if (value == 0 || value == 127) pot.accumulated = 0;
 }
 void KickPerformance::adjust(uint8_t knob, int delta){
-  if (!active_ || knob >= 6 || delta == 0) return;
+  if (!active_ || knob >= 6 || delta == 0 || assignment(knob)==PARAM_COUNT) return;
   focusControl(knob);
   Parameter p = assignment(knob);
+  if(resetPending(p)){
+    for(uint8_t i=0;i<FX_PAGES;++i)if(FX_PARAMS[i]==p)resetMask_&=~(1u<<i);
+    queueResetMask();
+  }
   uint8_t current = position(p);
   uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
   if (next == current) return; // No wrap and no repeated MIDI at the limits.
@@ -288,6 +325,7 @@ void KickPerformance::adjust(uint8_t knob, int delta){
   else {
     position(p) = next;
     queue(PARAM_CC[p],next);
+    if(p==PUMP){state_.pumpEnabled=true;queue(52,127);}
   }
   flushMidi();
 }
@@ -359,19 +397,17 @@ float KickPerformance::frequency(Parameter p, uint8_t v){
   if (p == LPF) return 18000.f * powf(120.f/18000.f,x);
   // Must track MACRO_BPF_LOW_HZ / MACRO_BPF_HIGH_HZ in the Daisy firmware,
   // or the displayed frequency is not the one being filtered.
-  return 85.f * powf(3200.f/85.f,x);
+  return kickdaisy::bpfHz(v);
 }
 // The Daisy's MacroDecaySeconds: the body is ~30 dB down at this time.
 float KickPerformance::releaseMs(uint8_t v){ return kickdaisy::decaySeconds(v) * 1000.f; }
-// The Daisy's ShapeSweepTimeMs: SHAPE is the sweep's TIME (and character);
-// its depth is the kick channel's velocity, DEPTH on Menu 1.
-float KickPerformance::shapeSweepSeconds(uint8_t v){ return kickdaisy::shapeSweepMs(v/127.f) / 1000.f; }
 void KickPerformance::frequencyText(char* out, size_t size, float hz, bool compact){
   if (hz < 1000) snprintf(out,size,compact ? "%.0fH" : "%.0f Hz",hz);
   else snprintf(out,size,compact ? "%.1fK" : "%.1f kHz",hz/1000.f);
 }
 void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compact) const {
   uint8_t v = position(p);
+  if(p==PITCH){snprintf(out,size,"%+.1f%s",12.f*(int(v)-64)/(v<64?64.f:63.f),compact?"S":" ST");return;}
   if (p == STUT || p == LOOP){
     const RepeatState& r = p == STUT ? state_.stutter : state_.looper;
     if (!r.on) snprintf(out,size,"OFF");
@@ -384,33 +420,37 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
     else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
   } else if (p == TAIL) snprintf(out,size,compact ? "%.1fS" : "%.2f STEP",2.f*v/127.f);
+  else if(p==EROSION_FREQ) frequencyText(out,size,80.f*powf(150.f,v/127.f),compact);
   else if (p >= BPF1 && p <= BPF3) frequencyText(out,size,frequency(p,v),compact);
-  else if ((p == DELAY || p == REVERB) && v == 0) snprintf(out,size,"OFF");
+  else if ((p == DELAY || p == REVERB || p == BITCRUSH || p == EROSION) && v == 0) snprintf(out,size,"OFF");
   else snprintf(out,size,"%u%%",percent(v));
 }
 
 void KickPerformance::drawOverview(Adafruit_SH1106G& d){
+  if(fxMenu_){drawFxOverview(d);return;}
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
   for (uint8_t k = 0; k < 6; ++k){
     int x = (k % 3) * 43, y = (k / 3) * 32;
     Parameter p = assignment(k);
     char title[12], value[16], secondary[12] = {};
-    if (k == 0) snprintf(title,sizeof(title),"%s",FX_NAMES[state_.selectedFx]);
+    if (k == 0) snprintf(title,sizeof(title),"FX >");
     else if (k == 1){
       snprintf(title,sizeof(title),"DECAY");
       snprintf(secondary,sizeof(secondary),"R %s",state_.reverseEnabled ? "ON" : "OFF");
     } else if (k == 2){
       snprintf(title,sizeof(title),"TAIL");
       snprintf(secondary,sizeof(secondary),"%s",state_.tailDelayEnabled ? "ON" : "OFF");
+    } else if (k == 3 && p==EROSION_FREQ){
+      snprintf(title,sizeof(title),"ERO FREQ");
     } else if (k == 3){
       snprintf(title,sizeof(title),"BPF %u",state_.bpfLayerCount);
       snprintf(secondary,sizeof(secondary),"%sL%u",state_.bpfLayerCount ? "EDIT " : "NXT ",state_.editedBpfLayer+1);
     } else if (k == 4) snprintf(title,sizeof(title),"%s",state_.selectedCharacterModel ? "TUBE" : "MACK");
     else {
       snprintf(title,sizeof(title),"SHAPE");
-      snprintf(secondary,sizeof(secondary),"P %s",state_.pumpEnabled ? "ON" : "OFF");
+      snprintf(secondary,sizeof(secondary),"DEPTH");
     }
-    valueText(p,value,sizeof(value),true);
+    if(p==PARAM_COUNT)snprintf(value,sizeof(value),"MENU3");else valueText(p,value,sizeof(value),true);
     if (focus_.knob == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
     label(d,x+3,y+3,title); label(d,x+3,y+13,value); label(d,x+3,y+23,secondary);
   }
@@ -431,6 +471,12 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
       }
       label(d,tx,ty,text); d.setTextColor(SH110X_WHITE);
     }
+    return;
+  }
+  if(p==EROSION_FREQ){
+    d.drawFastHLine(LEFT,GRAPH_BOTTOM,RIGHT-LEFT+1,SH110X_WHITE);
+    int centre=marker(v);
+    d.drawFastVLine(centre,GRAPH_TOP,GRAPH_BOTTOM-GRAPH_TOP+1,SH110X_WHITE);
     return;
   }
   if (p >= BPF1 && p <= BPF3){
@@ -465,7 +511,7 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
     d.fillTriangle(cutoff-2,GRAPH_TOP,cutoff+2,GRAPH_TOP,cutoff,GRAPH_TOP+3,SH110X_WHITE);
     return;
   }
-  if (p == DELAY || p == REVERB || p == MACKIE || p == TUBE){
+  if (p == DELAY || p == REVERB || p == MACKIE || p == TUBE || p == BITCRUSH || p == EROSION){
     d.drawRect(LEFT,GRAPH_TOP+4,RIGHT-LEFT+1,10,SH110X_WHITE);
     int w = (RIGHT-LEFT-2)*v/127;
     if (w) d.fillRect(LEFT+1,GRAPH_TOP+5,w,8,SH110X_WHITE);
@@ -492,9 +538,8 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
       float start = .08f+.65f*x;
       amplitude = t < .015f ? 1.f : t < start ? 0.f : .8f*expf(-(t-start)*12.f);
     } else if (p == SHAPE){
-      // The sweep's length: short at 0 (a bass tone), long towards a laser.
-      float seconds = shapeSweepSeconds(v);
-      amplitude = .9f*expf(-t/(.004f+seconds*2.f));
+      // Illustrate depth only; actual time is set by Menu 1 SWEEP.
+      amplitude = (log2f(kickdaisy::shapeStartRatio(x))/4.f)*expf(-t*8.f);
     }
     int y = GRAPH_BOTTOM-(int)(amplitude*(GRAPH_BOTTOM-GRAPH_TOP));
     if (px > LEFT) d.drawLine(px-1,previousY,px,y,SH110X_WHITE);
@@ -504,14 +549,19 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
 
 void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
+  if(fxMenu_){drawFxFocus(d,idleOverview(now_));return;}
   if (focus_.resetOverlay){
-    label(d,16,19,"FX RESET",2); label(d,7,45,"STUT..LPF REV OFF");
+    label(d,16,19,"FX RESET",2); label(d,7,45,"FX OFF / PUMP KEPT");
     d.setTextWrap(true); d.display(); return;
   }
   Parameter p = assignment(focus_.knob);
+  if(p==PARAM_COUNT){label(d,10,12,"FX ON MENU 3");label(d,4,36,"SIX EFFECT CONTROLS");d.display();return;}
   uint8_t v = position(p); float x = v/127.f;
   char title[22], value[22], footer[22] = {}, extra[22] = {};
-  if (p <= REVERB) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
+  if(p==EROSION)snprintf(title,sizeof(title),"EROSION");
+  else if(p==EROSION_FREQ)snprintf(title,sizeof(title),"EROSION FREQUENCY");
+  else if (p == BITCRUSH) snprintf(title,sizeof(title),"BITCRUSH");
+  else if (p <= REVERB) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
   else if (p == DECAY) snprintf(title,sizeof(title),"DECAY");
   else if (p == TAIL) snprintf(title,sizeof(title),"TAIL DELAY");
   else if (p <= BPF3) snprintf(title,sizeof(title),"BPF %u EDIT L%u",state_.bpfLayerCount,state_.editedBpfLayer+1);
@@ -535,7 +585,12 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
     unsigned depth = v ? (unsigned)(22.f+74.f*powf(x,.82f)+.5f) : 0;
     snprintf(footer,sizeof(footer),"DEPTH %u%%  %s",depth,state_.pumpEnabled ? "ON" : "OFF");
   } else if (p == REVERB){
-    snprintf(footer,sizeof(footer),"WET %u%%",percent(v));
+    unsigned echo=(unsigned)(100.f*smoothstep(fmaxf(0.f,fminf(1.f,(x-.65f)/.35f)))+.5f);
+    snprintf(footer,sizeof(footer),"REV %u%% ECHO %u%%",percent(v),echo);
+  } else if(p==EROSION){
+    snprintf(footer,sizeof(footer),"NOISE %u%%  %.2fms",percent(v),x*x);
+  } else if (p == BITCRUSH){
+    snprintf(footer,sizeof(footer),"%.1f BIT  WET %u%%",16.f-14.f*x,percent(v));
   } else if (p == DECAY) snprintf(footer,sizeof(footer),"REV %s",state_.reverseEnabled ? "ON" : "OFF");
   else if (p == TAIL){
     unsigned ms = (unsigned)(60000.f/(bpm ? bpm : 120)*.5f*x+.5f);
@@ -546,8 +601,8 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
     snprintf(extra,sizeof(extra),"%s",v == 0 ? "DRY" : pct <= 25 ? "BASE DRIVE" : pct <= 48 ? "MID I" : pct < 73 ? "MID II" : "MID III");
     snprintf(footer,sizeof(footer),"%s %u%%",p == MACKIE ? "TUBE" : "MACKIE",percent(p == MACKIE ? state_.tubeAmount : state_.mackieAmount));
   } else {
-    snprintf(extra,sizeof(extra),"SWEEP %.0f ms",shapeSweepSeconds(v)*1000.f);
-    snprintf(footer,sizeof(footer),"PUMP %s",state_.pumpEnabled ? "ON" : "OFF");
+    snprintf(extra,sizeof(extra),"DEPTH %.1f ST",12.f*log2f(kickdaisy::shapeStartRatio(x)));
+    snprintf(footer,sizeof(footer),"TIME: MENU1 SWEEP");
   }
   label(d,0,0,title);
   label(d,0,11,value,(p >= BPF1 && p <= BPF3) || strlen(value) > 10 ? 1 : 2);
@@ -560,9 +615,137 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
 void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus,
                              uint32_t bpm, uint32_t now){
   if (!active_) return;
+  now_=now;
+  if(fxMenu_ && idleOverview(now))dirty_=true;
   if (focus_.knob == 2 && bpm != renderedBpm_) dirty_ = true;
   if (!dirty_ || (rendered_ && (uint32_t)(now-lastFrameMs_) < 40)) return;
   drawOverview(overview);
   if (focus) drawFocus(*focus,bpm);
   dirty_ = false; rendered_ = true; lastFrameMs_ = now; renderedBpm_ = bpm;
+}
+
+
+KickPerformance::Parameter KickPerformance::fxAssignment(uint8_t knob) const {
+  static constexpr Parameter repeat[]={DELAY,LOOP,STUT,PITCH};
+  static constexpr Parameter fixed[]={PUMP,REVERB,BITCRUSH,EROSION};
+  if(knob==0)return repeat[fx_.repeat];
+  if(knob==1)return fx_.filter?LPF:HPF;
+  return fixed[knob-2];
+}
+void KickPerformance::setFxMenu(bool enabled){
+  if(fxMenu_==enabled)return;
+  fxMenu_=enabled;functionHeld_=false;
+  for(auto& p:physical_)p=PhysicalPot{};
+  for(auto& b:buttons_)b=ButtonState{};
+  lastTouchMs_=now_;dirty_=true;
+}
+void KickPerformance::setFunctionHeld(bool held){
+  if(functionHeld_==held)return;
+  functionHeld_=held;physical_[5]=PhysicalPot{};
+  if(fxMenu_ && held)focusControl(5);
+  dirty_=true;
+}
+void KickPerformance::restoreFx(const FxState& state){
+  fx_=state;if(fx_.repeat>3)fx_.repeat=0;if(fx_.filter>1)fx_.filter=0;fx_.routes&=31;if(fx_.routes&16)fx_.routes|=2;
+  resetMask_=0;queueResetMask();queue(92,fx_.routes);
+  for(auto& p:physical_)p=PhysicalPot{};
+  dirty_=true;flushMidi();
+}
+void KickPerformance::queueResetMask(){queue(90,resetMask_&127);queue(91,(resetMask_>>7)&7);}
+bool KickPerformance::resetPending(Parameter p) const {
+  for(uint8_t i=0;i<FX_PAGES;++i)if(FX_PARAMS[i]==p)return resetMask_&(1u<<i);
+  return false;
+}
+uint32_t KickPerformance::takeResetParameters(){auto result=resetParameters_;resetParameters_=0;return result;}
+void KickPerformance::zeroEffect(Parameter p,bool send){
+  for(uint8_t i=0;i<FX_PAGES;++i)if(FX_PARAMS[i]==p)resetMask_&=~(1u<<i);
+  if(p==STUT)state_.stutter=RepeatState{};
+  else if(p==LOOP)state_.looper=RepeatState{};
+  else position(p)=p==PITCH?64:0;
+  if(send){resetParameters_|=1ul<<p;queueResetMask();queue(PARAM_CC[p],p==PITCH?64:0);}
+  dirty_=true;
+}
+void KickPerformance::requestReset(uint8_t knob){
+  Parameter p=fxAssignment(knob); // FN+EROSION still resets amount, never frequency.
+  resetParameters_|=1ul<<p;
+  for(uint8_t i=0;i<FX_PAGES;++i)if(FX_PARAMS[i]==p)resetMask_|=1u<<i;
+  if(!running_)zeroEffect(p,true);else queueResetMask();
+  lastTouchMs_=now_;dirty_=true;
+}
+void KickPerformance::transport(bool running,uint32_t bar){
+  // Seed commits at 96 clocks. Mirror and resend idempotent zeros as a
+  // backstop if a queued mask missed the edge under UART backpressure.
+  if(resetMask_ && ((!running) || (running && bar!=bar_))){
+    for(uint8_t i=0;i<FX_PAGES;++i)if(resetMask_&(1u<<i))zeroEffect(FX_PARAMS[i],true);
+  }
+  running_=running;bar_=bar;
+}
+void KickPerformance::drawFxOverview(Adafruit_SH1106G& d){
+  d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
+  for(uint8_t k=0;k<6;++k){
+    int x=k%3*43,y=k/3*32;Parameter p=fxAssignment(k);
+    const char* names[]={"DLY","LOOP","STUT","HPF","LPF","PUMP","REV","CRSH","ERO","PIT"};
+    int index=p==DELAY?0:p==LOOP?1:p==STUT?2:p==HPF?3:p==LPF?4:p==PUMP?5:p==REVERB?6:p==BITCRUSH?7:p==PITCH?9:8;
+    char text[8];snprintf(text,sizeof(text),"%u%s",k+1,names[index]);
+    if(k==focus_.knob)d.drawRect(x,y,k==2||k==5?42:43,32,SH110X_WHITE);
+    label(d,x+2,y+3,text);
+    if(p==PITCH)snprintf(text,sizeof(text),"%+d",int(roundf(12.f*(int(pitch_)-64)/(pitch_<64?64.f:63.f))));else snprintf(text,sizeof(text),"%u%%",percent(position(p)));label(d,x+2,y+13,text);
+    label(d,x+29,y+13,k==3 && (fx_.routes&16)?"I":k>=2 && (fx_.routes&(1u<<(k-2)))?"+":"E");
+    d.drawRect(x+3,y+24,34,4,SH110X_WHITE);
+    d.fillRect(x+4,y+25,32*position(p)/127,2,SH110X_WHITE);
+    if(resetPending(p))label(d,x+30,y+3,"*");
+  }
+  d.setTextWrap(true);d.display();
+}
+void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
+  d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
+  if(idle){
+    label(d,0,0,"E:EXT I:INT +:BOTH");
+    // Animated routing overview; heights are control amounts, not audio meters.
+    for(uint8_t k=0;k<6;++k){
+      int x=4+k*21,h=2+position(fxAssignment(k))*28/127;
+      d.drawRect(x,14,16,34,SH110X_WHITE);d.fillRect(x+2,46-h,12,h,SH110X_WHITE);
+      char route=k==3 && (fx_.routes&16)?'I':k>=2 && (fx_.routes&(1u<<(k-2)))?'+':'E';
+      char n[3]={char('1'+k),route,0};label(d,x+2,50,n);
+      if(resetPending(fxAssignment(k)))label(d,x+4,17,"*");
+    }
+    d.drawPixel(2+(now_/70)%124,62,SH110X_WHITE);
+  }else{
+    Parameter p=assignment(focus_.knob);
+    const char* name=p==PITCH?"PITCH":p==EROSION_FREQ?"EROSION FREQ":p==EROSION?"EROSION":p==BITCRUSH?"BITCRUSH":FX_NAMES[p];
+    label(d,0,0,name);
+    label(d,103,0,focus_.knob==3 && (fx_.routes&16)?"INT":focus_.knob>=2&&(fx_.routes&(1u<<(focus_.knob-2)))?"E+I":"EXT");
+    char value[22];valueText(p,value,sizeof(value),false);label(d,2,12,value,2);
+    if(p==EROSION || p==EROSION_FREQ){
+      int centre=marker(erosionFrequency_);
+      for(int px=4;px<=123;++px){
+        float distance=(px-centre)/(6.f+erosion_*.10f);
+        float env=expf(-distance*distance*.5f);
+        int h=int(env*(8.f+erosion_*.07f));
+        d.drawFastVLine(px,49-h,1+h,SH110X_WHITE);
+      }
+      d.drawFastHLine(4,50,120,SH110X_WHITE);
+      d.drawFastVLine(centre,30,22,SH110X_WHITE);
+      label(d,2,56,functionHeld_?"FREQ:80Hz --- 12kHz":"FN + TURN = FREQUENCY");
+    }else{
+      if(p==PITCH){
+        d.drawFastHLine(4,43,120,SH110X_WHITE);
+        d.drawFastVLine(marker(64),36,15,SH110X_WHITE);
+        d.fillTriangle(marker(pitch_)-3,33,marker(pitch_)+3,33,marker(pitch_),39,SH110X_WHITE);
+      }else if(p==DELAY || p==REVERB){
+        for(int px=4;px<124;++px){
+          float t=(px-4)/119.f;
+          float env=p==DELAY?powf(.25f+.65f*position(p)/127.f,int(t*7)):expf(-t/(.08f+.6f*position(p)/127.f));
+          int h=int(18*env);
+          if(p==REVERB || (px-4)%17<2)d.drawFastVLine(px,51-h,h,SH110X_WHITE);
+        }
+      }else if(p==BITCRUSH){
+        float a=position(p)/127.f,levels=1.f+15.f*powf(1.f-a,4.f);int previous=44;
+        for(int px=4;px<124;++px){int y=44-int(roundf(sinf((px-4)*.13f)*levels)/levels*9.f);d.drawLine(px-1,previous,px,y,SH110X_WHITE);previous=y;}
+      }else drawVisualization(d,p);
+      label(d,2,56,resetPending(fxAssignment(focus_.knob))?"ZERO AT BAR END *":focus_.knob<2?"CLICK:NEXT HOLD:ZERO":"CLICK:ROUTE HOLD:ZERO");
+    }
+    if(resetPending(fxAssignment(focus_.knob)))label(d,118,24,"*");
+  }
+  d.setTextWrap(true);d.display();
 }

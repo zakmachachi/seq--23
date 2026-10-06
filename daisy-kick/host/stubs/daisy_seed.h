@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define DMA_BUFFER_MEM_SECTION
+#define DSY_SDRAM_BSS
 #define DTCM_MEM_SECTION
 
 
@@ -13,6 +14,18 @@ namespace daisy
 struct Pin
 {
     int index = 0;
+};
+
+class GPIO
+{
+  public:
+    enum class Mode { INPUT, OUTPUT };
+    enum class Pull { NOPULL, PULLUP, PULLDOWN };
+    void Init(Pin p,Mode m,Pull pu=Pull::NOPULL){pin=p;mode=m;pull=pu;}
+    void Write(bool value){if(value&&!state)++rises;if(!value&&state)++falls;state=value;}
+    bool Read(){return state;}
+    Pin pin{};Mode mode=Mode::INPUT;Pull pull=Pull::NOPULL;
+    bool state=false;uint32_t rises=0,falls=0;
 };
 
 class System
@@ -100,6 +113,7 @@ class DaisySeed
     void Init(bool = false) {}
     void SetAudioBlockSize(size_t n) { block_size = n; }
     void SetLed(bool) {}
+    void StopAudio() {}
     Pin  GetPin(int i) { return Pin{i}; }
 
     void StartAudio(AudioHandle::AudioCallback cb)

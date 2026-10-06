@@ -8,7 +8,7 @@ class KickPerformance {
 public:
   enum Parameter : uint8_t {
     STUT, LOOP, DELAY, HPF, LPF, PUMP, REVERB, DECAY, TAIL,
-    BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, PARAM_COUNT
+    BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, BITCRUSH, EROSION, EROSION_FREQ, PITCH, PARAM_COUNT
   };
   struct RepeatState {
     uint8_t position = 0;
@@ -34,6 +34,16 @@ public:
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
+  struct FxState { uint8_t repeat=0, filter=0, routes=14; }; // DLY, HPF; pump EXT, others E+I. Routes bit4: reverb INT only.
+  void setFxMenu(bool enabled);
+  void setFunctionHeld(bool held);
+  void transport(bool running, uint32_t bar);
+  FxState fxState() const { return fx_; }
+  void restoreFx(const FxState& state);
+  bool resetPending(Parameter p) const;
+  uint32_t takeResetParameters();
+  bool idleOverview(uint32_t now) const { return fxMenu_ && uint32_t(now-lastTouchMs_)>=5000; }
+
   void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
   void buttonEdge(uint8_t button, bool pressed, uint32_t now);
   void service(uint32_t now);
@@ -53,8 +63,8 @@ public:
     return parameter != STUT && parameter != LOOP && parameter < PARAM_COUNT;
   }
   void setParameterValue(Parameter parameter, uint8_t value);
-  // ControllerState is a flat POD, so the patch persists it as-is instead of
-  // reaching into the controller.
+  // Legacy ControllerState stays a flat POD with stable EEPROM offsets.
+  // The appended BITCRUSH value is saved separately through parameterValue().
   void saveTo(ControllerState& out) const;
   void restoreFrom(const ControllerState& in);
 private:
@@ -73,10 +83,23 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[20] = {};
-    uint8_t value[20] = {};
+    bool pending[27] = {};
+    uint8_t value[27] = {};
   };
   ControllerState state_;
+  FxState fx_;
+  bool fxMenu_=false, functionHeld_=false, running_=false;
+  uint16_t resetMask_=0;
+  uint32_t resetParameters_=0, bar_=0, now_=0, lastTouchMs_=0;
+  void queueResetMask();
+  void requestReset(uint8_t knob);
+  void zeroEffect(Parameter p, bool send);
+  Parameter fxAssignment(uint8_t knob) const;
+  void drawFxOverview(Adafruit_SH1106G& display);
+  void drawFxFocus(Adafruit_SH1106G& display, bool idle);
+
+  uint8_t erosion_=0, erosionFrequency_=64, pitch_=64;
+  uint8_t bitcrush_ = 0; // saved separately to preserve legacy EEPROM offsets
   PhysicalPot physical_[6];
   ButtonState buttons_[6];
   FocusState focus_;
@@ -103,7 +126,6 @@ private:
   static float smoothstep(float value);
   static float frequency(Parameter parameter, uint8_t value);
   static float releaseMs(uint8_t value);
-  static float shapeSweepSeconds(uint8_t value);
   static void frequencyText(char* out, size_t size, float hz, bool compact);
   void valueText(Parameter parameter, char* out, size_t size, bool compact) const;
   void drawOverview(Adafruit_SH1106G& display);

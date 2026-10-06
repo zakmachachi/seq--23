@@ -1,3 +1,8 @@
+/* Historical tests for the retired KickHitParams voice API.
+ * Not built by run.sh. Preserved for auditing older firmware revisions;
+ * current complete-firmware voice tests live in
+ * ../daisy_kick_low_end/check.py and use daisy-kick/host/kick_host.cpp.
+ */
 /*
  * Host test for the Daisy kick voice (daisy-kick/midi_oled_monitor.cpp).
  *

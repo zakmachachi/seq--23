@@ -16,3 +16,6 @@ include $(SYSTEM_FILES_DIR)/Makefile
 
 # Always compile the current source before sending firmware to the Seed.
 program-dfu: all
+
+# Own USART3 receiver without changing libDaisy or its other UART handlers.
+LDFLAGS += -Wl,--defsym=USART3_IRQHandler=KickMidiRxIrq -Wl,--undefined=KickMidiRxIrq

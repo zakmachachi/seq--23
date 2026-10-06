@@ -63,8 +63,8 @@ int main(int argc, char** argv){
   cases[4].name = "laser_long";      cases[4].in.shape = 127; cases[4].in.velocity = 127; cases[4].in.sweepTime = 110;
   cases[5].name = "short_supersaw";  cases[5].in.shape = 90; cases[5].in.decay = 30; cases[5].in.wave = 127;
   cases[6].name = "depth_low";       cases[6].in.velocity = 30; cases[6].in.note = 40;
-  cases[7].name = "curve_snap";      cases[7].in.curve = 0;
-  cases[8].name = "curve_laser";     cases[8].in.curve = 127;
+  cases[7].name = "tmod_off";      cases[7].in.tmod = 0;
+  cases[8].name = "tmod_fast";     cases[8].in.tmod = 127;
   cases[9].name = "belly_big_tail";  cases[9].in.belly = 127; cases[9].in.tailOn = true; cases[9].in.tailAmount = 110; cases[9].in.bpm = 90;
   {
     // The WAVE icon across its range, as screen 1 shows it.

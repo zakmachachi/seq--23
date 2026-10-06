@@ -1,3 +1,8 @@
+/* Historical analysis tool for the retired five-saw engine.
+ * Not built by run.sh. Its detune/handoff assumptions are intentionally
+ * preserved for inspecting older firmware revisions; current phase/reset
+ * coverage lives in ../daisy_kick_low_end/check.py.
+ */
 /*
  * Supersaw phasing, measured in the full firmware.
  *
