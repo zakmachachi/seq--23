@@ -25,7 +25,7 @@ static volatile uint32_t audio_max_cycles = 0, audio_overruns = 0;
 // USB serial diagnostics (Seed micro-USB, 1 line per second). Measures what
 // the codec input and output actually carry on hardware, which the desktop
 // harness cannot. Accumulated in the audio callback, printed by main().
-static constexpr bool KICK_USB_DIAGNOSTICS = true;
+static constexpr bool KICK_USB_DIAGNOSTICS = false;
 struct DiagStats
 {
     double sum[2], sum_sq[2];
@@ -1746,6 +1746,14 @@ struct KickSidechainReverb
         {
             send_lp+=(dry-send_lp)*.03851f;
             UpdateDuck(dry);
+            // Keep walking the SDRAM echo line (read, rewrite unchanged).
+            // Measured on hardware: when nothing accesses SDRAM, an audible
+            // whine appears on the codec output (likely its periodic
+            // refresh, no longer broken up by traffic). One access per
+            // sample per tank, as the stopped tank used to do, prevents it.
+            volatile float* line=delay_buffer;
+            line[write]=line[write];
+            if(++write==REVERB_DELAY_SIZE)write=0;
             return dry;
         }
         idle_samples=x==0.f?idle_samples+1:0;
@@ -2143,7 +2151,9 @@ struct AddedPump
 // cache-friendly), keeping internal SRAM free. Cleared by Reset() after
 // hw.Init(); SDRAM is not zeroed at boot.
 static float DSY_SDRAM_BSS clocked_delay_buffer[40800];
-static float DSY_SDRAM_BSS loop_history_buffer[43200];
+// Written on every sample, so it stays in internal SRAM: constant SDRAM
+// traffic is a suspected source of audible noise on the analogue output.
+static float loop_history_buffer[43200];
 
 struct AddedClockedDelay
 {
@@ -7776,9 +7786,10 @@ int main(void)
                 ac[c] = micro(var > 0.0 ? sqrt(var) : 0.0);
             }
             uint32_t budget = SystemCoreClock / 48000u * 8u;
-            hw.PrintLine("diag ada7e2c+ in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
+            hw.PrintLine("diag t=%ds in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
                          " | gate=%d/1000 out_pk=%d | cpu_max=%d/1000 overruns=%d"
                          " uart_err=%d",
+                         int(System::GetNow() / 1000u),
                          dc[0], ac[0], micro(d.peak[0]), dc[1], ac[1], micro(d.peak[1]),
                          int(d.gate_open_samples * 1000ull / (d.samples ? d.samples : 1)),
                          micro(d.out_peak),
