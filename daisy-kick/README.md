@@ -78,8 +78,10 @@ trims only the kick (0..1); fixed kick trim is .06, external trim .62/2, and
 final mix trim .8, followed by a fixed 2x (+6 dB) output makeup after the glue.
 The external input is gated on a 10 ms average level (opens at -36 dBFS,
 closes below -46 dBFS after 250 ms), so an unplugged input adds exact
-silence instead of board noise. Audio blocks are 8 samples, which puts any
-per-block supply ripple at 6 kHz rather than 3 kHz.
+silence instead of board noise. Audio blocks are 2 samples: a hardware
+recording showed the idle whine at exactly 48 kHz / block size (6 kHz with
+8-sample blocks, 3 kHz with 16), i.e. per-block CPU bursts rippling the
+supply. At 2 samples it sits at 24 kHz, above hearing.
 
 See [KICK_MENU2.md](../KICK_MENU2.md), the current
 [analysis and auditions](analysis/reverb/README.md), and
@@ -95,7 +97,7 @@ invalidates partial messages and running status. Pending triggers are consumed
 before parsing another hit, preserving ordering during backlogs.
 
 BPF coefficients update only while controls move, at 1 kHz. FIR history uses
-mirrored rings to avoid per-tap division. Audio blocks are 8 samples (0.17 ms).
+mirrored rings to avoid per-tap division. Audio blocks are 2 samples (42 µs).
 FPU denormals are flushed to zero; full DSP recovery stops audio before clearing
 shared state. Debug symbols `midi_uart_errors`, `midi_rx.overflow`,
 `audio_max_cycles`, and `audio_overruns` distinguish reception errors from

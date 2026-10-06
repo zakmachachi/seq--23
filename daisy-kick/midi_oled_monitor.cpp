@@ -25,7 +25,8 @@ static volatile uint32_t audio_max_cycles = 0, audio_overruns = 0;
 // USB serial diagnostics (Seed micro-USB, 1 line per second). Measures what
 // the codec input and output actually carry on hardware, which the desktop
 // harness cannot. Accumulated in the audio callback, printed by main().
-static constexpr bool KICK_USB_DIAGNOSTICS = false;
+static constexpr bool KICK_USB_DIAGNOSTICS = true;
+static constexpr size_t AUDIO_BLOCK_SIZE = 2; // see SetAudioBlockSize
 struct DiagStats
 {
     double sum[2], sum_sq[2];
@@ -7656,13 +7657,13 @@ int main(void)
 
 
     /*
-     * Per-block CPU bursts repeat at 48 kHz / block size and can couple into
-     * the analogue output as supply ripple. 16-sample blocks put that at
-     * 3 kHz, where hearing is most sensitive; 8 samples moves it to 6 kHz
-     * (the pre-a0ff5e8 setting). Idle FX are bypassed, so the extra
-     * per-block overhead is affordable. 4 samples made overruns audible.
+     * Per-block CPU bursts repeat at 48 kHz / block size and couple into the
+     * analogue output as supply ripple. A hardware recording showed the
+     * whine at exactly 6000 Hz (+25 dB above the noise floor) with 8-sample
+     * blocks, and users heard it at 3 kHz with 16. Two-sample blocks move
+     * the ripple to 24 kHz: above hearing and the codec's passband.
      */
-    hw.SetAudioBlockSize(8); // 0.17 ms
+    hw.SetAudioBlockSize(AUDIO_BLOCK_SIZE);
 #if defined(__arm__)
     // Avoid data-dependent slow paths as IIR tails enter denormal range.
     __set_FPSCR(__get_FPSCR() | (1u << 24));
@@ -7785,8 +7786,8 @@ int main(void)
                 dc[c] = micro(mean);
                 ac[c] = micro(var > 0.0 ? sqrt(var) : 0.0);
             }
-            uint32_t budget = SystemCoreClock / 48000u * 8u;
-            hw.PrintLine("diag t=%ds in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
+            uint32_t budget = SystemCoreClock / 48000u * AUDIO_BLOCK_SIZE;
+            hw.PrintLine("diag t=%ds blk2 in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
                          " | gate=%d/1000 out_pk=%d | cpu_max=%d/1000 overruns=%d"
                          " uart_err=%d",
                          int(System::GetNow() / 1000u),
