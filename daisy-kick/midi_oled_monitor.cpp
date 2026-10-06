@@ -2338,7 +2338,7 @@ struct KickSidechainReverb
 
 
 static KickSidechainReverb kick_reverb;
-static KickSidechainReverb DSY_SDRAM_BSS external_reverb;
+static KickSidechainReverb external_reverb;
 
 
 /* Last-resort DAC ceiling, unity below .93. Normal full-mixer settings
@@ -3059,11 +3059,16 @@ struct AddedPump
    EXTERNAL INPUT ONLY
    ============================================================ */
 
+// The long delay and loop histories live in SDRAM (read sequentially,
+// cache-friendly), keeping internal SRAM free. Cleared by Reset() after
+// hw.Init(); SDRAM is not zeroed at boot.
+static float DSY_SDRAM_BSS clocked_delay_buffer[40800];
+static float DSY_SDRAM_BSS loop_history_buffer[43200];
+
 struct AddedClockedDelay
 {
     static constexpr uint32_t MAX_SAMPLES = 40800;
-
-    float buffer[MAX_SAMPLES];
+    float* buffer = clocked_delay_buffer;
 
     uint32_t write = 0;
     uint32_t valid_written = 0;
@@ -6236,7 +6241,7 @@ struct AddedPerformanceFx
      * needs no capture, so the looper is the only reader.
      */
     static constexpr uint32_t LOOP_HISTORY_SAMPLES = 43200;
-    float loop_history[LOOP_HISTORY_SAMPLES];
+    float* loop_history = loop_history_buffer;
     uint32_t loop_history_write = 0;
 
 
