@@ -7,6 +7,7 @@
 #include "midi_pulse_output.h"
 #include "erosion_fx.h"
 #include "external_pitch_fx.h"
+#include "input_gate.h"
 
 using namespace daisy;
 
@@ -108,7 +109,17 @@ static constexpr float EXTERNAL_RETURN_GAIN = 0.62f;
  * The external HPF stays in its own branch and never filters the generator.
  */
 static constexpr float KICK_OUTPUT_LINEAR_GAIN = 0.06f;
-static constexpr float EXTERNAL_OUTPUT_LINEAR_GAIN = 1.00f;
+
+/* Level restored after the glue, so its threshold and the kick's internal
+ * balance are unchanged. +6 dB: the all-max mixer grid peaks at .72 and a
+ * full-scale input sine plus an all-max kick at .90, both below the .93
+ * ceiling knee. A louder line output lifts the kick above the DAC noise
+ * floor instead of making the amp do it.
+ * The external branch is trimmed by the same factor, so its input-to-output
+ * gain is unchanged.
+ */
+static constexpr float OUTPUT_MAKEUP_GAIN = 2.0f;
+static constexpr float EXTERNAL_OUTPUT_LINEAR_GAIN = 1.0f / OUTPUT_MAKEUP_GAIN;
 
 /* Canonical libDaisy non-interleaved channel indices. */
 static constexpr size_t KICK_OUTPUT_CHANNEL = 0;
@@ -494,6 +505,7 @@ static ExternalPitchFx external_pitch_fx;
 static volatile float external_pitch_ratio=1.f;
 static uint16_t fx_bar_reset_mask=0;
 static ErosionFx erosion_fx, external_erosion_fx;
+static InputGate external_input_gate;
 static float pump_internal_mix=0.f;
 
 static constexpr uint8_t CC_DECAY_ABSOLUTE          = 40;
@@ -8749,6 +8761,9 @@ static void AudioCallback(
             in[EXTERNAL_INPUT_CHANNEL_2][i] *
             EXTERNAL_INPUT_2_GAIN;
 
+        /* An unplugged input is not silent; keep its noise out of the mix. */
+        external_output = external_input_gate.Process(external_output);
+
 
         external_output =
             added_performance_fx.ProcessExternal(
@@ -8781,7 +8796,8 @@ static void AudioCallback(
         external_output=external_bitcrusher.Process(external_output,bitcrush_target);
         float mix=erosion_fx.Process(kick_output,(fx_internal_routes&8)?erosion_amount:0.f,erosion_frequency)
                  +external_erosion_fx.Process(external_output,erosion_amount,erosion_frequency);
-        float mixed_output = OutputCeiling(mix_glue.Process(mix * MIX_OUTPUT_TRIM));
+        float mixed_output = OutputCeiling(
+            mix_glue.Process(mix * MIX_OUTPUT_TRIM) * OUTPUT_MAKEUP_GAIN);
         out[KICK_OUTPUT_CHANNEL][i] = mixed_output;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = mixed_output;
 
@@ -8820,6 +8836,7 @@ static void ResetAudioDspState()
     external_bitcrusher.Reset();
     erosion_fx.Reset();
     external_erosion_fx.Reset();
+    external_input_gate.Reset();
 
     character_highpass.Reset(true);
     clean_lowpass.Reset(false);
@@ -8867,9 +8884,11 @@ int main(void)
 
 
     /*
-     * 8-sample blocks still give sub-millisecond trigger latency while
-     * providing more scheduling margin as FX are added. The previous
+     * 16-sample blocks still give sub-millisecond trigger latency while
+     * providing more scheduling margin as FX are added. The earlier
      * 4-sample block made audio overruns easier to hear as digital ticks.
+     * Per-block CPU bursts repeat at 48 kHz / 16 = 3 kHz; if that rate is
+     * ever audible as supply ripple, 8 samples moves it to 6 kHz.
      */
     hw.SetAudioBlockSize(16); // 0.33 ms; amortizes per-block work
 #if defined(__arm__)

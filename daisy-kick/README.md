@@ -74,8 +74,10 @@ Mixer2 sums the processed external input and kick. Both outputs carry that
 mono mix. The external HPF affects only its input branch. Shared glue is a
 1.25:1 compressor above -12 dBFS with 30 ms detector attack, 150 ms release,
 no makeup gain and at most 2 dB reduction. It does not reset on kicks. LINE
-trims only the kick (0..1); fixed kick trim is .06, external trim .62, and
-final mix trim .8. Output gain can be restored at the downstream mixer.
+trims only the kick (0..1); fixed kick trim is .06, external trim .62/2, and
+final mix trim .8, followed by a fixed 2x (+6 dB) output makeup after the glue.
+The external input is gated (opens at -48 dBFS, closes below -56 dBFS after
+100 ms), so an unplugged input adds exact silence instead of board noise.
 
 See [KICK_MENU2.md](../KICK_MENU2.md), the current
 [analysis and auditions](analysis/reverb/README.md), and
