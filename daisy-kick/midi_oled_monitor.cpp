@@ -22,6 +22,19 @@ static MidiRxQueue midi_rx;
 static volatile uint32_t midi_uart_errors = 0;
 static volatile uint32_t audio_max_cycles = 0, audio_overruns = 0;
 
+// USB serial diagnostics (Seed micro-USB, 1 line per second). Measures what
+// the codec input and output actually carry on hardware, which the desktop
+// harness cannot. Accumulated in the audio callback, printed by main().
+static constexpr bool KICK_USB_DIAGNOSTICS = true;
+struct DiagStats
+{
+    double sum[2], sum_sq[2];
+    float peak[2], out_peak;
+    uint32_t samples, gate_open_samples, max_cycles;
+};
+static DiagStats diag_accum, diag_snapshot;
+static volatile bool diag_snapshot_ready = false;
+
 
 // Eurorack interface logic outputs (3.3 V): D2/header pin 3 and D3/pin 4.
 // Use external protected/level-shifted trigger drivers where 5 V is required.
@@ -7492,6 +7505,18 @@ static void AudioCallback(
             in[EXTERNAL_INPUT_CHANNEL_2][i] *
             EXTERNAL_INPUT_2_GAIN;
 
+#if defined(__arm__)
+        if(KICK_USB_DIAGNOSTICS)
+        {
+            for(int c = 0; c < 2; ++c)
+            {
+                float x = in[c][i];
+                diag_accum.sum[c] += x;
+                diag_accum.sum_sq[c] += double(x) * x;
+                if(fabsf(x) > diag_accum.peak[c]) diag_accum.peak[c] = fabsf(x);
+            }
+        }
+#endif
         /* An unplugged input is not silent; keep its noise out of the mix. */
         external_output = external_input_gate.Process(external_output);
 
@@ -7531,11 +7556,30 @@ static void AudioCallback(
             mix_glue.Process(mix * MIX_OUTPUT_TRIM) * OUTPUT_MAKEUP_GAIN);
         out[KICK_OUTPUT_CHANNEL][i] = mixed_output;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = mixed_output;
+#if defined(__arm__)
+        if(KICK_USB_DIAGNOSTICS)
+        {
+            if(fabsf(mixed_output) > diag_accum.out_peak)
+                diag_accum.out_peak = fabsf(mixed_output);
+            if(external_input_gate.open) ++diag_accum.gate_open_samples;
+        }
+#endif
     }
 #if defined(__arm__)
     uint32_t elapsed=DWT->CYCCNT-cycle_start;
     if(elapsed>audio_max_cycles) audio_max_cycles=elapsed;
     if(elapsed>uint32_t(SystemCoreClock / 48000u * size)) ++audio_overruns;
+    if(KICK_USB_DIAGNOSTICS)
+    {
+        if(elapsed > diag_accum.max_cycles) diag_accum.max_cycles = elapsed;
+        diag_accum.samples += size;
+        if(diag_accum.samples >= 48000u && !diag_snapshot_ready)
+        {
+            diag_snapshot = diag_accum;
+            diag_accum = DiagStats{};
+            diag_snapshot_ready = true;
+        }
+    }
 #endif
 
 }
@@ -7694,6 +7738,10 @@ int main(void)
        AUDIO
        -------------------------------------------------------- */
 
+#if defined(__arm__)
+    if(KICK_USB_DIAGNOSTICS)
+        hw.StartLog(false); // never waits for a host: plays without USB
+#endif
     hw.StartAudio(
         AudioCallback
     );
@@ -7711,6 +7759,33 @@ int main(void)
          * ====================================================
          */
         ServiceMidi();
+#if defined(__arm__)
+        if(KICK_USB_DIAGNOSTICS && diag_snapshot_ready)
+        {
+            DiagStats d = diag_snapshot;
+            diag_snapshot_ready = false;
+            // Integers only: micro-full-scale for levels, permille for CPU.
+            auto micro = [](double v) { return int(v * 1e6); };
+            double n = d.samples ? double(d.samples) : 1.0;
+            int dc[2], ac[2];
+            for(int c = 0; c < 2; ++c)
+            {
+                double mean = d.sum[c] / n;
+                double var = d.sum_sq[c] / n - mean * mean;
+                dc[c] = micro(mean);
+                ac[c] = micro(var > 0.0 ? sqrt(var) : 0.0);
+            }
+            uint32_t budget = SystemCoreClock / 48000u * 8u;
+            hw.PrintLine("diag ada7e2c+ in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
+                         " | gate=%d/1000 out_pk=%d | cpu_max=%d/1000 overruns=%d"
+                         " uart_err=%d",
+                         dc[0], ac[0], micro(d.peak[0]), dc[1], ac[1], micro(d.peak[1]),
+                         int(d.gate_open_samples * 1000ull / (d.samples ? d.samples : 1)),
+                         micro(d.out_peak),
+                         int(d.max_cycles * 1000ull / budget), int(audio_overruns),
+                         int(midi_uart_errors));
+        }
+#endif
 
 
         /*
