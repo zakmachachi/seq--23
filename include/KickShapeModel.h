@@ -100,7 +100,9 @@ struct KickShapeInputs {
     return note == o.note && shape == o.shape && sweepTime == o.sweepTime &&
            velocity == o.velocity && wave == o.wave && decay == o.decay &&
            tailOn == o.tailOn && tailAmount == o.tailAmount && punch == o.punch && sub == o.sub &&
-           tmod == o.tmod && belly == o.belly && bpm == o.bpm;
+           tmod == o.tmod && belly == o.belly &&
+           // Tempo only moves the picture through the tail gate.
+           (bpm == o.bpm || !(tailOn && tailAmount));
   }
 };
 
@@ -129,14 +131,13 @@ struct KickShape {
     morph = shapeMap(s, 0.f, .44f, .88f);
     asym = shapeMap(s, 0.f, .012f, .045f);
     curveG = 1.f;
-    float settleU = depth > .05f ? powf(logf(depth / .05f) / 6.907755f, 1.f / curveG) : 0.f;
+    float settleU = depth > .05f ? logf(depth / .05f) / 6.907755f : 0.f;
     tailStartMs=sweepMs*settleU;
     bodyHoldMs=2000.f/f0;
     tailGlideMs=sweepMs;
     float bellyK = bellyScale(in.belly);
     punchStart = 50.f * bellyK;
     if (punchStart < bodyHoldMs) punchStart = bodyHoldMs;
-    curveG = 1.f;
     lift = in.punch / 127.f;
     holdMs = in.tailOn && in.tailAmount > 0 ? tailDelayMs(in.tailAmount, in.bpm) : 0.f;
     tailActive = holdMs > .05f;
@@ -144,13 +145,15 @@ struct KickShape {
     sub = in.sub / 127.f;
   }
 
-  // Shared amplitude: settle the sweep, hold one sub cycle, then decay.
+  // Shared amplitude: hold two base body cycles, then decay.
   float envelope(float ms) const {
     float age = ms - bodyHoldMs;
     return age <= 0 ? 1.f : expf(-3.453877639f * age / (decayS * 1000.f));
   }
   float level(float ms) const {
-    return envelope(ms) * kickdaisy::raisedCosine(ms / onsetMs);
+    static const float settled = kickdaisy::raisedCosine(1.f);
+    float t = ms / onsetMs;
+    return envelope(ms) * (t >= 1.f ? settled : kickdaisy::raisedCosine(t));
   }
   float gate(float ms) const {
     if (!tailActive || ms <= punchStart) return 1.f;
@@ -240,41 +243,50 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
   cached = true; last = in;
   for (int x = 0; x < 128; x++){ lo[x] = 127; hi[x] = -128; }
   const float sr = 12000.f;
-  float phase = 0, bodyPhase = 0;
+  float phase = 0;
   // Fixed RBJ +15 dB / 120 Hz shelf at the preview sample rate.
-  const float A=powf(10.f,15.f/40.f), w=6.2831853f*120.f/sr;
-  const float c=cosf(w), beta=sqrtf(2.f*A)*sinf(w);
-  const float a0=(A+1.f)+(A-1.f)*c+beta;
-  const float b0=A*((A+1.f)-(A-1.f)*c+beta)/a0;
-  const float b1=2.f*A*((A-1.f)-(A+1.f)*c)/a0;
-  const float b2=A*((A+1.f)-(A-1.f)*c-beta)/a0;
-  const float a1=-2.f*((A-1.f)+(A+1.f)*c)/a0;
-  const float a2=((A+1.f)+(A-1.f)*c-beta)/a0;
+  struct Shelf { float b0, b1, b2, a1, a2; };
+  static const Shelf shelf = []{
+    const float A=powf(10.f,15.f/40.f), w=6.2831853f*120.f/12000.f;
+    const float c=cosf(w), beta=sqrtf(2.f*A)*sinf(w);
+    const float a0=(A+1.f)+(A-1.f)*c+beta;
+    return Shelf{A*((A+1.f)-(A-1.f)*c+beta)/a0, 2.f*A*((A-1.f)-(A+1.f)*c)/a0,
+                 A*((A+1.f)-(A-1.f)*c-beta)/a0, -2.f*((A-1.f)+(A+1.f)*c)/a0,
+                 ((A+1.f)+(A-1.f)*c-beta)/a0};
+  }();
+  const float b0=shelf.b0, b1=shelf.b1, b2=shelf.b2, a1=shelf.a1, a2=shelf.a2;
+  static const float glideEnd = kickdaisy::raisedCosine(1.f);
   float z1=0.f,z2=0.f;
   int prevX = 0, prevY = 0;
   // Past this the sweep is under 1e-5 (the Daisy's curve_end_u).
-  const float uEnd = powf(11.512925f / 6.907755f, 1.f / k.curveG);
+  const float uEnd = 11.512925f / 6.907755f;
   const int n = (int)(viewMs * .001f * sr);
   for (int i = 0; i < n; i++){
     float ms = i * 1000.f / sr;
     float u = ms / k.sweepMs;
-    float pitchEnv = u >= uEnd ? 0.f : expf(-6.907755f * powf(u, k.curveG));
+    float pitchEnv = u >= uEnd ? 0.f : expf(-6.907755f * u);
     float ratioNow = 1.f + k.depth * pitchEnv;
-    float tailAge=fmaxf(0.f,ms-k.tailStartMs);
-    float motion=k.tailRate>0.f ? .5f-.5f*cosf(6.2831853f*k.tailRate*tailAge*.001f)
-                              : kickdaisy::raisedCosine(tailAge/k.tailGlideMs);
-    float f = k.f0 * ratioNow * powf(2.f,k.tailSemitones*motion/12.f);
+    // Before the tail starts the motion is exactly zero; after a one-shot
+    // glide it holds its end value. Neither needs a cosine.
+    float motion = 0.f;
+    if (ms > k.tailStartMs){
+      float tailAge = ms - k.tailStartMs;
+      if (k.tailRate > 0.f) motion = .5f-.5f*cosf(6.2831853f*k.tailRate*tailAge*.001f);
+      else { float t = tailAge/k.tailGlideMs; motion = t >= 1.f ? glideEnd : kickdaisy::raisedCosine(t); }
+    }
+    float exponent = k.tailSemitones*motion/12.f;
+    float f = k.f0 * ratioNow * (exponent == 0.f ? 1.f : powf(2.f,exponent));
 
-    float s1 = sinf(bodyPhase * 6.2831853f);
+    float s1 = sinf(phase * 6.2831853f);
     float a = fabsf(s1);
     float para = (s1 >= 0 ? 1.f : -1.f) * (2.f * a - a * a);
     float body = (s1 + k.morph * (para - s1) + k.asym * (s1 * s1 - .5f)) / (1.f + .151173637f * k.morph);
     if (k.wave > 0){
-      float q = bodyPhase + .5f; q -= floorf(q);
+      float q = phase + .5f; q -= floorf(q);
       float h = kickdaisy::polyBlepSaw(q, f / sr) * 1.57079633f - s1;
       body += h * k.wave;
     }
-    float comp = 1.f / sqrtf(1.f + .18f * (ratioNow - 1.f));
+    float comp = ratioNow <= 1.f ? 1.f : 1.f / sqrtf(1.f + .18f * (ratioNow - 1.f));
     if (comp < .52f) comp = .52f;
     float dry = .9f * body * comp * k.level(ms);
     float bass = b0*dry+z1;
@@ -296,7 +308,6 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
     prevX = x; prevY = yy;
 
     phase += f / sr; phase -= floorf(phase);
-    bodyPhase = phase;
   }
   }
 

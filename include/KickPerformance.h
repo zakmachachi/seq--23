@@ -6,6 +6,7 @@
 // Controller state, physical input, focus and outgoing MIDI have separate owners.
 class KickPerformance {
 public:
+  static constexpr uint8_t CC_SLOTS = 27; // one per entry of CC[] in the .cpp
   enum Parameter : uint8_t {
     STUT, LOOP, DELAY, HPF, LPF, PUMP, REVERB, DECAY, TAIL,
     BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, BITCRUSH, EROSION, EROSION_FREQ, PITCH, PARAM_COUNT
@@ -42,6 +43,10 @@ public:
   void restoreFx(const FxState& state);
   bool resetPending(Parameter p) const;
   uint32_t takeResetParameters();
+  // A Function revert restores values, but a bar-end reset requested before
+  // it must still happen.
+  uint16_t pendingResetMask() const { return resetMask_; }
+  void restorePendingResets(uint16_t mask);
   bool idleOverview(uint32_t now) const { return fxMenu_ && uint32_t(now-lastTouchMs_)>=5000; }
 
   void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
@@ -83,8 +88,8 @@ private:
     SendCC send = nullptr;
     void* context = nullptr;
     bool initialized = false;
-    bool pending[27] = {};
-    uint8_t value[27] = {};
+    bool pending[CC_SLOTS] = {};
+    uint8_t value[CC_SLOTS] = {};
   };
   ControllerState state_;
   FxState fx_;
@@ -105,8 +110,8 @@ private:
   FocusState focus_;
   MidiState midi_;
   uint8_t userEdited_ = PARAM_COUNT;
-  bool active_ = false, dirty_ = true, rendered_ = false;
-  uint32_t lastFrameMs_ = 0, renderedBpm_ = 0;
+  bool active_ = false, dirty_ = true, rendered_ = false, idleShown_ = false;
+  uint32_t lastFrameMs_ = 0, renderedBpm_ = 0, idleDotStep_ = 0;
 
   Parameter assignment(uint8_t knob) const;
   uint8_t& position(Parameter parameter);

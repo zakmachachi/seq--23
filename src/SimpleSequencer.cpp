@@ -1272,7 +1272,10 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
     Serial.println("KICK TMOD=0 (off)");
     return;
   }
-  if (pot == 2 && isFunctionHeld() && activeMenu != 6){
+  // Not on a kick's Menu 1: there pot 3 is SWEEP, and Function + SWEEP
+  // records its motion lane.
+  if (pot == 2 && isFunctionHeld() && activeMenu != 6 &&
+      !(activeMenu == 1 && isKickChannel(selectedChannel))){
     int v = (int)contourBias[selectedChannel] + ticks * 8; // ~8% per detent
     if (v < -100) v = -100;
     if (v > 100)  v = 100;
@@ -2554,7 +2557,7 @@ void SimpleSequencer::onFunctionReleased(){
   if (!snapCommitted){
     // restoreFrom re-sends every CC, so the Daisy follows the revert too.
     if (snapKind == 1) restoreChannel(snapBack);
-    else if (snapKind == 2) { kickPerformance.restoreFrom(snapKickPerf); kickPerformance.setParameterValue(KickPerformance::BITCRUSH,snapKickBitcrush); kickPerformance.setParameterValue(KickPerformance::EROSION,snapKickErosion); kickPerformance.setParameterValue(KickPerformance::EROSION_FREQ,snapKickErosionFreq); kickPerformance.restoreFx(snapKickFx); kickPerformance.setParameterValue(KickPerformance::PITCH,snapKickPitch); }
+    else if (snapKind == 2) { const uint16_t pendingResets = kickPerformance.pendingResetMask(); kickPerformance.restoreFrom(snapKickPerf); kickPerformance.setParameterValue(KickPerformance::BITCRUSH,snapKickBitcrush); kickPerformance.setParameterValue(KickPerformance::EROSION,snapKickErosion); kickPerformance.setParameterValue(KickPerformance::EROSION_FREQ,snapKickErosionFreq); kickPerformance.restoreFx(snapKickFx); kickPerformance.setParameterValue(KickPerformance::PITCH,snapKickPitch); kickPerformance.restorePendingResets(pendingResets); }
     else if (snapKind == 3) kickMixer.restoreFrom(snapKickMix);
     Serial.println("SNAP revert");
   } else {
@@ -3045,11 +3048,13 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   vel = (uint8_t)constrain((int)vel + notesLaneOffset(ch, NL_VELOCITY), 0, 127);
   // Accent-all (Function + Page) forces max velocity on the active channel.
   if (accentAllHold && ch == selectedChannel) vel = 127;
-  // Preserve all 128 tail-pitch positions over CC77. MIDI note-on zero
-  // is still note-off, so only the trigger velocity is clamped to one.
-  if (trigMachine[ch] == TM_KICK){
-    queueFillCC(4, vel);
-    if (vel < 1) vel = 1;
+  // The Daisy reads tail pitch from note-on velocity. Zero would be a
+  // note-off, so only that position travels over CC77, and only if it can
+  // precede this note-on: sent late it would retune the next hit instead.
+  if (trigMachine[ch] == TM_KICK && vel < 1){
+    queueFillCC(4, 0);
+    fillCCPending[4] = false;
+    vel = 1;
   }
   // Slide-all (Function + Fill) forces slide on the active channel.
   bool slideNow = stepSlide[ch][pIdx] || encoderSlideHold ||

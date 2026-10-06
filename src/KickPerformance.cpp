@@ -6,9 +6,9 @@
 
 namespace {
 constexpr uint8_t CC[] = {90,91,92,93,30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,37,38,39};
-constexpr uint8_t CC_SLOTS = sizeof(CC);
 constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51,37,38,39,93};
 static_assert(sizeof(PARAM_CC)==KickPerformance::PARAM_COUNT, "Missing parameter CC");
+static_assert(sizeof(CC)==KickPerformance::CC_SLOTS, "CC table and pending slots differ");
 constexpr uint8_t STUT_VALUES[] = {16,48,80,112};
 constexpr uint8_t LOOP_VALUES[] = {13,38,63,88,114};
 constexpr uint8_t COUNT_VALUES[] = {0,42,85,127};
@@ -325,7 +325,7 @@ void KickPerformance::adjust(uint8_t knob, int delta){
   else {
     position(p) = next;
     queue(PARAM_CC[p],next);
-    if(p==PUMP){state_.pumpEnabled=true;queue(52,127);}
+    if(p==PUMP && !state_.pumpEnabled){state_.pumpEnabled=true;queue(52,127);}
   }
   flushMidi();
 }
@@ -616,12 +616,22 @@ void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus
                              uint32_t bpm, uint32_t now){
   if (!active_) return;
   now_=now;
-  if(fxMenu_ && idleOverview(now))dirty_=true;
-  if (focus_.knob == 2 && bpm != renderedBpm_) dirty_ = true;
-  if (!dirty_ || (rendered_ && (uint32_t)(now-lastFrameMs_) < 40)) return;
-  drawOverview(overview);
-  if (focus) drawFocus(*focus,bpm);
-  dirty_ = false; rendered_ = true; lastFrameMs_ = now; renderedBpm_ = bpm;
+  // The idle routing view animates one pixel on OLED2 only: redraw that
+  // screen when the dot moves, not both screens on every frame.
+  const bool idle = idleOverview(now);
+  const uint32_t dotStep = now/70;
+  if (idle != idleShown_) dirty_ = true;
+  // TAIL shows milliseconds at the current tempo; nothing on the FX page does.
+  if (!fxMenu_ && focus_.knob == 2 && bpm != renderedBpm_) dirty_ = true;
+  if (rendered_ && (uint32_t)(now-lastFrameMs_) < 40) return;
+  if (dirty_) {
+    drawOverview(overview);
+    if (focus) drawFocus(*focus,bpm);
+    dirty_ = false; rendered_ = true; renderedBpm_ = bpm;
+  } else if (idle && focus && dotStep != idleDotStep_) {
+    drawFocus(*focus,bpm);
+  } else return;
+  lastFrameMs_ = now; idleShown_ = idle; idleDotStep_ = dotStep;
 }
 
 
@@ -650,6 +660,10 @@ void KickPerformance::restoreFx(const FxState& state){
   resetMask_=0;queueResetMask();queue(92,fx_.routes);
   for(auto& p:physical_)p=PhysicalPot{};
   dirty_=true;flushMidi();
+}
+void KickPerformance::restorePendingResets(uint16_t mask){
+  if(!mask)return;
+  resetMask_=mask;queueResetMask();dirty_=true;flushMidi();
 }
 void KickPerformance::queueResetMask(){queue(90,resetMask_&127);queue(91,(resetMask_>>7)&7);}
 bool KickPerformance::resetPending(Parameter p) const {
