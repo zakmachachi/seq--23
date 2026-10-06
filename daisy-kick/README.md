@@ -76,8 +76,10 @@ mono mix. The external HPF affects only its input branch. Shared glue is a
 no makeup gain and at most 2 dB reduction. It does not reset on kicks. LINE
 trims only the kick (0..1); fixed kick trim is .06, external trim .62/2, and
 final mix trim .8, followed by a fixed 2x (+6 dB) output makeup after the glue.
-The external input is gated (opens at -48 dBFS, closes below -56 dBFS after
-100 ms), so an unplugged input adds exact silence instead of board noise.
+The external input is gated on a 10 ms average level (opens at -36 dBFS,
+closes below -46 dBFS after 250 ms), so an unplugged input adds exact
+silence instead of board noise. Audio blocks are 8 samples, which puts any
+per-block supply ripple at 6 kHz rather than 3 kHz.
 
 See [KICK_MENU2.md](../KICK_MENU2.md), the current
 [analysis and auditions](analysis/reverb/README.md), and
@@ -93,7 +95,7 @@ invalidates partial messages and running status. Pending triggers are consumed
 before parsing another hit, preserving ordering during backlogs.
 
 BPF coefficients update only while controls move, at 1 kHz. FIR history uses
-mirrored rings to avoid per-tap division. Audio blocks are 16 samples (0.33 ms).
+mirrored rings to avoid per-tap division. Audio blocks are 8 samples (0.17 ms).
 FPU denormals are flushed to zero; full DSP recovery stops audio before clearing
 shared state. Debug symbols `midi_uart_errors`, `midi_rx.overflow`,
 `audio_max_cycles`, and `audio_overruns` distinguish reception errors from

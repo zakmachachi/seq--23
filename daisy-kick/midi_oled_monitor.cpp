@@ -7602,13 +7602,13 @@ int main(void)
 
 
     /*
-     * 16-sample blocks still give sub-millisecond trigger latency while
-     * providing more scheduling margin as FX are added. The earlier
-     * 4-sample block made audio overruns easier to hear as digital ticks.
-     * Per-block CPU bursts repeat at 48 kHz / 16 = 3 kHz; if that rate is
-     * ever audible as supply ripple, 8 samples moves it to 6 kHz.
+     * Per-block CPU bursts repeat at 48 kHz / block size and can couple into
+     * the analogue output as supply ripple. 16-sample blocks put that at
+     * 3 kHz, where hearing is most sensitive; 8 samples moves it to 6 kHz
+     * (the pre-a0ff5e8 setting). Idle FX are bypassed, so the extra
+     * per-block overhead is affordable. 4 samples made overruns audible.
      */
-    hw.SetAudioBlockSize(16); // 0.33 ms; amortizes per-block work
+    hw.SetAudioBlockSize(8); // 0.17 ms
 #if defined(__arm__)
     // Avoid data-dependent slow paths as IIR tails enter denormal range.
     __set_FPSCR(__get_FPSCR() | (1u << 24));

@@ -2,24 +2,27 @@
 #include <cmath>
 #include <cstdint>
 // Gate for the external input before it reaches the shared mono mix. An
-// unplugged codec input still carries board noise and digital crosstalk;
-// with the gate closed the input contributes exact silence. Line-level
-// material opens it within 1 ms and passes at unity.
+// unplugged codec input still picks up board noise and digital crosstalk.
+// A peak gate opening at -48 dBFS chattered on it, turning a constant whine
+// into faint periodic beeps, so that pickup reaches roughly that level and
+// is bursty. The detector averages the rectified input
+// over ~10 ms so short bursts cannot open it, and the thresholds sit well
+// above that pickup: a playing line-level source opens it within ~1 ms of
+// reaching -36 dBFS average and passes at unity.
 // Zero defaults: starts closed, and costs no flash for initial values.
 struct InputGate {
-    float envelope=0, gain=0;
+    float level=0, gain=0;
     uint32_t hold=0;
     bool open=false;
     void Reset(){*this=InputGate();}
     float Process(float input){
-        constexpr float kOpen=.0039810717f;   // -48 dBFS
-        constexpr float kClose=.0015848932f;  // -56 dBFS
-        constexpr uint32_t kHoldSamples=4800; // 100 ms
-        float level=std::fabs(input);
-        envelope=level>envelope?level:envelope*.99979169f; // 100 ms release
-        if(envelope>kOpen)open=true;
+        constexpr float kOpen=.015848932f;    // -36 dBFS average rectified
+        constexpr float kClose=.0050118723f;  // -46 dBFS
+        constexpr uint32_t kHoldSamples=12000; // 250 ms
+        level+=(std::fabs(input)-level)*.0020811719f; // 10 ms
+        if(level>kOpen)open=true;
         if(open){
-            if(envelope>kClose)hold=kHoldSamples;
+            if(level>kClose)hold=kHoldSamples;
             else if(hold)--hold;
             else open=false;
         }
