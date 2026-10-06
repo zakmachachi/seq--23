@@ -25,7 +25,7 @@ static volatile uint32_t audio_max_cycles = 0, audio_overruns = 0;
 // USB serial diagnostics (Seed micro-USB, 1 line per second). Measures what
 // the codec input and output actually carry on hardware, which the desktop
 // harness cannot. Accumulated in the audio callback, printed by main().
-static constexpr bool KICK_USB_DIAGNOSTICS = true;
+static constexpr bool KICK_USB_DIAGNOSTICS = false;
 static constexpr size_t AUDIO_BLOCK_SIZE = 2; // see SetAudioBlockSize
 struct DiagStats
 {
