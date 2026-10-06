@@ -11,6 +11,56 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## What's new in v1.4.0
+
+**The kick has its own FX menu.** On a KICK channel, **MENU3** (the Euclid button) now opens six effect slots. Other machines keep Euclid there.
+
+| Knob | Effect | Click |
+|---|---|---|
+| 1 | DELAY → LOOP → STUT → PITCH | Cycles between them |
+| 2 | HPF ↔ LPF | Switches between them |
+| 3 | PUMP | Digitakt only, or Digitakt + kick |
+| 4 | REVERB | Digitakt only, Digitakt + kick, or kick only |
+| 5 | BITCRUSH | Digitakt only, or Digitakt + kick |
+| 6 | EROSION (**FUNCTION + turn** sets its frequency, 80 Hz–12 kHz) | Digitakt only, or Digitakt + kick |
+
+- **Hold any knob for a second** to send that effect back to zero at the end of the bar. A `*` marks a queued reset, and turning the knob again cancels it
+- **Three new effects:** BITCRUSH, EROSION (a short delay wobbled by a sine and filtered noise, after Ableton's Erosion) and PITCH (±12 semitones, on the Digitakt input)
+- **Reverb** now keeps its tail between hits, ducks under the kick, and adds clocked eighth-note repeats above 65 %
+- After five seconds untouched, screen 2 shows an overview of all six slots
+- The full reference is in [KICK_MENU2.md](KICK_MENU2.md)
+
+**The kick voice was rebuilt.** On Menu 1 a KICK channel now has:
+- **WAVE** (pot 2): from sine towards saw harmonics, without changing the bass
+- **SWEEP** (pot 3): how long the pitch sweep lasts, 4–240 ms. Record it under FUNCTION and it changes per step
+- **TMOD** (pot 5): 0 is a single glide; above that, a 0.125–16 Hz pitch wobble on the tail
+- **TUNE** (pot 6): where the tail's pitch moves to, ±12 semitones
+
+Elsewhere on the kick:
+- **SUB** is now a clean +15 dB bass shelf rather than a second oscillator
+- **Mackie** runs four times oversampled, through up to three mid-boost stages (the BPF layers)
+- **TAIL DELAY** cuts a gap between the punch and the bass, and **BELLY** sets where that gap starts
+
+**Both Daisy outputs now carry the kick and the Digitakt input as one mono mix.** An unplugged input stays silent instead of adding noise.
+
+**Eurorack outputs:** the Daisy's D2 sends a 5 ms trigger on every kick, and D3 sends MIDI clock at 24 PPQN. Both are 3.3 V logic, so use a buffer for 5 V gear. Wiring is in [daisy-kick/EURORACK_OUTPUTS.md](daisy-kick/EURORACK_OUTPUTS.md).
+
+**Fixed**
+- A constant high whine from the Daisy, through any headphones or speaker. Every block of audio is processed in a short burst of CPU work, and those bursts were rippling the power supply into the output, at 3 kHz and later 6 kHz. Blocks are now two samples, which moves the ripple to 24 kHz, above hearing
+- FUNCTION + pot 3 on a kick's Menu 1 records the SWEEP lane again; it was being taken over by melody contour
+- TUNE could reach the Daisy one hit late and retune the next kick instead
+- Releasing FUNCTION on the kick page no longer cancels an FX reset queued for the end of the bar
+- The idle FX overview no longer redraws both screens 25 times a second, which slowed knob and button handling
+
+**Under the hood**
+- The Daisy skips Mackie, reverb, erosion and pitch entirely while they are off, and works out filter and effect settings only when a knob moves. In desktop tests the default patch runs about 3.5 times faster
+- The long delay buffer moved to the Daisy's external memory, freeing internal RAM (90 % → 64 % used)
+- About 1,300 lines of code that could never run are gone
+
+Saved patches from v1.3.0 load as before; the new effects start switched off.
+
+---
+
 ## What's new in v1.3.0
 
 **The kick has been rebuilt from scratch.** It is one oscillator that starts the same way on every hit. Three things set its shape, the way they do on a dedicated drum machine: the **note** is the pitch the kick settles on, **DEPTH** is how far above that note the punch's pitch sweep starts, and **SHAPE** is how long the sweep lasts and how hard the front of the kick is.
@@ -112,6 +162,14 @@ platformio run --target upload
 ```
 
 Connect MIDI OUT (Teensy pin 20 / Serial5 TX) through a standard MIDI driver circuit to your target's MIDI IN. Open the PlatformIO serial monitor at 115200 baud to see firmware logs.
+
+The kick runs on a separate board, a Daisy Seed. To flash it, connect the Seed's USB, hold BOOT, tap RESET, release BOOT, then run:
+
+```bash
+make -C daisy-kick program-dfu
+```
+
+An `Error 74` after `File downloaded successfully` is normal. See [daisy-kick/README.md](daisy-kick/README.md) for the toolchain.
 
 Pin mappings live in [include/SeqConfig.h](include/SeqConfig.h).
 
@@ -254,6 +312,8 @@ Per-channel generative note engine. The six pots are laid out in two rows of thr
 Analog CV outputs via the MAX11300 (PIXI) over SPI. `NUM_CV_OUTS` assignable ports (default 4 → PIXI ports 0–3) are configured as 0–10V DACs. First version is a manual control surface — pots 1..N set each output's voltage (0–10V), which also serves as a no-serial bring-up test. **Screen 2** shows level bars per output. Assignment modes (follow channel pitch / gate / velocity / etc.) are TBD. Pins: MOSI 11 / MISO 12 / SCK 13 / CS 37 / CNVTB 32 / INTB 28. Serial `v` runs a voltage self-test. (The old Step Visualizer view still exists in firmware but is no longer bound to a menu button.)
 
 ### Menu 3 — Euclid
+On a KICK channel, MENU3 opens the kick FX menu instead (see [What's new in v1.4.0](#whats-new-in-v140) and [KICK_MENU2.md](KICK_MENU2.md)).
+
 Euclidean rhythm generator, laid out like the Notes page (pattern grid + ON/OFF header over a pot-aligned 2×3 grid):
 
 | Pot | Rotate | Button |
