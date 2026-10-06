@@ -452,19 +452,6 @@ static volatile float external_pitch_ratio=1.f;
 static uint16_t fx_bar_reset_mask=0;
 static ErosionFx erosion_fx, external_erosion_fx;
 static InputGate external_input_gate;
-
-// The codec mutes itself on exact digital silence; anything above zero wakes
-// it, and with it a faint board whine. Measured on hardware: a kick tail
-// left ringing at a few LSBs kept that whine audible for ~7 s after Stop.
-// MIDI Stop now fades the kick bus to exact zero over 100 ms (until the next
-// kick), and the summed output squelches to zero once it has stayed below
-// -100 dBFS (under 16-bit resolution) for 100 ms.
-static volatile bool kick_stop_fade_pending = false;
-static float kick_stop_gain = 1.0f;
-static bool kick_stop_fading = false;
-static uint32_t output_quiet_samples = 0;
-static constexpr float OUTPUT_SQUELCH_LEVEL = 1.0e-5f; // -100 dBFS
-static constexpr uint32_t OUTPUT_SQUELCH_SAMPLES = 4800;
 static float pump_internal_mix=0.f;
 
 static constexpr uint8_t CC_DECAY_ABSOLUTE          = 40;
@@ -6853,7 +6840,6 @@ static void ProcessMidiByte(uint8_t byte)
     if(byte == 0xFC)
     {
         midi_running = false;
-        kick_stop_fade_pending = true;
 
         /*
          * There may be no next kick on which to consume a normal
@@ -7225,8 +7211,6 @@ static void AudioCallback(
         // All generator/character/filter history resets. Continuity belongs
         // to a single finite bridge after the final filter, not bass layers.
         kick_output_bridge.Trigger();
-        kick_stop_gain = 1.0f;
-        kick_stop_fading = false;
         final_infrasonic_hpf.Reset();
         character_highpass.ClearState();
         clean_lowpass.ClearState();
@@ -7576,27 +7560,10 @@ static void AudioCallback(
         external_output=external_pitch_fx.Process(external_output,external_pitch_ratio);
         external_output=external_reverb.Process(external_output,(fx_internal_routes&16)?0.f:param_reverb_amount);
         external_output=external_bitcrusher.Process(external_output,bitcrush_target);
-        if(kick_stop_fade_pending)
-        {
-            kick_stop_fade_pending = false;
-            kick_stop_fading = true;
-        }
-        if(kick_stop_fading && kick_stop_gain > 0.0f)
-        {
-            kick_stop_gain -= 1.0f / 4800.0f; // 100 ms
-            if(kick_stop_gain <= 0.0f) kick_stop_gain = 0.0f;
-        }
-        kick_output *= kick_stop_gain;
         float mix=erosion_fx.Process(kick_output,(fx_internal_routes&8)?erosion_amount:0.f,erosion_frequency)
                  +external_erosion_fx.Process(external_output,erosion_amount,erosion_frequency);
         float mixed_output = OutputCeiling(
             mix_glue.Process(mix * MIX_OUTPUT_TRIM) * OUTPUT_MAKEUP_GAIN);
-        if(fabsf(mixed_output) >= OUTPUT_SQUELCH_LEVEL)
-            output_quiet_samples = 0;
-        else if(output_quiet_samples < OUTPUT_SQUELCH_SAMPLES)
-            ++output_quiet_samples;
-        else
-            mixed_output = 0.0f;
         out[KICK_OUTPUT_CHANNEL][i] = mixed_output;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = mixed_output;
 #if defined(__arm__)
@@ -7650,10 +7617,6 @@ static void ResetAudioDspState()
     erosion_fx.Reset();
     external_erosion_fx.Reset();
     external_input_gate.Reset();
-    kick_stop_fade_pending = false;
-    kick_stop_gain = 1.0f;
-    kick_stop_fading = false;
-    output_quiet_samples = 0;
 
     character_highpass.Reset(true);
     clean_lowpass.Reset(false);
