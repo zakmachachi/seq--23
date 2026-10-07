@@ -19,13 +19,13 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 |---|---|---|
 | 1 | DELAY → LOOP → STUT → PITCH | Cycles between them |
 | 2 | HPF ↔ LPF | Switches between them |
-| 3 | PUMP | Digitakt only, or Digitakt + kick |
-| 4 | REVERB | Digitakt only, Digitakt + kick, or kick only |
-| 5 | BITCRUSH | Digitakt only, or Digitakt + kick |
-| 6 | EROSION (**FUNCTION + turn** sets its frequency, 80 Hz–12 kHz) | Digitakt only, or Digitakt + kick |
+| 3 | PUMP | EXT IN only, or EXT IN + kick |
+| 4 | REVERB | EXT IN only, EXT IN + kick, or kick only |
+| 5 | BITCRUSH | EXT IN only, or EXT IN + kick |
+| 6 | EROSION (**FUNCTION + turn** sets its frequency, 80 Hz–12 kHz) | EXT IN only, or EXT IN + kick |
 
 - **Hold any knob for a second** to send that effect back to zero at the end of the bar. A `*` marks a queued reset, and turning the knob again cancels it
-- **Three new effects:** BITCRUSH, EROSION (a short delay wobbled by a sine and filtered noise, after Ableton's Erosion) and PITCH (±12 semitones, on the Digitakt input)
+- **Three new effects:** BITCRUSH, EROSION (a short delay wobbled by a sine and filtered noise, after Ableton's Erosion) and PITCH (±12 semitones, on EXT IN)
 - **Reverb** now keeps its tail between hits, ducks under the kick, and adds clocked eighth-note repeats above 65 %
 - After five seconds untouched, screen 2 shows an overview of all six slots
 - The full reference is in [KICK_MENU2.md](KICK_MENU2.md)
@@ -41,7 +41,7 @@ Elsewhere on the kick:
 - **Mackie** runs four times oversampled, through up to three mid-boost stages (the BPF layers)
 - **TAIL DELAY** cuts a gap between the punch and the bass, and **BELLY** sets where that gap starts
 
-**Both Daisy outputs now carry the kick and the Digitakt input as one mono mix.** An unplugged input stays silent instead of adding noise.
+**Both Daisy outputs now carry the kick and EXT IN as one mono mix.** An unplugged input stays silent instead of adding noise.
 
 **Eurorack outputs:** the Daisy's D2 sends a 5 ms trigger on every kick, and D3 sends MIDI clock at 24 PPQN. Both are 3.3 V logic, so use a buffer for 5 V gear. Wiring is in [daisy-kick/EURORACK_OUTPUTS.md](daisy-kick/EURORACK_OUTPUTS.md).
 
@@ -83,13 +83,13 @@ Saved patches from v1.3.0 load as before; the new effects start switched off.
 
 **The kick**
 - Mackie sounds the way it did before the rebuild, and turning it up no longer eats the low end
-- The DJ **LPF** now works on the kick too; it only ever reached the Digitakt return before
+- The DJ **LPF** now works on the kick too; it only ever reached EXT IN before
 - Turning any mixer level (LINE, MACKIE, TUBE, BPF, SUB, PUNCH) no longer ticks
 - **PUNCH** on the mix page lifts the front of the kick, through the sweep, by up to 6 dB: 0 % is a flat kick. **SUB** is the level of the whole kick
 - **BELLY** on the mix page (pot 3) sets how long the punch carries the body before tail delay ducks it, from a tight 0.35x to a fat 2x: a short tock or a punch with a big belly. It also sets how far PUNCH's lift reaches
 - Reverse kicks (Menu 2, pot 2's click) no longer click: they start straight from the reversed kick and stay silent after it, instead of letting a sliver of the forward kick through at either end
 - The Daisy's unused on-board screen code is gone, along with its per-note redraws
-- The Digitakt return gets a 25 Hz high-pass at its input. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
+- EXT IN gets a 25 Hz high-pass. The kick does not: after the Mackie it turned the distortion's flat tops back into spikes and clipped hard at high LINE, and before it the Mackie's punch lost bite, while saving no headroom
 
 **Fixed**
 - A loud click whenever the kick's HPF was engaged: at the start of every hit it switched back to the unfiltered kick in a single sample
@@ -112,7 +112,7 @@ It works on the kick page for every performance parameter except the two repeats
 - The filter bank reaches down to **85 Hz**, and tightens as it descends, so a low layer picks out a pitch rather than adding weight under the sub
 - Stacking filter layers no longer dims the distortion character — only the bank is compensated for its own added energy, not the whole bus
 - Fixed a click on every hit with sub and punch down, worse the longer the decay: a gate was cutting the previous tail off in a single sample
-- **LOOP** now works on the Digitakt return rather than the kick, where it belongs; **STUT** covers both, and no longer needs a kick playing to engage
+- **LOOP** now works on EXT IN rather than the kick, where it belongs; **STUT** covers both, and no longer needs a kick playing to engage
 - Tail delay and the FX reset land on the beat instead of wherever the button was pressed
 - **STUT** spans `1/4 · 1/4T · 1/8 · 1/8T`, always opening at 1/4 and sweeping up, so a knob position always gives the same rate
 
