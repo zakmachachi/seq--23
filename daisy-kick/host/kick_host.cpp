@@ -55,6 +55,7 @@ static std::vector<float> g_external_bus;
 static double             g_external_hz = 60.0;
 static double             g_external_level = 0.0;
 static uint64_t           g_samples_rendered = 0;
+static uint8_t            g_held_fx = 0;
 
 
 /* Render n samples through the firmware's audio callback. */
@@ -77,6 +78,9 @@ static void Render(size_t samples)
         memset(out_l, 0, sizeof(out_l));
         memset(out_r, 0, sizeof(out_r));
 
+        if(g_held_fx && g_samples_rendered%9600==0){
+            ProcessMidiByte(0xBE);ProcessMidiByte(heldfx::KEEPALIVE);ProcessMidiByte(127);
+        }
         hw.callback(in, out, kBlock);
 
         for(int i = 0; i < kBlock; i++)
@@ -191,6 +195,8 @@ int main(int argc, char** argv)
             SendCC(MIDI_CHANNEL_KICK, cc, cc7(v));
     };
 
+    g_held_fx=static_cast<uint8_t>(ArgOr(argc,argv,"heldfx",0));
+    if(g_held_fx)SendCC(MIDI_CHANNEL_KICK,heldfx::SELECT,g_held_fx);
     maybe("line",    CC_MIX_LINE_GAIN);
     maybe("mackie",  CC_MIX_MACKIE_GAIN);
     maybe("tube",    CC_MIX_TUBE_GAIN);

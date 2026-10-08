@@ -714,16 +714,12 @@ void KickPerformance::drawFxOverview(Adafruit_SH1106G& d){
 void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
   d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
   if(idle){
-    label(d,0,0,"E:EXT I:INT +:BOTH");
-    // Animated routing overview; heights are control amounts, not audio meters.
-    for(uint8_t k=0;k<6;++k){
-      int x=4+k*21,h=2+position(fxAssignment(k))*28/127;
-      d.drawRect(x,14,16,34,SH110X_WHITE);d.fillRect(x+2,46-h,12,h,SH110X_WHITE);
-      char route=k==3 && (fx_.routes&16)?'I':k>=2 && (fx_.routes&(1u<<(k-2)))?'+':'E';
-      char n[3]={char('1'+k),route,0};label(d,x+2,50,n);
-      if(resetPending(fxAssignment(k)))label(d,x+4,17,"*");
+    label(d,0,0,"PADS: 1/9 KICK");
+    for(uint8_t i=0;i<8;++i){
+      char text[12];snprintf(text,sizeof(text),"%u/%u %.4s",i+1,i+9,heldfx::Name(i));
+      label(d,(i%2)*64,12+(i/2)*10,text);
     }
-    d.drawPixel(2+(now_/70)%124,62,SH110X_WHITE);
+    label(d,0,56,"1-8:BAR  9-16:BEAT");
   }else{
     Parameter p=assignment(focus_.knob);
     const char* name=p==PITCH?"PITCH":p==EROSION_FREQ?"EROSION FREQ":p==EROSION?"EROSION":p==BITCRUSH?"BITCRUSH":FX_NAMES[p];
@@ -761,5 +757,27 @@ void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
     }
     if(resetPending(fxAssignment(focus_.knob)))label(d,118,24,"*");
   }
+  d.setTextWrap(true);d.display();
+}
+
+void KickPerformance::setHeldFx(uint8_t selection,uint16_t held,uint32_t now){
+  if(selection!=heldFx_){heldFx_=selection;heldFxStart_=now;heldFxFrame_=now-40;dirty_=true;}
+  heldFxMask_=held;
+}
+void KickPerformance::renderHeldFx(Adafruit_SH1106G& d,uint32_t bpm,uint32_t now){
+  if(!heldFx_ || uint32_t(now-heldFxFrame_)<40)return;
+  heldFxFrame_=now;
+  unsigned mode=(heldFx_-1)%8;bool fast=heldFx_>8;
+  d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
+  char title[22];snprintf(title,sizeof(title),"HOLD %u / %s",heldFx_,mode==heldfx::HPF_REPEAT?"KICK ONLY":"EXT ONLY");label(d,0,0,title);
+  label(d,0,12,heldfx::Name(mode),2);
+  float beats=float(uint32_t(now-heldFxStart_))*(bpm?bpm:120)/60000.f;
+  float macro=heldfx::Gesture(beats,fast);
+  d.drawRect(3,34,122,9,SH110X_WHITE);d.fillRect(4,35,int(120*macro),7,SH110X_WHITE);
+  for(unsigned i=0;i<16;++i){
+    int x=2+int(i)*8;d.drawRect(x,47,5,4,SH110X_WHITE);
+    if(heldFxMask_&(1u<<i))d.fillRect(x,47,5,4,SH110X_WHITE);
+  }
+  label(d,0,56,mode==heldfx::HPF_REPEAT?(fast?"RANDOM EACH KICK":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
   d.setTextWrap(true);d.display();
 }

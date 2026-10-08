@@ -1,0 +1,396 @@
+{
+  "recommendation_reason": "Smallest sweep materially improves valley and smoothed 10Hz slope while preserving 30-40Hz within0.5dB. NONE satisfies raw10Hz drop<12dB; fixed body peak still has a steep skirt.", 
+  "recommended_tradeoff": {
+    "time_to_pitch_error_minus60db_ms": 138.15510557964274, 
+    "first_nominal_sub_cycle_rms_change_db": 0.8663743080267062, 
+    "name": "ratio1.3_tau20ms", 
+    "tau_ms": 20.0, 
+    "energy_change_vs_fixed_db": {
+      "30_90": 0.18332006699286418, 
+      "30_40": -0.4761309025897615, 
+      "40_90": 0.6971738086658628
+    }, 
+    "sixth_octave": {
+      "fall40to50": 10.571295382957862, 
+      "valley_hz": 57.49482041298144, 
+      "valley_db": -17.683584400595002, 
+      "max_10hz_fall_db": 10.996573165042635, 
+      "max_10hz_start_hz": 75.81
+    }, 
+    "raw": {
+      "fall40to50": 10.102611539580444, 
+      "valley_hz": 58.04443359375, 
+      "valley_db": -17.895817593525617, 
+      "max_10hz_fall_db": 14.015804429058507, 
+      "max_10hz_start_hz": 73.61
+    }, 
+    "mackie_peak_change_db": 0.6453021615194918, 
+    "mackie_peak": 0.6943042278289795, 
+    "clean_peak": 0.20176900923252106, 
+    "initial_hz": 47.720530000000004, 
+    "initial_ratio": 1.3
+  }, 
+  "results": [
+    {
+      "time_to_pitch_error_minus60db_ms": 138.15510557964274, 
+      "first_nominal_sub_cycle_rms_change_db": 0.0, 
+      "name": "ratio1.0_tau20ms", 
+      "tau_ms": 20.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.0, 
+        "30_40": 0.0, 
+        "40_90": 0.0
+      }, 
+      "sixth_octave": {
+        "fall40to50": 14.578556472797388, 
+        "valley_hz": 54.33265565671015, 
+        "valley_db": -22.83797780154338, 
+        "max_10hz_fall_db": 14.578556472797388, 
+        "max_10hz_start_hz": 40.0
+      }, 
+      "raw": {
+        "fall40to50": 13.701062627670366, 
+        "valley_hz": 54.931640625, 
+        "valley_db": -23.209755391402656, 
+        "max_10hz_fall_db": 13.940145153062485, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": 0.0, 
+      "mackie_peak": 0.6445916891098022, 
+      "clean_peak": 0.20984700322151184, 
+      "initial_hz": 36.7081, 
+      "initial_ratio": 1.0
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 138.15510557964274, 
+      "first_nominal_sub_cycle_rms_change_db": 0.8663743080267062, 
+      "name": "ratio1.3_tau20ms", 
+      "tau_ms": 20.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.18332006699286418, 
+        "30_40": -0.4761309025897615, 
+        "40_90": 0.6971738086658628
+      }, 
+      "sixth_octave": {
+        "fall40to50": 10.571295382957862, 
+        "valley_hz": 57.49482041298144, 
+        "valley_db": -17.683584400595002, 
+        "max_10hz_fall_db": 10.996573165042635, 
+        "max_10hz_start_hz": 75.81
+      }, 
+      "raw": {
+        "fall40to50": 10.102611539580444, 
+        "valley_hz": 58.04443359375, 
+        "valley_db": -17.895817593525617, 
+        "max_10hz_fall_db": 14.015804429058507, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": 0.6453021615194918, 
+      "mackie_peak": 0.6943042278289795, 
+      "clean_peak": 0.20176900923252106, 
+      "initial_hz": 47.720530000000004, 
+      "initial_ratio": 1.3
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 276.3102111592855, 
+      "first_nominal_sub_cycle_rms_change_db": 1.1345681411713306, 
+      "name": "ratio1.3_tau40ms", 
+      "tau_ms": 40.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.22293083181293585, 
+        "30_40": -1.674430540288444, 
+        "40_90": 1.4140914315422914
+      }, 
+      "sixth_octave": {
+        "fall40to50": 9.744154876415285, 
+        "valley_hz": 58.58925621895719, 
+        "valley_db": -16.005529997140368, 
+        "max_10hz_fall_db": 11.041349378006727, 
+        "max_10hz_start_hz": 75.81
+      }, 
+      "raw": {
+        "fall40to50": 9.862907268641942, 
+        "valley_hz": 58.77685546875, 
+        "valley_db": -16.256678763827185, 
+        "max_10hz_fall_db": 14.068190428496601, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": 0.6195534550137243, 
+      "mackie_peak": 0.692249059677124, 
+      "clean_peak": 0.19743530452251434, 
+      "initial_hz": 47.720530000000004, 
+      "initial_ratio": 1.3
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 483.5428695287496, 
+      "first_nominal_sub_cycle_rms_change_db": 1.240646713620329, 
+      "name": "ratio1.3_tau70ms", 
+      "tau_ms": 70.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.2462241912215421, 
+        "30_40": -3.908208260140217, 
+        "40_90": 2.146830946529574
+      }, 
+      "sixth_octave": {
+        "fall40to50": 8.464756165654647, 
+        "valley_hz": 59.33042965453784, 
+        "valley_db": -15.556252088201203, 
+        "max_10hz_fall_db": 11.06325167954613, 
+        "max_10hz_start_hz": 75.81
+      }, 
+      "raw": {
+        "fall40to50": 9.257912366957054, 
+        "valley_hz": 59.6923828125, 
+        "valley_db": -15.887640316595055, 
+        "max_10hz_fall_db": 14.088531825207745, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": 0.4500568964409291, 
+      "mackie_peak": 0.6788714528083801, 
+      "clean_peak": 0.19733190536499023, 
+      "initial_hz": 47.720530000000004, 
+      "initial_ratio": 1.3
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 138.15510557964274, 
+      "first_nominal_sub_cycle_rms_change_db": 1.3190418313626084, 
+      "name": "ratio1.6_tau20ms", 
+      "tau_ms": 20.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.2739725937225286, 
+        "30_40": -1.5272248928802368, 
+        "40_90": 1.422350051545585
+      }, 
+      "sixth_octave": {
+        "fall40to50": 7.622900092196275, 
+        "valley_hz": 59.70452502736339, 
+        "valley_db": -13.426500969034729, 
+        "max_10hz_fall_db": 10.796766793928773, 
+        "max_10hz_start_hz": 75.43
+      }, 
+      "raw": {
+        "fall40to50": 7.381560480442074, 
+        "valley_hz": 59.87548828125, 
+        "valley_db": -13.613517319856454, 
+        "max_10hz_fall_db": 13.90677812680811, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": -1.8100740190297728, 
+      "mackie_peak": 0.5233364701271057, 
+      "clean_peak": 0.20956139266490936, 
+      "initial_hz": 58.732960000000006, 
+      "initial_ratio": 1.6
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 276.3102111592855, 
+      "first_nominal_sub_cycle_rms_change_db": 1.098201801420541, 
+      "name": "ratio1.6_tau40ms", 
+      "tau_ms": 40.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.34727097136430907, 
+        "30_40": -5.343349299412171, 
+        "40_90": 2.524969040806652
+      }, 
+      "sixth_octave": {
+        "fall40to50": 3.628498650855772, 
+        "valley_hz": 61.610682436252645, 
+        "valley_db": -11.490258681161915, 
+        "max_10hz_fall_db": 10.964620093511867, 
+        "max_10hz_start_hz": 75.34
+      }, 
+      "raw": {
+        "fall40to50": 3.897898634992012, 
+        "valley_hz": 61.70654296875, 
+        "valley_db": -11.732968263211959, 
+        "max_10hz_fall_db": 14.10560031775902, 
+        "max_10hz_start_hz": 73.61
+      }, 
+      "mackie_peak_change_db": -0.37848578285232215, 
+      "mackie_peak": 0.6171069145202637, 
+      "clean_peak": 0.20605462789535522, 
+      "initial_hz": 58.732960000000006, 
+      "initial_ratio": 1.6
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 483.5428695287496, 
+      "first_nominal_sub_cycle_rms_change_db": 0.9622991578034623, 
+      "name": "ratio1.6_tau70ms", 
+      "tau_ms": 70.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.4090894667695504, 
+        "30_40": -10.38893040730204, 
+        "40_90": 3.003556901713449
+      }, 
+      "sixth_octave": {
+        "fall40to50": -3.3157102971315693, 
+        "valley_hz": 62.78346524354726, 
+        "valley_db": -10.25268436481386, 
+        "max_10hz_fall_db": 11.1062472458242, 
+        "max_10hz_start_hz": 75.34
+      }, 
+      "raw": {
+        "fall40to50": -4.740667458924989, 
+        "valley_hz": 63.17138671875, 
+        "valley_db": -10.575815038836504, 
+        "max_10hz_fall_db": 14.273142827402733, 
+        "max_10hz_start_hz": 73.6
+      }, 
+      "mackie_peak_change_db": -1.0988045121394436, 
+      "mackie_peak": 0.5679949522018433, 
+      "clean_peak": 0.19949527084827423, 
+      "initial_hz": 58.732960000000006, 
+      "initial_ratio": 1.6
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 138.15510557964274, 
+      "first_nominal_sub_cycle_rms_change_db": 0.8281530166828349, 
+      "name": "ratio2.0_tau20ms", 
+      "tau_ms": 20.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": 0.17064268152342285, 
+        "30_40": -3.1163060951440684, 
+        "40_90": 1.8535531269750223
+      }, 
+      "sixth_octave": {
+        "fall40to50": 4.519621210199691, 
+        "valley_hz": 61.610682436252645, 
+        "valley_db": -10.256050423001241, 
+        "max_10hz_fall_db": 9.84154919110837, 
+        "max_10hz_start_hz": 75.34
+      }, 
+      "raw": {
+        "fall40to50": 4.3409477554872655, 
+        "valley_hz": 61.5234375, 
+        "valley_db": -10.40703433336475, 
+        "max_10hz_fall_db": 12.939275769841363, 
+        "max_10hz_start_hz": 73.5
+      }, 
+      "mackie_peak_change_db": -0.05034399999808357, 
+      "mackie_peak": 0.6408663988113403, 
+      "clean_peak": 0.20243249833583832, 
+      "initial_hz": 73.4162, 
+      "initial_ratio": 2.0
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 276.3102111592855, 
+      "first_nominal_sub_cycle_rms_change_db": 1.2752074654651768, 
+      "name": "ratio2.0_tau40ms", 
+      "tau_ms": 40.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": -0.0022314078368791813, 
+        "30_40": -6.974755114928918, 
+        "40_90": 2.3342118983516476
+      }, 
+      "sixth_octave": {
+        "fall40to50": -0.5004027098431232, 
+        "valley_hz": 63.57769680809069, 
+        "valley_db": -7.446841553158212, 
+        "max_10hz_fall_db": 9.720621825715423, 
+        "max_10hz_start_hz": 75.33
+      }, 
+      "raw": {
+        "fall40to50": -0.8017676443933146, 
+        "valley_hz": 64.63623046875, 
+        "valley_db": -7.666262913783386, 
+        "max_10hz_fall_db": 12.863982333109623, 
+        "max_10hz_start_hz": 73.43
+      }, 
+      "mackie_peak_change_db": -0.7599678670469983, 
+      "mackie_peak": 0.5905902981758118, 
+      "clean_peak": 0.1947219967842102, 
+      "initial_hz": 73.4162, 
+      "initial_ratio": 2.0
+    }, 
+    {
+      "time_to_pitch_error_minus60db_ms": 483.5428695287496, 
+      "first_nominal_sub_cycle_rms_change_db": 1.4080965164022998, 
+      "name": "ratio2.0_tau70ms", 
+      "tau_ms": 70.0, 
+      "energy_change_vs_fixed_db": {
+        "30_90": -0.3179997500402654, 
+        "30_40": -13.625273888085658, 
+        "40_90": 2.3535853926779153
+      }, 
+      "sixth_octave": {
+        "fall40to50": -2.6137328351963642, 
+        "valley_hz": 40.182108815688636, 
+        "valley_db": -8.932300165398546, 
+        "max_10hz_fall_db": 9.691317858459279, 
+        "max_10hz_start_hz": 73.93
+      }, 
+      "raw": {
+        "fall40to50": -3.5866045090626404, 
+        "valley_hz": 40.10009765625, 
+        "valley_db": -10.088798966136691, 
+        "max_10hz_fall_db": 12.712189382487693, 
+        "max_10hz_start_hz": 73.42
+      }, 
+      "mackie_peak_change_db": -0.6861307455212818, 
+      "mackie_peak": 0.5956321954727173, 
+      "clean_peak": 0.18609517812728882, 
+      "initial_hz": 73.4162, 
+      "initial_ratio": 2.0
+    }
+  ], 
+  "warning": "EXPERIMENTAL /tmp ONLY, not current firmware. Sub phase increment alone changed. tau is time constant, not -60dB time. Frequency capped at90Hz.", 
+  "baseline_settings": {
+    "mackie": 1, 
+    "shape": 0.5, 
+    "line": 1, 
+    "layers": 0, 
+    "sub": 1, 
+    "decay": 0.5, 
+    "tube": 1, 
+    "note": 38, 
+    "mackamt": 0, 
+    "tail": 1200, 
+    "belly": 0.5039370078740157, 
+    "tubeamt": 0, 
+    "gate": 20, 
+    "vel": 100, 
+    "hpf": 0, 
+    "punch": 0, 
+    "wave": 0, 
+    "depthtrim": 0.55, 
+    "model": 0, 
+    "taildelay": 0, 
+    "hits": 1, 
+    "reverse": 0, 
+    "bpf": 0, 
+    "curve": 0.5039370078740157, 
+    "sweeptime": 0.55, 
+    "lpf": 0, 
+    "reverb": 0, 
+    "spacing_ms": 100
+  }, 
+  "best_smoothed_only": {
+    "time_to_pitch_error_minus60db_ms": 483.5428695287496, 
+    "first_nominal_sub_cycle_rms_change_db": 1.4080965164022998, 
+    "name": "ratio2.0_tau70ms", 
+    "tau_ms": 70.0, 
+    "energy_change_vs_fixed_db": {
+      "30_90": -0.3179997500402654, 
+      "30_40": -13.625273888085658, 
+      "40_90": 2.3535853926779153
+    }, 
+    "sixth_octave": {
+      "fall40to50": -2.6137328351963642, 
+      "valley_hz": 40.182108815688636, 
+      "valley_db": -8.932300165398546, 
+      "max_10hz_fall_db": 9.691317858459279, 
+      "max_10hz_start_hz": 73.93
+    }, 
+    "raw": {
+      "fall40to50": -3.5866045090626404, 
+      "valley_hz": 40.10009765625, 
+      "valley_db": -10.088798966136691, 
+      "max_10hz_fall_db": 12.712189382487693, 
+      "max_10hz_start_hz": 73.42
+    }, 
+    "mackie_peak_change_db": -0.6861307455212818, 
+    "mackie_peak": 0.5956321954727173, 
+    "clean_peak": 0.18609517812728882, 
+    "initial_hz": 73.4162, 
+    "initial_ratio": 2.0
+  }
+}

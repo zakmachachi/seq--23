@@ -1,0 +1,6 @@
+build/
+local.mk
+render_demo
+
+# Downloaded commercial reference clip: keep local to the listening study.
+/analysis/rodox-hoover/*_reference.wav

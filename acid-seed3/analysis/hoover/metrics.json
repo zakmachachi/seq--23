@@ -1,0 +1,37 @@
+{
+  "after-held.wav": {
+    "duration": 2.1, 
+    "peak_dbfs": -7.628645785674691, 
+    "rms_dbfs": -20.256822025873955, 
+    "sample_rate": 48000, 
+    "sha256": "43eaeea26192ae86d0c7e94c3645486d75a68f7db90578b4c93550aa19dfc012"
+  }, 
+  "after_pitch": {
+    "at_100ms_semitones": 3.5708469114126675, 
+    "at_1s_semitones": 2.240202443971171e-05, 
+    "at_500ms_semitones": 0.007756441980985527, 
+    "peak_semitones": 5.726435429229135, 
+    "peak_time_s": 0.113
+  }, 
+  "before-held.wav": {
+    "duration": 2.1, 
+    "peak_dbfs": -8.395849892624573, 
+    "rms_dbfs": -21.687434583295605, 
+    "sample_rate": 48000, 
+    "sha256": "23baacab6e43452a6b4c6fdb1467b246c56f279592b5af8bb8d518d1f6596ad3"
+  }, 
+  "before_pitch": {
+    "at_100ms_semitones": 5.76123062356433, 
+    "at_1s_semitones": -2.1222997259698426e-05, 
+    "at_500ms_semitones": -2.653314500907749, 
+    "peak_semitones": 11.608086790525565, 
+    "peak_time_s": 0.008
+  }, 
+  "reference/chameon-hoover.wav": {
+    "duration": 2.0817233560090704, 
+    "peak_dbfs": -1.843425706353663, 
+    "rms_dbfs": -14.696753699424232, 
+    "sample_rate": 44100, 
+    "sha256": "0db1319fefc5ae6de7f7d9ad52ebb6f8f8ae98c12deb66e3ab823d72a35b6f41"
+  }
+}

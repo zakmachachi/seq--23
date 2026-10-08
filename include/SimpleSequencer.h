@@ -6,6 +6,7 @@
 #include "SeqConfig.h"
 #include "Max11300.h"
 #include "KickPerformance.h"
+#include "HeldFxButtons.h"
 #include "KickMixer.h"
 #include <EEPROM.h>
 // OLED
@@ -30,6 +31,10 @@ class SimpleSequencer {
     // MIDI input handlers (moved into `runEngine()` to avoid concurrent Serial reads)
     // MIDI output
     void midiSendByte(uint8_t b);
+    bool midiSendMessage(uint8_t status,uint8_t a,uint8_t b,bool control=false);
+    void retryMidiNoteOffs();
+    uint32_t pendingMidiOff[16][4]={};
+    volatile uint32_t midiRealtimeOverflows=0,midiNoteOverflows=0;
     void midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel);
     void midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel);
     // ISR access
@@ -41,6 +46,9 @@ class SimpleSequencer {
 
   private:
     KickPerformance kickPerformance;
+    HeldFxButtons heldFxButtons;
+    bool heldFxTransportWasRunning=false;
+    uint8_t heldFxDisplaySelection=0;
     KickMixer kickMixer;
     bool kickMixMode = false; // Function + MENU2 selects the mix stage instead.
     bool kickCCPage() const;
@@ -187,6 +195,26 @@ class SimpleSequencer {
     bool isKickChannel(uint8_t ch) const;
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
+    bool skitterEnabled[NUM_CHANNELS]={};
+    uint8_t skitterTiming[NUM_CHANNELS]={};
+    bool acidModded[NUM_CHANNELS]={};
+    uint8_t acidParam[NUM_CHANNELS][6]; // cutoff, resonance, env mod, decay, accent, waveform
+    uint8_t hooverParam[NUM_CHANNELS][6];
+    uint8_t screechParam[NUM_CHANNELS][6]={},screechLevel[NUM_CHANNELS]={},screechStyle[NUM_CHANNELS]={};
+    uint8_t synthFx[NUM_CHANNELS][6]={}; // BPF, tube, HPF, delay, reverb, erosion
+    bool synthMackie[NUM_CHANNELS]={};
+    uint8_t hooverPeriod[NUM_CHANNELS]={},hooverMix[NUM_CHANNELS]={},hooverLevel[NUM_CHANNELS]={};
+    uint8_t acidLevel[NUM_CHANNELS]={};
+    enum AudioMachine : uint8_t { AM_NONE=0, AM_ACID, AM_HOOVER, AM_SCREECH, AM_COUNT };
+    uint8_t audioMachine[NUM_CHANNELS]={};
+    bool audioCyclePending[NUM_CHANNELS]={};
+    bool synthMachine(uint8_t ch) const { return ch<NUM_CHANNELS && audioMachine[ch]!=AM_NONE; }
+    uint8_t outputMidiChannel(uint8_t ch) const { return synthMachine(ch)?13:(midiChannel[ch]&15); }
+    void cycleAudioMachine(uint8_t ch);
+    void syncAudioMachine(uint8_t ch);
+    volatile uint8_t synthCCValue[128]={};
+    volatile bool synthCCPending[128]={};
+    void sendAcidCC(uint8_t ch,uint8_t cc,uint8_t value);
     // Accumulating ordered list of extra (non-skeleton) source positions per
     // channel. Density adds one new weighted-random spot at a time and the
     // previously-placed ones stay put; dropping density to 0 clears the list so
@@ -196,6 +224,8 @@ class SimpleSequencer {
     void regenerateMachinePattern(uint8_t ch);
     bool isStepActive(uint8_t ch, uint16_t absStep);
     void drawTrigMachineView();
+    void drawAcidView();
+    void drawSynthFxView();
     void drawPagesView();
 
     // runtime

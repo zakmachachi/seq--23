@@ -18,6 +18,7 @@ public:
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
+  void invalidate(){dirty_=true;}
   void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
   void buttonEdge(uint8_t button, bool pressed, uint32_t now);
   void service(uint32_t now);

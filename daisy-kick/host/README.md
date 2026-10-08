@@ -76,3 +76,43 @@ analog-output, amplifier or loudspeaker behavior. Identical fresh runs should
 produce identical files; test retriggers separately because their continuity
 bridge intentionally depends on the preceding output. The controller's OLED
 scope is a simplified clean-generator preview, not a measurement of this bus.
+
+`heldfx=1..16` selects a held industrial gesture; the harness renews its MIDI
+lease every 200 ms. `heldfx=0` (default) leaves the new subsystem bypassed.
+
+## External delay transition check
+
+The external dotted-quarter delay now crossfades stationary taps on tempo
+changes, fades its input send on engagement and filters both send and feedback.
+The feedback path no longer applies the old soft clip on every repeat.
+
+```
+c++ -std=c++17 -O2 -I host/stubs host/delay_test.cpp -o /tmp/kick-delay-check
+/tmp/kick-delay-check
+```
+
+This checks finite output and continuity on a sine through a tempo jump and
+on/off transitions. It does not establish hardware callback CPU headroom.
+
+## External-path integrity audit
+
+The automatic external input noise gate has been removed from the normal path.
+It was introduced during the grounding investigation and attenuated quiet input
+and tails without an explicit FX setting. Input 2 remains excluded. Held FX
+now separate the command generation counter from the pad number; pad-9 release
+can finish on a quarter edge without another kick, and lease expiry clears the
+kick BPF override as well as the effect return.
+
+```
+c++ -std=c++17 -O2 -fsanitize=address,undefined -I host/stubs host/external_integrity_test.cpp -o /tmp/external-integrity
+/tmp/external-integrity
+```
+
+Checks: production callback at input amplitudes 0.00001, 0.005, 0.1 and 0.5,
+with/without kick triggers (generated lane muted); expected linear return gain
+and output filters; synth-channel CC isolation; each external effect's release
+to exact bypass; all ten external effects layered then released; held command
+sequence flags and lease/quarter release. Address/undefined-behavior sanitizer
+checks pass. All 16 held gesture tests also pass. These tests found no extra
+input distortion with settled FX bypass, but cannot establish hardware callback
+deadlines or diagnose the reported audible recovery when kicks are added.

@@ -5,6 +5,13 @@ Daisy Seed kick/audio firmware, originally imported from `DaisyExamples/files (1
 See [Eurorack trigger/clock wiring](EURORACK_OUTPUTS.md) for D2 kick triggers
 and D3 MIDI clock outputs (3.3 V logic).
 
+## Held industrial performance FX
+
+With KICK selected on SEQ23, the 16 step keys now play external-only held FX on
+any screen: BANE, TOY, RADIO, MEMORY, METAL, BINARY, DECAY and HAZARD. Pads 1–8
+build over a bar; 9–16 use beat gestures. See [controls, MIDI and limits](../HELD_FX.md).
+This addition is built/tested for both boards, not uploaded.
+
 ## Dedicated FX menu
 
 With KICK selected, MENU3 replaces Euclid with six FX slots: DELAY/LOOP/STUT/PITCH,

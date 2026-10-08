@@ -1,0 +1,28 @@
+675 phase configurations: max body phase error 0 cycles; crossover sum error 0.00236 dB; SHAPE0 invariance and glue onset passed
+MIDI: 458752 ignored/running-status bytes safe; 100 queued hits intact; overflow resynchronizes.
+Timing independent of DECAY; static BPF cache stable; crush control max step 0.0005898; 30 s FX stress peak 0.210626, no nonfinite/panic.
+SUB isolation: 96 cases, 0 dirty-return mismatches; worst final double-difference 1.7e-05 (0.149% of sub peak)
+D2 bass shelf: 12.606 dB, original tuning retained
+Worst boosted-body change across character settings: -0.653 dB
+All-max mixer: peak 0.3582, worst LINE scaling error 0.00028
+External HPF 0.1: -1.18 dB; generated kick unchanged
+External HPF 0.5: -38.11 dB; generated kick unchanged
+External HPF 1: -102.41 dB; generated kick unchanged
+Tail gap: model 0, BELLY 0, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 0, BELLY 0, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 0, BELLY 0, amount 1, BPM 120: 250.0 ms
+Tail gap: model 0, BELLY 0, amount 1, BPM 240: 125.0 ms
+Tail gap: model 0, BELLY 1, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 0, BELLY 1, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 0, BELLY 1, amount 1, BPM 120: 250.0 ms
+Tail gap: model 0, BELLY 1, amount 1, BPM 240: 125.0 ms
+Tail gap: model 1, BELLY 0, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 1, BELLY 0, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 1, BELLY 0, amount 1, BPM 120: 250.0 ms
+Tail gap: model 1, BELLY 0, amount 1, BPM 240: 125.0 ms
+Tail gap: model 1, BELLY 1, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 1, BELLY 1, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 1, BELLY 1, amount 1, BPM 120: 250.0 ms
+Tail gap: model 1, BELLY 1, amount 1, BPM 240: 125.0 ms
+Retrigger after bridge: worst fresh-hit difference 0
+All low-end checks passed

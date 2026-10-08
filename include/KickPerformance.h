@@ -1,6 +1,7 @@
 #ifndef KICK_PERFORMANCE_H
 #define KICK_PERFORMANCE_H
 #include <Arduino.h>
+#include "HeldFxProtocol.h"
 #include <Adafruit_SH110X.h>
 
 // Controller state, physical input, focus and outgoing MIDI have separate owners.
@@ -35,6 +36,8 @@ public:
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
+  void setHeldFx(uint8_t selection,uint16_t held,uint32_t now);
+  void renderHeldFx(Adafruit_SH1106G& display,uint32_t bpm,uint32_t now);
   struct FxState { uint8_t repeat=0, filter=0, routes=14; }; // DLY, HPF; pump EXT, others E+I. Routes bit4: reverb INT only.
   void setFxMenu(bool enabled);
   void setFunctionHeld(bool held);
@@ -91,6 +94,9 @@ private:
     bool pending[CC_SLOTS] = {};
     uint8_t value[CC_SLOTS] = {};
   };
+  uint8_t heldFx_=0;
+  uint16_t heldFxMask_=0;
+  uint32_t heldFxStart_=0,heldFxFrame_=0;
   ControllerState state_;
   FxState fx_;
   bool fxMenu_=false, functionHeld_=false, running_=false;

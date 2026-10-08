@@ -1,3 +1,8 @@
+Held-button update: when KICK is selected, the 16 step keys are now momentary
+external FX on every screen. This replaces KICK step editing and the older
+Function + step motion/snapshot shortcuts described below; Function parameter
+edits persist. See [HELD_FX.md](HELD_FX.md) for the current pad controls.
+
 # KICK sound and FX menus
 
 Select KICK in Trigger Machines. MENU2 keeps the sound controls; MENU3 (the

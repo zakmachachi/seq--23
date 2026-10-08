@@ -1,0 +1,37 @@
+{
+  "revision": "Persistent FX cycling and EXT-only pitch shift",
+  "uploaded": false,
+  "checks": {
+    "controller_sanitizers": "pass",
+    "seed_build": "pass",
+    "teensy_build": "pass",
+    "pitch_audio": "manual verification requested by user; no broad DSP revalidation"
+  },
+  "seed_memory_bytes": {
+    "flash": 113904,
+    "sram": 458004,
+    "sdram": 407856
+  },
+  "sha256": {
+    "include/KickPerformance.h": "70d1aeae7472ba35e28847803ff7a2460c28287d57cd6285c2b272a8e2a8e03b",
+    "src/KickPerformance.cpp": "52bb0e7797b3a2c6576f64d57819a49bf8ce68d639af00c492f7ddc6a56665e9",
+    "include/SimpleSequencer.h": "a0c420ff264a56c27cd877d6ec5386caf140070ab098b712d668f044ad53f9db",
+    "src/SimpleSequencer.cpp": "42212b9e999fc4fed99fd94863b1e2ce887aa4933fe0b25086bdf928047f722b",
+    "daisy-kick/midi_oled_monitor.cpp": "ac06d3af332bf1b17aa583dad66808c20c128f8fd3fad728833f01914d87506f",
+    "daisy-kick/build/midi_oled_monitor.bin": "a5d2d6213d721c227eb2ea83c9f78ea1fdd7a2073412d106b4fc279e2c0bb14c",
+    ".pio/build/teensy41/firmware.hex": "f38d39589c65cf03bebb756b175bd7039e92aab3d01497dad8928162036dfd65",
+    "daisy-kick/external_pitch_fx.h": "6160a74b59d2202ed27396b4a3476aafb413b679f5e8e27db6bac5e52c270bb3"
+  },
+  "previous_uploads": {
+    "teensy": {
+      "result": "PlatformIO GUI uploader exit 0; USB serial present after upload",
+      "readback_verified": false
+    },
+    "seed3": {
+      "result": "DFU download succeeded; 113904-byte readback matches firmware",
+      "serial": "200364500000",
+      "readback_verified": true,
+      "leave": "Leave submitted; USB disconnected during get_status (dfu-util exit 74)"
+    }
+  }
+}

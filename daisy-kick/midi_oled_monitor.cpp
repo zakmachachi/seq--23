@@ -7,7 +7,8 @@
 #include "midi_pulse_output.h"
 #include "erosion_fx.h"
 #include "external_pitch_fx.h"
-#include "input_gate.h"
+#include "../include/FixedDelayTap.h"
+#include "effects/HeldFxEngine.h"
 
 using namespace daisy;
 
@@ -31,7 +32,7 @@ struct DiagStats
 {
     double sum[2], sum_sq[2];
     float peak[2], out_peak;
-    uint32_t samples, gate_open_samples, max_cycles;
+    uint32_t samples, max_cycles;
 };
 static DiagStats diag_accum, diag_snapshot;
 static volatile bool diag_snapshot_ready = false;
@@ -109,6 +110,8 @@ static constexpr float PI =
 
 /* External input. */
 static constexpr float EXTERNAL_INPUT_1_GAIN = 1.00f;
+// Input 2 is intentionally quarantined: leave the ADC channel disconnected
+// without allowing its floating/noisy pin to enter the external bus.
 static constexpr float EXTERNAL_INPUT_2_GAIN = 0.00f;
 
 /*
@@ -192,7 +195,7 @@ static bool PERF_QUANT_LOOPER_ENABLED = false;
  *
  * CC value 0..127 maps linearly to 0..MAX for each.
  */
-static volatile float param_line_gain    = 1.00f;   /* CC53, linear output trim 0..1 */
+static volatile float param_line_gain    = 1.00f;   /* CC53, output-stage gain */
 static volatile float param_mackie_gain  = 0.65f;   /* CC54, max 1.25 */
 static volatile float param_tube_gain    = 0.60f;   /* CC55, max 1.25 */
 static volatile float param_bpf_gain     = 0.70f;   /* CC56, pre-drive BPF blend 0..1 */
@@ -200,7 +203,10 @@ static volatile float param_sub_gain     = 1.00f;   /* CC57, clean low-shelf boo
 static volatile float param_punch_gain   = 1.00f;   /* CC58, clean LPF lane gain 0..1 */
 static volatile float param_reverb_amount = 0.0f;   /* CC36, FX page  */
 
-static constexpr float PARAM_LINE_GAIN_MAX    = 1.0f;
+/* Function + Menu-2 knob 1 (CC53): gain above the normal kick trim.
+ * The final ceiling remains in place, so this can be driven hard without
+ * producing wraparound; it is intentionally a wide range for noisy rigs. */
+static constexpr float PARAM_LINE_GAIN_MAX    = 4.0f;
 static constexpr float PARAM_MACKIE_GAIN_MAX  = 1.25f;
 static constexpr float PARAM_TUBE_GAIN_MAX    = 1.25f;
 static constexpr float PARAM_BPF_GAIN_MAX     = 1.0f;
@@ -450,9 +456,11 @@ static volatile float erosion_amount=0.f, erosion_frequency=64.f/127.f;
 static volatile uint8_t fx_internal_routes=14;
 static ExternalPitchFx external_pitch_fx;
 static volatile float external_pitch_ratio=1.f;
+static heldfx::Control held_fx_control;
+// Zero-initialized SDRAM storage; no large initialized-data image in FLASH.
+static heldfx::Engine DSY_SDRAM_BSS held_fx_engine;
 static uint16_t fx_bar_reset_mask=0;
 static ErosionFx erosion_fx, external_erosion_fx;
-static InputGate external_input_gate;
 static float pump_internal_mix=0.f;
 
 static constexpr uint8_t CC_DECAY_ABSOLUTE          = 40;
@@ -1598,6 +1606,10 @@ static constexpr float FINAL_INFRASONIC_HPF_HZ = 15.0f;
 static constexpr float FINAL_INFRASONIC_HPF_Q = .70710678f;
 static Biquad final_infrasonic_hpf;
 
+// Two-sample audio blocks keep callback ripple ultrasonic, but any residual
+// 24 kHz DMA/supply component must still be removed before the DAC.
+static Biquad final_ultrasonic_lowpass_a, final_ultrasonic_lowpass_b;
+
 // One output continuity bridge, after all reset filters. It expires exactly
 // after 2 ms (8 ms at SHAPE zero); no old oscillator remains beneath a hit.
 struct KickOutputBridge
@@ -2167,6 +2179,8 @@ struct AddedClockedDelay
     float macro_smoothed = 0.0f;
     float cached_quarter_ms = -1.0f, cached_m = -1.0f, feedback = 0.18f;
     uint32_t delay_samples = 0;
+    FixedDelayTap tap;
+    float send_gain=0,send_lp=0,send_dc=0,return_lp=0,return_dc=0;
 
     AddedSmoothWet wet;
 
@@ -2186,7 +2200,8 @@ struct AddedClockedDelay
 
         cached_quarter_ms = cached_m = -1.0f;
 
-        wet.Reset();
+        wet.Reset();tap.Reset();
+        send_gain=send_lp=send_dc=return_lp=return_dc=0;
     }
 
 
@@ -2237,7 +2252,8 @@ struct AddedClockedDelay
            wet.wet <= 0.000001f &&
            macro_smoothed <= 0.0001f)
         {
-            valid_written = 0;
+            valid_written = 0;tap.Reset();
+            send_gain=send_lp=send_dc=return_lp=return_dc=0;
             macro_smoothed = 0.0f;
             return input;
         }
@@ -2255,16 +2271,13 @@ struct AddedClockedDelay
         }
 
 
-        uint32_t read = write + MAX_SAMPLES - delay_samples;
-        if(read >= MAX_SAMPLES)
-            read -= MAX_SAMPLES;
-
-
-        float delayed =
-            valid_written >= delay_samples
-            ? buffer[read]
-            : 0.0f;
-
+        float delayed = tap.Process(buffer, MAX_SAMPLES, write, valid_written,
+                                    float(delay_samples));
+        // Band-limit the return, including the feedback path. Fixed heads
+        // avoid pitch modulation when MIDI-clock estimates change.
+        return_dc += .019443f*(delayed-return_dc); // ~150 Hz
+        return_lp += .692136f*((delayed-return_dc)-return_lp); // ~9 kHz
+        delayed=return_lp;
 
         float m =
             Clamp01Added(
@@ -2287,13 +2300,12 @@ struct AddedClockedDelay
             );
 
 
-        buffer[write] =
-            input +
-            SoftClip(
-                delayed *
-                feedback
-            );
-
+        // Fade the send in from silence so enabling on a nonzero input
+        // does not record a sharp artificial edge one delay-time later.
+        send_gain += .004158f*((requested?1.f:0.f)-send_gain);
+        send_dc += .019443f*(input-send_dc);
+        send_lp += .692136f*((input-send_dc)-send_lp);
+        buffer[write] = ClampAdded(send_lp*send_gain + delayed*feedback, -8.f, 8.f);
 
         if(valid_written < MAX_SAMPLES)
             valid_written++;
@@ -6276,6 +6288,7 @@ static bool HandleSixMacroCC(
     uint8_t cc,
     uint8_t value)
 {
+    if(held_fx_control.Handle(cc,value,System::GetNow()))return true;
     float v =
         static_cast<float>(
             value
@@ -7114,7 +7127,7 @@ static void ServiceMidi()
     // A 1024-byte interrupt-fed queue retains 327 ms of full-rate MIDI.
     // A gap marker invalidates both partial messages and running status.
     uint16_t received;
-    unsigned budget=256;
+    unsigned budget=32; // bounded foreground work; audio IRQ owns voice state
     while(!kick_trigger_pending && budget-- && midi_rx.Pop(received))
     {
         if(received & MidiRxQueue::GAP)
@@ -7163,6 +7176,30 @@ static void AudioCallback(
     uint32_t cycle_start=DWT->CYCCNT;
 #endif
     ServiceEuroOutputs(static_cast<uint32_t>(size));
+    held_fx_engine.BeginBlock(held_fx_control,System::GetNow(),midi_running,
+        kick_trigger_pending,perf_quarter_pending,perf_quarter_note_ms,unsigned(size));
+
+    // Held pads 1/9 temporarily take over the generated kick's three BPF
+    // layers. The choice is made only at a kick boundary, so no filter
+    // coefficient changes occur halfway through a hit; pad 9 re-rolls here
+    // on every kick while held.
+    static bool kick_bpf_override = false;
+    static uint8_t kick_bpf_saved_count = 0;
+    static float kick_bpf_saved_hz[3] = {};
+    const bool held_kick_bpf = held_fx_engine.KickBpfForKick(kick_trigger_pending);
+    if(held_fx_engine.KickBpfEngaged() && !kick_bpf_override){
+        kick_bpf_saved_count=macro_bpf_layer_count;
+        for(int i=0;i<3;++i)kick_bpf_saved_hz[i]=macro_bpf_target_hz[i];
+        kick_bpf_override=true;
+    }else if(!held_fx_engine.KickBpfEngaged() && kick_bpf_override){
+        macro_bpf_layer_count=kick_bpf_saved_count;
+        for(int i=0;i<3;++i)macro_bpf_target_hz[i]=kick_bpf_saved_hz[i];
+        kick_bpf_override=false;
+    }
+    if(held_kick_bpf){
+        macro_bpf_layer_count = 3;
+        for(int i=0;i<3;++i) macro_bpf_target_hz[i]=held_fx_engine.kickBpfHz[i];
+    }
 
 
     /*
@@ -7207,7 +7244,7 @@ static void AudioCallback(
 
 
         /* Latch the BPF layer count for this hit; see the declaration. */
-        macro_bpf_layer_count_latched = macro_bpf_layer_count;
+        macro_bpf_layer_count_latched = held_kick_bpf ? 3 : macro_bpf_layer_count;
 
         // All generator/character/filter history resets. Continuity belongs
         // to a single finite bridge after the final filter, not bass layers.
@@ -7510,11 +7547,10 @@ static void AudioCallback(
            The two buses meet only at mixer2, before the shared glue/output.
          */
 
+        // Input 1 is the external audio return; input 2 remains quarantined
+        // because its jack may float and reintroduce the supply hum.
         float external_output =
-            in[EXTERNAL_INPUT_CHANNEL_1][i] *
-            EXTERNAL_INPUT_1_GAIN +
-            in[EXTERNAL_INPUT_CHANNEL_2][i] *
-            EXTERNAL_INPUT_2_GAIN;
+            in[EXTERNAL_INPUT_CHANNEL_1][i] * EXTERNAL_INPUT_1_GAIN;
 
 #if defined(__arm__)
         if(KICK_USB_DIAGNOSTICS)
@@ -7528,8 +7564,9 @@ static void AudioCallback(
             }
         }
 #endif
-        /* An unplugged input is not silent; keep its noise out of the mix. */
-        external_output = external_input_gate.Process(external_output);
+        // Grounding is handled at the hardware. Always pass legitimate quiet
+        // input and tails; the former automatic noise gate was not a user FX.
+        if(!std::isfinite(external_output))external_output=0.f;
 
 
         external_output =
@@ -7561,10 +7598,14 @@ static void AudioCallback(
         external_output=external_pitch_fx.Process(external_output,external_pitch_ratio);
         external_output=external_reverb.Process(external_output,(fx_internal_routes&16)?0.f:param_reverb_amount);
         external_output=external_bitcrusher.Process(external_output,bitcrush_target);
+        external_output=external_erosion_fx.Process(external_output,erosion_amount,erosion_frequency);
+        external_output=held_fx_engine.Process(external_output,&kick_output);
         float mix=erosion_fx.Process(kick_output,(fx_internal_routes&8)?erosion_amount:0.f,erosion_frequency)
-                 +external_erosion_fx.Process(external_output,erosion_amount,erosion_frequency);
-        float mixed_output = OutputCeiling(
-            mix_glue.Process(mix * MIX_OUTPUT_TRIM) * OUTPUT_MAKEUP_GAIN);
+                 +external_output;
+        float mixed_output = mix_glue.Process(mix * MIX_OUTPUT_TRIM) * OUTPUT_MAKEUP_GAIN;
+        mixed_output = final_ultrasonic_lowpass_b.Process(
+            final_ultrasonic_lowpass_a.Process(mixed_output));
+        mixed_output = OutputCeiling(mixed_output);
         out[KICK_OUTPUT_CHANNEL][i] = mixed_output;
         out[EXTERNAL_OUTPUT_CHANNEL][i] = mixed_output;
 #if defined(__arm__)
@@ -7572,7 +7613,6 @@ static void AudioCallback(
         {
             if(fabsf(mixed_output) > diag_accum.out_peak)
                 diag_accum.out_peak = fabsf(mixed_output);
-            if(external_input_gate.open) ++diag_accum.gate_open_samples;
         }
 #endif
     }
@@ -7580,6 +7620,14 @@ static void AudioCallback(
     uint32_t elapsed=DWT->CYCCNT-cycle_start;
     if(elapsed>audio_max_cycles) audio_max_cycles=elapsed;
     if(elapsed>uint32_t(SystemCoreClock / 48000u * size)) ++audio_overruns;
+    // Main-loop MIDI parsing needs CPU between audio callbacks. Shed the held
+    // effect after repeated near-deadline blocks, without waiting for a MIDI
+    // release that a saturated CPU may never get time to parse.
+    static unsigned held_overload_blocks=0;
+    uint32_t budget=uint32_t(SystemCoreClock / 48000u * size);
+    if(held_fx_engine.active && elapsed>budget*9u/10u){
+        if(++held_overload_blocks>=3){held_fx_engine.Suspend();held_overload_blocks=0;}
+    }else if(held_overload_blocks)--held_overload_blocks;
     if(KICK_USB_DIAGNOSTICS)
     {
         if(elapsed > diag_accum.max_cycles) diag_accum.max_cycles = elapsed;
@@ -7617,7 +7665,6 @@ static void ResetAudioDspState()
     external_bitcrusher.Reset();
     erosion_fx.Reset();
     external_erosion_fx.Reset();
-    external_input_gate.Reset();
 
     character_highpass.Reset(true);
     clean_lowpass.Reset(false);
@@ -7629,6 +7676,10 @@ static void ResetAudioDspState()
         FINAL_INFRASONIC_HPF_HZ,
         FINAL_INFRASONIC_HPF_Q
     );
+    final_ultrasonic_lowpass_a.Reset();
+    final_ultrasonic_lowpass_a.SetLowpass(18000.0f, .70710678f);
+    final_ultrasonic_lowpass_b.Reset();
+    final_ultrasonic_lowpass_b.SetLowpass(18000.0f, .70710678f);
 
     kick_output_bridge.Reset();
 
@@ -7639,6 +7690,8 @@ static void ResetAudioDspState()
     kick_reverb.Reset();
     external_reverb.Reset(true);
     external_pitch_fx.Reset();
+    held_fx_control.Handle(heldfx::SELECT,0,System::GetNow());
+    held_fx_engine.Reset();
     external_pitch_ratio=1.f;
     macro_whole_kick_reverse.Reset();
 }
@@ -7788,11 +7841,10 @@ int main(void)
             }
             uint32_t budget = SystemCoreClock / 48000u * AUDIO_BLOCK_SIZE;
             hw.PrintLine("diag t=%ds blk2 in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
-                         " | gate=%d/1000 out_pk=%d | cpu_max=%d/1000 overruns=%d"
+                         " | out_pk=%d | cpu_max=%d/1000 overruns=%d"
                          " uart_err=%d",
                          int(System::GetNow() / 1000u),
                          dc[0], ac[0], micro(d.peak[0]), dc[1], ac[1], micro(d.peak[1]),
-                         int(d.gate_open_samples * 1000ull / (d.samples ? d.samples : 1)),
                          micro(d.out_peak),
                          int(d.max_cycles * 1000ull / budget), int(audio_overruns),
                          int(midi_uart_errors));

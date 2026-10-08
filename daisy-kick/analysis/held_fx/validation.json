@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-07",
+  "uploaded": false,
+  "controls": "KICK selected, all screens; pads 1-8 bar builds, 9-16 beat gestures; latest held priority",
+  "tests": {
+    "controller": "pass, including held OLED text bounds",
+    "held_engine": "ASan/UBSan pass: priority, retry, lease, clock/kick starts, Stop, 16 gestures, macro endpoints, finite bounds, release, DECAY transient",
+    "production_integration": "pass: real parser/callback, 14 processor pads preserve internal kick exactly; all 16 pads affect external input",
+    "teensy_build": "pass",
+    "seed_build": "pass",
+    "USART3_vector": "pass"
+  },
+  "seed_memory_bytes": {
+    "flash": 125072,
+    "sram": 474428,
+    "sdram": 674584,
+    "new_held_engine_sdram": 266728
+  },
+  "hardware_cpu_profile": "not measured; existing audio_max_cycles/audio_overruns instrumentation covers whole callback",
+  "sha256": {
+    "include/HeldFxProtocol.h": "68601f3fcd77239771f8698c46a76d873fa7e79aba5ccf24095f6ac9e62aed97",
+    "include/HeldFxButtons.h": "73186163e789f6f4341ba0caf8403cc4d63b83ce8a0f501bda4076c9ec3cf911",
+    "daisy-kick/effects/Blocks.h": "9da3c83d985bbd8087c3f8f58207cd48edb67e99d2ea26ea3793994dc9d3d1d7",
+    "daisy-kick/effects/IndustrialFx.h": "d20ad03404152db2753f1b393473343736ffed6eb5a74248ed5471df02c86863",
+    "daisy-kick/effects/HazardFx.h": "2f486f23f8b9ec8e800f06e1df8de6627f0376302ddbc172250c101542d9c89c",
+    "daisy-kick/effects/HeldFxEngine.h": "39dd91561c63254f5fb9ec4b591ca9b7f6c4468c50eaf6eb425ca22b3dce6b9a",
+    "src/SimpleSequencer.cpp": "0b4f39f9b42370010133a965364bded3f4b5492c4ef73ddd027f16f520d4125c",
+    "src/KickPerformance.cpp": "26812edcbf4e34f996dd2f454e0fc4629969d52b269b01b8647c8431062d6ce1",
+    "daisy-kick/midi_oled_monitor.cpp": "b6a029068118d8a5404a469ef8a296bea830c81f18594af296ba40a777929039",
+    "daisy-kick/build/midi_oled_monitor.bin": "38061577a6a4df8da61642926480af9fbd77783d128ecc047b6b4230c7f8e9c5",
+    ".pio/build/teensy41/firmware.hex": "1c0b1f02e62adf9206edc76158441928c76ef2587f085a13844d2c2eba5ce8f6"
+  }
+}

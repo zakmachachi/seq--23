@@ -1,0 +1,16 @@
+{
+  "coherent": {
+    "sub_cycle_ms": 27.241946852303304, 
+    "sub_hz": 36.70809598967594, 
+    "20ms_detrended_ripple_peak_to_peak_db": 4.4003802679475825, 
+    "cycle_rms_detrended_ripple_peak_to_peak_db": 0.005806777655735118, 
+    "source": "exported PCM16 actual firmware audition, first 100 ms silence removed"
+  }, 
+  "locked": {
+    "sub_cycle_ms": 27.241946852303304, 
+    "sub_hz": 36.70809598967594, 
+    "20ms_detrended_ripple_peak_to_peak_db": 4.010528190047474, 
+    "cycle_rms_detrended_ripple_peak_to_peak_db": 0.00545519939431216, 
+    "source": "exported PCM16 actual firmware audition, first 100 ms silence removed"
+  }
+}

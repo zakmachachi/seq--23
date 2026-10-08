@@ -1,0 +1,36 @@
+675 phase configurations: max body phase error 0 cycles; crossover sum error 0.00236 dB; SHAPE0 invariance and glue onset passed
+MIDI: 458752 ignored/running-status bytes safe; 100 queued hits intact; overflow resynchronizes.
+Timing independent of DECAY; static BPF cache stable; crush control max step 0.0005898; 30 s FX stress peak 0.210540, no nonfinite/panic.
+Echo feedback filter 30 Hz: -36.13 dB
+Echo feedback filter 1000 Hz: -0.08 dB
+Echo feedback filter 10000 Hz: -24.69 dB
+Reverb: persistent tail energy 0.0057687856; duck 0.1000; clock 200/300ms correct; 30s automation peak 0.15231, max step 0.01176; dry bypass exact
+PASS: pin mapping, 5ms trigger / 1ms clock, channel/velocity filtering, running status, stopped clock forwarding, 100 queued edges, minimum gaps, bounded overload and reset
+Erosion: exact bypass/silence; 30s control stress finite and peak bounded; audible modulation energy 22679.499; max stressed sample step 0.591
+SUB isolation: 96 cases, 0 dirty-return mismatches; worst final double-difference 1.7e-05 (0.149% of sub peak)
+D2 bass shelf: 12.606 dB, original tuning retained
+Worst boosted-body change across character settings: -0.653 dB
+All-max mixer: peak 0.3583, worst LINE scaling error 0.00034
+External HPF 0.1: -1.18 dB; generated kick unchanged
+External HPF 0.5: -38.11 dB; generated kick unchanged
+External HPF 1: -102.41 dB; generated kick unchanged
+Tail gap: model 0, BELLY 0, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 0, BELLY 0, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 0, BELLY 0, amount 1, BPM 120: 250.0 ms
+Tail gap: model 0, BELLY 0, amount 1, BPM 240: 125.0 ms
+Tail gap: model 0, BELLY 1, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 0, BELLY 1, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 0, BELLY 1, amount 1, BPM 120: 250.0 ms
+Tail gap: model 0, BELLY 1, amount 1, BPM 240: 125.0 ms
+Tail gap: model 1, BELLY 0, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 1, BELLY 0, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 1, BELLY 0, amount 1, BPM 120: 250.0 ms
+Tail gap: model 1, BELLY 0, amount 1, BPM 240: 125.0 ms
+Tail gap: model 1, BELLY 1, amount 0.5, BPM 120: 78.0 ms
+Tail gap: model 1, BELLY 1, amount 0.5, BPM 240: 39.0 ms
+Tail gap: model 1, BELLY 1, amount 1, BPM 120: 250.0 ms
+Tail gap: model 1, BELLY 1, amount 1, BPM 240: 125.0 ms
+Retrigger after bridge: worst fresh-hit difference 0
+All low-end checks passed
+PASS: relative control, clamping/reversal, angle seams, recall, repeat rates, resets, MIDI, ADC noise and displays
+Both internal and external routed through effect; 12 combined-bus extreme cases; peak 0.6496233344078064

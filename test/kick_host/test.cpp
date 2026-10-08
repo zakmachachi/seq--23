@@ -120,7 +120,7 @@ int main(int argc,char**){
  // Every value fits both OLEDs; five-second idle transition and physical focus.
  {Harness h;Adafruit_SH1106G a,b;for(int n=0;n<K::PARAM_COUNT;++n)for(int v=0;v<128;++v){auto p=(K::Parameter)n;int k=h.knob(p);h.k.position(p)=v;h.k.focus_.knob=k;h.k.drawOverview(a);h.k.drawFocus(b,300);}
  h.k.setFxMenu(true);h.k.service(10000);h.k.adjust(5,-3);h.k.render(a,&b,200,10000);
- assert(!h.k.idleOverview(14999)&&h.k.idleOverview(15000));h.k.render(a,&b,200,15000);assert(b.has("E:EXT I:INT +:BOTH"));
+ assert(!h.k.idleOverview(14999)&&h.k.idleOverview(15000));h.k.render(a,&b,200,15000);assert(b.has("HOLD PADS / EXT ONLY"));
  if(argc>1){
    h.k.restoreFx({0,0,14});const int amounts[]={89,32,70,92,50,84};
    for(int i=0;i<6;++i)h.k.position(h.k.fxAssignment(i))=amounts[i];
@@ -129,6 +129,7 @@ int main(int argc,char**){
    h.k.setFunctionHeld(true);h.k.drawFxFocus(b,false);b.save("fx-erosion-frequency.svg");
  }
  h.k.setActive(false);int frames=a.frames;h.k.render(a,&b,200,16000);assert(a.frames==frames);}
+ {Harness h;Adafruit_SH1106G d;for(uint8_t pad=1;pad<=16;++pad){h.k.setHeldFx(pad,uint16_t(1u<<(pad-1)),0);h.k.renderHeldFx(d,200,1000);assert(d.has(heldfx::Name((pad-1)%8)));}}
  for(int cc=0;cc<128;++cc)assert(fabsf(K::frequency(K::BPF1,cc)-kickdaisy::bpfHz(cc))<.001f);
  puts("PASS: six-slot FX, routing, bar resets/cancel/stop, FN frequency, recall, repeat rates, relative ADC, all OLED values and five-second overview");
 }
