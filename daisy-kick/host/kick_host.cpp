@@ -9,7 +9,7 @@
  *   usage: kick_host <out.f32> [key=value ...]
  *
  *   bpm=185  hits=4  decay=<0..1>  sub=<0..1>  punch=<0..1>
- *   line=<0..1>  mackie=<0..1>  tube=<0..1>  bpf=<0..1>
+ *   mackie=<0..1>  tube=<0..1>  bpf=<0..1>  bpfhz=<0..1>
  *   hpf=<0..1>   lpf=<0..1>     (DJ filter position; hpf enables itself)
  *   mackamt=<0..1>  tubeamt=<0..1> (K5 character amount, CC48 / CC49)
  *   model=<0|1>  (CC50: 0 = Mackie, 1 = Tube)   wave=<0..1> (CC64)
@@ -18,7 +18,9 @@
  *   note=<0..127, default 36>   reverse=<0|1> (CC41)
  *   tmod=<0..1> (CC79, 0 = single glide)   belly=<0..1> (CC61, 0.5 ~ neutral)
  *   bitcrush=<0..1> (CC37, dirty return only)
+ *   extkick=<0|1> (CC59, external input uses the kick processing path)
  *   externalhz=<Hz> externallevel=<amplitude> externalout=<path.f32>
+ *   externalfile=<PCM WAV> (played once after the 250 ms settle)
  *     Optional external-input sine; output 2 captures the same combined mono mix.
  */
 
@@ -26,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fstream>
 
 #include <string>
 #include <vector>
@@ -54,8 +57,66 @@ static std::vector<float> g_kick_bus;
 static std::vector<float> g_external_bus;
 static double             g_external_hz = 60.0;
 static double             g_external_level = 0.0;
+static std::vector<float> g_external_file;
+static uint32_t           g_external_file_rate = 0;
+static uint16_t           g_external_file_channels = 0;
 static uint64_t           g_samples_rendered = 0;
 static uint8_t            g_held_fx = 0;
+
+static uint32_t ReadLe32(const uint8_t* p)
+{
+    return uint32_t(p[0]) | (uint32_t(p[1])<<8) | (uint32_t(p[2])<<16) | (uint32_t(p[3])<<24);
+}
+
+static bool LoadExternalWav(const char* path)
+{
+    std::ifstream f(path,std::ios::binary);
+    uint8_t head[12];
+    if(!f.read(reinterpret_cast<char*>(head),12) || memcmp(head,"RIFF",4) || memcmp(head+8,"WAVE",4))return false;
+    uint16_t format=0,bits=0;
+    uint32_t data_size=0,data_offset=0;
+    while(f)
+    {
+        uint8_t chunk[8];
+        if(!f.read(reinterpret_cast<char*>(chunk),8))break;
+        uint32_t size=ReadLe32(chunk+4);
+        std::streamoff body=f.tellg();
+        if(!memcmp(chunk,"fmt ",4))
+        {
+            uint8_t fmt[16];
+            if(size<16 || !f.read(reinterpret_cast<char*>(fmt),16))return false;
+            format=uint16_t(fmt[0])|(uint16_t(fmt[1])<<8);
+            g_external_file_channels=uint16_t(fmt[2])|(uint16_t(fmt[3])<<8);
+            g_external_file_rate=ReadLe32(fmt+4);
+            bits=uint16_t(fmt[14])|(uint16_t(fmt[15])<<8);
+        }
+        else if(!memcmp(chunk,"data",4)){data_size=size;data_offset=uint32_t(body);break;}
+        f.seekg(body+size+(size&1));
+    }
+    if(format!=1 || (bits!=16 && bits!=24 && bits!=32) || !g_external_file_rate ||
+       !g_external_file_channels || !data_size || !data_offset)return false;
+    const unsigned bytes=bits/8;
+    std::vector<uint8_t> raw(data_size);
+    f.clear();f.seekg(data_offset);
+    if(!f.read(reinterpret_cast<char*>(raw.data()),data_size))return false;
+    const size_t frames=data_size/(bytes*g_external_file_channels);
+    g_external_file.resize(frames);
+    for(size_t n=0;n<frames;++n)
+    {
+        double sum=0;
+        for(unsigned c=0;c<g_external_file_channels;++c)
+        {
+            const uint8_t* p=raw.data()+(n*g_external_file_channels+c)*bytes;
+            int32_t sample=0;
+            if(bits==16)sample=int16_t(uint16_t(p[0])|(uint16_t(p[1])<<8));
+            else if(bits==24){sample=int32_t(p[0])|(int32_t(p[1])<<8)|(int32_t(p[2])<<16);if(sample&0x800000)sample|=int32_t(0xff000000);}
+            else sample=int32_t(ReadLe32(p));
+            sum+=bits==16?sample/32768.0:bits==24?sample/8388608.0:sample/2147483648.0;
+        }
+        g_external_file[n]=float(sum/g_external_file_channels);
+    }
+    return true;
+}
 
 
 /* Render n samples through the firmware's audio callback. */
@@ -72,9 +133,25 @@ static void Render(size_t samples)
     while(done < samples)
     {
         for(int i = 0; i < kBlock; i++)
-            in_l[i] = static_cast<float>(g_external_level * sin(
+        {
+            if(!g_external_file.empty())
+            {
+                const uint64_t start=uint64_t(.25*kSampleRate);
+                const uint64_t absolute=g_samples_rendered+i;
+                const double pos=absolute<start?0.0:(absolute-start)*double(g_external_file_rate)/kSampleRate;
+                const size_t index=size_t(pos);
+                if(absolute<start || index>=g_external_file.size())in_l[i]=0.f;
+                else
+                {
+                    const size_t next=index+1<g_external_file.size()?index+1:index;
+                    const float frac=float(pos-index);
+                    in_l[i]=g_external_file[index]+(g_external_file[next]-g_external_file[index])*frac;
+                }
+            }
+            else in_l[i] = static_cast<float>(g_external_level * sin(
                 6.283185307179586 * g_external_hz *
                 (g_samples_rendered + i) / kSampleRate));
+        }
         memset(out_l, 0, sizeof(out_l));
         memset(out_r, 0, sizeof(out_r));
 
@@ -181,7 +258,7 @@ int main(int argc, char** argv)
     const double note_ms  = ArgOr(argc, argv, "gate", 20.0);
     perf_quarter_note_ms = static_cast<float>(60000.0 / bpm);
 
-    /* Mix: sub only unless asked otherwise, which is the reported case. */
+    /* Macros are sent only when named, keeping default raw renders clean. */
     auto cc7 = [](double v) {
         return static_cast<uint8_t>(v * 127.0 + 0.5);
     };
@@ -197,16 +274,20 @@ int main(int argc, char** argv)
 
     g_held_fx=static_cast<uint8_t>(ArgOr(argc,argv,"heldfx",0));
     if(g_held_fx)SendCC(MIDI_CHANNEL_KICK,heldfx::SELECT,g_held_fx);
-    maybe("line",    CC_MIX_LINE_GAIN);
-    maybe("mackie",  CC_MIX_MACKIE_GAIN);
-    maybe("tube",    CC_MIX_TUBE_GAIN);
-    maybe("bpf",     CC_MIX_BPF_GAIN);
-    maybe("layers",  CC_BPF_LAYER_COUNT);
+    maybe("line",    CC_MIX_LINE_GAIN); // retired in raw path; accepted for older render commands
+    maybe("mackie",  CC_MACKIE_AMOUNT);
+    maybe("tube",    CC_TUBE_AMOUNT);
+    maybe("bpf",     CC_BPF_LAYER_COUNT);
+    maybe("layers",  CC_BPF_LAYER_COUNT); // compatibility alias: 0..1 maps OFF..FULL
+    maybe("bpfhz",   CC_BPF_LAYER1_FREQUENCY);
     maybe("bpf1",    CC_BPF_LAYER1_FREQUENCY);
     maybe("bpf2",    CC_BPF_LAYER2_FREQUENCY);
     maybe("bpf3",    CC_BPF_LAYER3_FREQUENCY);
     maybe("sub",     CC_MIX_SUB_GAIN);
     maybe("punch",   CC_MIX_PUNCH_GAIN);
+    if(ArgOr(argc,argv,"extkick",-1)>=0)
+        SendCC(MIDI_CHANNEL_KICK,CC_MIX_EXT_KICK_MODE,
+               ArgOr(argc,argv,"extkick",0)>=0.5?127:0);
     maybe("decay",   CC_DECAY_ABSOLUTE);
     maybe("shape",   CC_KICK_SHAPE_ABSOLUTE);
     if(ArgOr(argc,argv,"fxroutes",-1)>=0)
@@ -235,6 +316,9 @@ int main(int argc, char** argv)
     maybe("sweeptime", CC_KICK_SWEEP_TIME);
     g_external_hz = ArgOr(argc, argv, "externalhz", 60.0);
     g_external_level = ArgOr(argc, argv, "externallevel", 0.0);
+    for(int i=2;i<argc;++i)
+        if(strncmp(argv[i],"externalfile=",13)==0 && !LoadExternalWav(argv[i]+13))
+        {fprintf(stderr,"failed to read external WAV: %s\n",argv[i]+13);return 2;}
 
     /* Let the mix-gain slew settle before the first hit. */
     Render(static_cast<size_t>(0.25 * kSampleRate) / kBlock * kBlock);

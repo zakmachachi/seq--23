@@ -31,7 +31,7 @@ int main(){
  // Backlog retains every hit AND its paired full-resolution tail pitch.
  for(int i=0;i<100;++i){for(int b:{0xbe,77,i,0x9e,38,0xf8,64})assert(midi_rx.Push(b));}
  int count=0;
- while(midi_rx.read!=midi_rx.write){ServiceMidi();if(kick_trigger_pending){block();assert(kick_voice.tail_semitones==TailPitchSemitones(count));++count;}else block();}
+ while(midi_rx.read!=midi_rx.write){ServiceMidi();if(kick_trigger_pending){block();assert(kick_voice.tail_pitch_semitones==TailPitchSemitones(count));++count;}else block();}
  assert(count==100);
  // Loss marker clears a partial message, then fresh status resynchronizes.
  midi_rx.Push(0x9e);midi_rx.Push(38);ServiceMidi();
@@ -39,8 +39,8 @@ int main(){
  for(int b:{0x9e,38,64})midi_rx.Push(b);ServiceMidi();assert(kick_trigger_pending);block();
  // Pitch trajectory and hold do not depend on DECAY, across all CC extremes.
  for(int shape:{0,64,127})for(int sweep:{0,64,127})for(int vel:{0,64,127})for(int rate:{0,64,127}){
-  KickVoice a,b;a.Trigger(73.41619f,shape/127.f,.5f,sweep/127.f,vel,0,.045f,0,rate,64);
-  b.Trigger(73.41619f,shape/127.f,.5f,sweep/127.f,vel,0,2.4f,0,rate,64);
+  KickVoice a,b;a.Trigger(73.41619f,shape/127.f,sweep/127.f,.045f,vel,rate,0.f);
+  b.Trigger(73.41619f,shape/127.f,sweep/127.f,1.06f,vel,rate,0.f);
   assert(a.body_hold_samples==b.body_hold_samples);
   for(int i=0;i<16000 && a.active;++i){KickVoiceOut x,y;a.Process(x);b.Process(y);assert(a.instantaneous_hz==b.instantaneous_hz);assert(a.phase==b.phase);}
  }

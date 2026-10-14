@@ -47,10 +47,12 @@ struct SynthFx {
         float echo=delayTap.Process(delay,65536,delayWrite,delayValid,desiredDelay);
         float delaySend=y-delaySendHp.Process(y);
         float delayReturn=echo-delayReturnHp.Process(echo);
-        delayLp+=.692136f*(delayReturn-delayLp);delayReturn=delayLp;
-        delay[delayWrite]=Clamp(delaySend+delayReturn*(.18f+.55f*x),-8.f,8.f);delayWrite=(delayWrite+1)&65535;
+        // Darken each repeat before it re-enters the feedback buffer. This
+        // keeps bright nonlinear Acid attacks from building a scratchy top.
+        delayLp+=.55f*(delayReturn-delayLp);delayReturn=delayLp;
+        delay[delayWrite]=Clamp(delaySend+delayReturn*(.12f+.42f*x),-8.f,8.f);delayWrite=(delayWrite+1)&65535;
         if(delayValid<65536)++delayValid;
-        y+=delayReturn*(.65f*Smooth(x));
+        y+=delayReturn*(.50f*Smooth(x));
         // Compact dual-comb reverb; dark feedback, with dry retained.
         x=amount[4];float ra=revA[revAPos],rb=revB[revBPos];
         float dark=.5f*(ra+rb);bpfLp+=.08f*(dark-bpfLp);

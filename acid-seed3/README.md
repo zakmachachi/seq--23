@@ -13,12 +13,30 @@ rhythm with Hoover notes, gates, slides and synth menus. Kick-only held FX and
 kick CC updates are disabled on that overridden track. NONE restores its normal
 MIDI routing and kick controls where applicable.
 
-Physical **Menu 2** shows the selected engine's controls. Use one active synth track per Seed;
-these are alternative monophonic engines, not simultaneous multitimbral parts.
-Both use reserved MIDI channel **14**. Kick remains channel 15.
-Machine selection is also sent immediately before notes, so a synth Seed booted
-later selects the right engine. Re-select the machine after a Seed reboot to
-resend its current controls. Audio selection is saved independently inside the existing machine-state byte
+Physical **Menu 2** shows the selected engine's controls. Up to three sequencer
+tracks can each select a synth engine. Teensy row 4 is fixed to MIDI channel
+**15** for the kick; row 5 is fixed to MIDI channel **12** for the off-acid
+voice and remains directly editable, muteable, and parameter-controlled. Other
+synth tracks are assigned MIDI channels **13 and 14** automatically; rows 6
+and 7 remain freely assignable for normal MIDI output.
+Real channel-15 kick hits on steps 1/5/9/13 can arm an automatic off-bass on
+steps 3/7/11/15, one octave above the kick's TUNE/SHAPE/TMOD-derived tail
+pitch, including fine pitch bend. This follower owns the note pitch and timing
+on those hits even if row 5 has a step programmed; row 5 still supplies the
+voice/FX parameters, mute and note-length setting. Outside follower hits, row
+5 plays its own programmed notes normally. The follower stays silent when row
+5 is muted or Fill is active. MIDI 12 has priority over the two lower lanes
+until its gate ends. The Seed remains
+monophonic: an open note is never stolen by another user lane, and changing
+lanes fades to silence over 2 ms before the next note starts, avoiding a
+two-voice crossfade through shared effects. Kick remains on channel 15.
+Machine selection is sent on each user lane's channel, so the Seed keeps
+independent Acid/Hoover/Screech settings per MIDI channel.
+Row 5 stays locked to MIDI 12 even when its audio engine is set to NONE. Other
+synth rows use a temporary synth-channel assignment; cycling one back to NONE
+restores its normal MIDI route. The Menu 2 and synth-FX screens show the
+assigned channel.
+Audio selection is saved independently inside the existing machine-state byte
 (marker plus audio/pattern bits), without changing EEPROM struct offsets. Old
 ACID/HOOVER pattern IDs migrate to pattern OFF/audio NONE. Macro values remain
 session state, not EEPROM presets.
@@ -56,6 +74,14 @@ The output stage runs at unity gain after the mono fold-down. A 64-sample
 rather than as a source of loudness, so ordinary patches retain transient
 headroom. Output trim still controls voice level.
 
+The Acid/Hoover Seed can also be pumped independently on its own output. On
+the KICK FX menu, set PUMP amount and click its knob to **EXT+INT**. The
+controller mirrors that amount/route to this Seed; each KICK-channel MIDI note
+triggers a fast, click-safe duck and tempo-derived recovery. Pumping is applied
+after synth FX and the output limiter, and received kick notes never alter the
+synth voice. Keep the two Seed outputs separate at the mixer; the ordinary
+EXT-only PUMP path remains on the kick Seed.
+
 When ACID or HOOVER is selected, Menu 3 provides BPF, tube/Mackie send, HPF,
 clocked delay, reverb and erosion. Press knob 2 on physical Menu 2 (or the FX
 page) to crossfade its model between Tube and Mackie; the amount is retained. Zero is an exact dry bypass for each
@@ -72,12 +98,16 @@ faster pitch movement.
 ## MIDI and wiring
 
 The shared controller constants are in `../include/SoftSynthProtocol.h`.
-CC119: 0=ACID, 127=HOOVER. CC29: incoming slide for the following note.
+MIDI channels 12/13/14 have independent voice and controller state; row 5
+uses channel 12, which also carries the kick-following notes, while other
+user-programmed synth tracks use channels 13 and 14.
+CC119: 0=ACID, 64=SCREECH, 127=HOOVER. CC29: incoming slide for the following note.
 ACID CC20–25 correspond to its six controls; CC26=drive, CC27=glide,
 CC28=output level. HOOVER CC70–75 correspond to its six controls;
 CC76=motion period (0/64/127), CC77=parallel mix, CC78=output trim.
 CC80–85 control BPF, distortion send, HPF, delay, reverb and erosion; CC86
-selects Tube (0) or Mackie (127).
+selects Tube (0) or Mackie (127). Kick channel 15 CC35/CC92 mirror the PUMP
+amount and internal-route bit for the post-FX Acid/Hoover output duck.
 Velocity >=96 accents ACID. MIDI clock is 24 PPQN; Start resets motion,
 Stop releases the voice and freezes phase, Continue resumes, clock dropout
 holds after one interpolated tick. All Notes Off and All Sound Off release
@@ -128,6 +158,11 @@ its stored state. The previous update could latch a large offset even with
 zero oscillator input. Retriggers preserve envelope levels and attack from
 there; accent, VCA and audible CC changes are smoothed. Oscillator phase remains
 free-running and tied notes retain their envelope continuity.
+
+The resonant feedback is now bounded just below unity, and the envelope-open
+cutoff is capped at 9 kHz. This avoids the near-Nyquist limit-cycle edge at
+extreme resonance/accent. Clocked delay returns are darker and lower in level,
+so a bright filter transient is less likely to turn into a harsh repeat stack.
 
 Run `c++ -O2 -std=c++14 tests/acid_artifacts.cpp -o /tmp/acid-artifacts && /tmp/acid-artifacts`
 for the silent-filter, retrigger, CC-transition, 32 parameter-corner and exact

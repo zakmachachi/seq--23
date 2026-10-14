@@ -1,7 +1,8 @@
 # SCREECH — resettable performance voice
 
-A third audio machine in the existing synth Seed project, MIDI channel 14,
-Audio Out 1. Menu 4 knob 1 press cycles NONE / ACID / HOOVER / SCREECH;
+A third audio machine in the existing synth Seed project. Synth lanes use MIDI
+channels 12, 13 and 14, with one mono voice and channel-local controls. Audio
+Out 1. Menu 4 knob 1 press cycles NONE / ACID / HOOVER / SCREECH;
 pattern-machine selection remains independent. Kick firmware is separate.
 
 ## Controls on Menu 2

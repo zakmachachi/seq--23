@@ -5,8 +5,8 @@
 #include <string.h>
 
 namespace {
-constexpr uint8_t CC[] = {90,91,92,93,30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,37,38,39};
-constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51,37,38,39,93};
+constexpr uint8_t CC[] = {90,91,92,93,30,31,32,33,34,35,36,40,41,42,43,44,45,46,47,48,49,50,51,52,37,38,39,78};
+constexpr uint8_t PARAM_CC[] = {30,31,32,33,34,35,36,40,42,44,45,46,48,49,51,37,38,39,93,78};
 static_assert(sizeof(PARAM_CC)==KickPerformance::PARAM_COUNT, "Missing parameter CC");
 static_assert(sizeof(CC)==KickPerformance::CC_SLOTS, "CC table and pending slots differ");
 constexpr uint8_t STUT_VALUES[] = {16,48,80,112};
@@ -43,7 +43,7 @@ void KickPerformance::begin(SendCC send, void* context){
 KickPerformance::Parameter KickPerformance::assignment(uint8_t knob) const {
   if(fxMenu_) return knob==5 && functionHeld_ ? EROSION_FREQ : fxAssignment(knob);
   switch (knob){
-    case 0: return PARAM_COUNT; // Effects now live on the dedicated FX menu.
+    case 0: return SWEEP;
     case 1: return DECAY;
     case 2: return TAIL;
     case 3: return (Parameter)(BPF1 + state_.editedBpfLayer);
@@ -64,6 +64,7 @@ uint8_t& KickPerformance::position(Parameter p){
     case EROSION: return erosion_;
     case EROSION_FREQ: return erosionFrequency_;
     case PITCH: return pitch_;
+    case SWEEP: return *sweepTime_;
     case DECAY: return state_.decay;
     case TAIL: return state_.tailDelayAmount;
     case BPF1: case BPF2: case BPF3: return state_.bpfFrequencyValue[p - BPF1];
@@ -420,6 +421,10 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
     else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
   } else if (p == TAIL) snprintf(out,size,compact ? "%.1fS" : "%.2f STEP",2.f*v/127.f);
+  else if (p == SWEEP){
+    float ms = kickdaisy::sweepMs(state_.kickShape,v);
+    snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
+  }
   else if(p==EROSION_FREQ) frequencyText(out,size,80.f*powf(150.f,v/127.f),compact);
   else if (p >= BPF1 && p <= BPF3) frequencyText(out,size,frequency(p,v),compact);
   else if ((p == DELAY || p == REVERB || p == BITCRUSH || p == EROSION) && v == 0) snprintf(out,size,"OFF");
@@ -433,7 +438,7 @@ void KickPerformance::drawOverview(Adafruit_SH1106G& d){
     int x = (k % 3) * 43, y = (k / 3) * 32;
     Parameter p = assignment(k);
     char title[12], value[16], secondary[12] = {};
-    if (k == 0) snprintf(title,sizeof(title),"FX >");
+    if (k == 0) snprintf(title,sizeof(title),"SWEEP");
     else if (k == 1){
       snprintf(title,sizeof(title),"DECAY");
       snprintf(secondary,sizeof(secondary),"R %s",state_.reverseEnabled ? "ON" : "OFF");
@@ -460,6 +465,13 @@ void KickPerformance::drawOverview(Adafruit_SH1106G& d){
 void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
   uint8_t v = position(p);
   float x = v/127.f;
+  if (p == SWEEP){
+    int px = LEFT + (RIGHT-LEFT)*v/127;
+    d.drawFastHLine(LEFT,GRAPH_BOTTOM,RIGHT-LEFT+1,SH110X_WHITE);
+    d.drawFastVLine(px,GRAPH_TOP+2,GRAPH_BOTTOM-GRAPH_TOP-1,SH110X_WHITE);
+    d.fillTriangle(px-2,GRAPH_TOP,px+2,GRAPH_TOP,px,GRAPH_TOP+4,SH110X_WHITE);
+    return;
+  }
   if (p == STUT || p == LOOP){
     const RepeatState& r = p == STUT ? state_.stutter : state_.looper;
     uint8_t count = p == STUT ? STUT_DIVISIONS : LOOP_DIVISIONS;
@@ -480,21 +492,51 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
     return;
   }
   if (p >= BPF1 && p <= BPF3){
-    // All bands share the same logarithmic x-axis. Separate label lanes keep
-    // coincident stored frequencies readable on a monochrome panel.
-    d.drawFastHLine(LEFT,GRAPH_BOTTOM,RIGHT-LEFT+1,SH110X_WHITE);
-    for (uint8_t i = 0; i < 3; ++i){
-      int mx = marker(state_.bpfFrequencyValue[i]), y = 25+i*8;
-      bool enabled = i < state_.bpfLayerCount;
-      for (int py = y+7; py < GRAPH_BOTTOM; py += enabled ? 1 : 3)
-        d.drawPixel(mx,py,SH110X_WHITE);
-      char text[4]; snprintf(text,sizeof(text),"L%u",i+1);
-      int tx = constrain(mx-6,3,113);
-      if (i == state_.editedBpfLayer) d.drawRect(tx-1,y-1,14,9,SH110X_WHITE);
-      if (enabled){
-        d.fillRect(tx,y,12,7,SH110X_WHITE); d.setTextColor(SH110X_BLACK);
+    // Plot the combined broad mid peaks on the same logarithmic 85 Hz..3.2
+    // kHz axis as the controls. Active layers are solid; the edited stored
+    // layer remains dotted when it is currently bypassed.
+    constexpr int plotTop=24, plotBottom=49;
+    constexpr float pixelsPerOctave=(RIGHT-LEFT)/5.235f; // log2(3200/85)
+    const uint8_t count=state_.bpfLayerCount>3?3:state_.bpfLayerCount;
+    const uint8_t edited=state_.editedBpfLayer>2?2:state_.editedBpfLayer;
+    auto responseAt=[&](int px,uint8_t layer){
+      const float delta=(float(px-marker(state_.bpfFrequencyValue[layer])))/(.62f*pixelsPerOctave);
+      return expf(-.5f*delta*delta);
+    };
+    d.drawFastHLine(LEFT,plotBottom,RIGHT-LEFT+1,SH110X_WHITE);
+
+    int previousY=-1;
+    for(int px=LEFT;px<=RIGHT;++px){
+      float response=0.f;
+      for(uint8_t i=0;i<count;++i)response+=responseAt(px,i);
+      if(response>1.f)response=1.f;
+      const int y=plotBottom-(int)(response*(plotBottom-plotTop)+.5f);
+      if(response>.015f){
+        if(previousY>=0)d.drawLine(px-1,previousY,px,y,SH110X_WHITE);
+        else d.drawPixel(px,y,SH110X_WHITE);
       }
-      label(d,tx,y,text); d.setTextColor(SH110X_WHITE);
+      previousY=response>.015f?y:-1;
+    }
+
+    if(count==0||edited>=count){
+      for(int px=LEFT;px<=RIGHT;px+=2){
+        const float response=responseAt(px,edited)*.72f;
+        if(response>.05f){
+          const int y=plotBottom-(int)(response*(plotBottom-plotTop)+.5f);
+          d.drawPixel(px,y,SH110X_WHITE);
+        }
+      }
+    }
+
+    // Frequency landmarks and all three layer centres stay visible, including
+    // disabled layers. The selected layer gets a clear caret at its centre.
+    static constexpr uint8_t TICKS[]={30,62,86,111};
+    for(uint8_t tick:TICKS){int x=marker(tick);d.drawFastVLine(x,plotBottom+1,2,SH110X_WHITE);}
+    for(uint8_t i=0;i<3;++i){
+      const int x=marker(state_.bpfFrequencyValue[i]);
+      if(i<count)d.drawFastVLine(x,plotBottom-2,3,SH110X_WHITE);
+      else for(int y=plotBottom-2;y<plotBottom+1;y+=2)d.drawPixel(x,y,SH110X_WHITE);
+      if(i==edited)d.fillTriangle(x-3,plotTop-1,x+3,plotTop-1,x,plotTop+3,SH110X_WHITE);
     }
     return;
   }
@@ -535,8 +577,19 @@ void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
     } else if (p == DECAY){
       amplitude = expf(-t/(.025f+.7f*x*x));
     } else if (p == TAIL){
-      float start = .08f+.65f*x;
-      amplitude = t < .015f ? 1.f : t < start ? 0.f : .8f*expf(-(t-start)*12.f);
+      float downStart = .22f, downWidth = .08f;
+      float gapWidth = .08f + .34f*powf(x,1.7f);
+      float upWidth = .24f;
+      float elapsed = t-downStart;
+      float dip = 0.f;
+      if (elapsed >= 0.f && elapsed < downWidth)
+        dip = smoothstep(elapsed/downWidth);
+      else if (elapsed >= downWidth && elapsed < downWidth+gapWidth)
+        dip = 1.f;
+      else if (elapsed >= downWidth+gapWidth && elapsed < downWidth+gapWidth+upWidth)
+        dip = 1.f-smoothstep((elapsed-downWidth-gapWidth)/upWidth);
+      float depth = state_.tailDelayEnabled ? .82f*sqrtf(x) : 0.f;
+      amplitude = 1.f-depth*dip;
     } else if (p == SHAPE){
       // Illustrate depth only; actual time is set by Menu 1 SWEEP.
       amplitude = (log2f(kickdaisy::shapeStartRatio(x))/4.f)*expf(-t*8.f);
@@ -555,12 +608,13 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
     d.setTextWrap(true); d.display(); return;
   }
   Parameter p = assignment(focus_.knob);
-  if(p==PARAM_COUNT){label(d,10,12,"FX ON MENU 3");label(d,4,36,"SIX EFFECT CONTROLS");d.display();return;}
+  if(p==PARAM_COUNT){label(d,10,12,"NO CONTROL");d.display();return;}
   uint8_t v = position(p); float x = v/127.f;
   char title[22], value[22], footer[22] = {}, extra[22] = {};
   if(p==EROSION)snprintf(title,sizeof(title),"EROSION");
   else if(p==EROSION_FREQ)snprintf(title,sizeof(title),"EROSION FREQUENCY");
   else if (p == BITCRUSH) snprintf(title,sizeof(title),"BITCRUSH");
+  else if (p == SWEEP) snprintf(title,sizeof(title),"PITCH SWEEP TIME");
   else if (p <= REVERB) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
   else if (p == DECAY) snprintf(title,sizeof(title),"DECAY");
   else if (p == TAIL) snprintf(title,sizeof(title),"TAIL DELAY");
@@ -592,9 +646,10 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   } else if (p == BITCRUSH){
     snprintf(footer,sizeof(footer),"%.1f BIT  WET %u%%",16.f-14.f*x,percent(v));
   } else if (p == DECAY) snprintf(footer,sizeof(footer),"REV %s",state_.reverseEnabled ? "ON" : "OFF");
+  else if (p == SWEEP) snprintf(footer,sizeof(footer),"18 - 200 ms");
   else if (p == TAIL){
-    unsigned ms = (unsigned)(60000.f/(bpm ? bpm : 120)*.5f*x+.5f);
-    snprintf(footer,sizeof(footer),"%u ms  %s",ms,state_.tailDelayEnabled ? "ON" : "OFF");
+    unsigned ms = (unsigned)(kickdaisy::tailDelayMs(v,bpm)+.5f);
+    snprintf(footer,sizeof(footer),"GAP %ums PUMP %s",ms,state_.tailDelayEnabled ? "ON" : "OFF");
   } else if (p <= BPF3) snprintf(footer,sizeof(footer),"85Hz ------ 3.2kHz");
   else if (p == MACKIE || p == TUBE){
     unsigned pct = percent(v);
@@ -623,7 +678,9 @@ void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus
   if (idle != idleShown_) dirty_ = true;
   // TAIL shows milliseconds at the current tempo; nothing on the FX page does.
   if (!fxMenu_ && focus_.knob == 2 && bpm != renderedBpm_) dirty_ = true;
-  if (rendered_ && (uint32_t)(now-lastFrameMs_) < 40) return;
+  // Both OLED frames are blocking I2C transfers. Ten frames per second keeps
+  // enough foreground time for matrix scanning and control handling.
+  if (rendered_ && (uint32_t)(now-lastFrameMs_) < 100) return;
   if (dirty_) {
     drawOverview(overview);
     if (focus) drawFocus(*focus,bpm);
@@ -660,6 +717,13 @@ void KickPerformance::restoreFx(const FxState& state){
   resetMask_=0;queueResetMask();queue(92,fx_.routes);
   for(auto& p:physical_)p=PhysicalPot{};
   dirty_=true;flushMidi();
+}
+void KickPerformance::setInternalOnlyReverb(){
+  // CC92 bit 1 enables internal reverb; bit 4 suppresses the external return.
+  fx_.routes |= 18u;
+  queue(92,fx_.routes);
+  dirty_=true;
+  flushMidi();
 }
 void KickPerformance::restorePendingResets(uint16_t mask){
   if(!mask)return;
@@ -714,9 +778,10 @@ void KickPerformance::drawFxOverview(Adafruit_SH1106G& d){
 void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
   d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
   if(idle){
-    label(d,0,0,"PADS: 1/9 KICK");
+    label(d,0,0,"KICK: 1 / 9 / 10");
     for(uint8_t i=0;i<8;++i){
-      char text[12];snprintf(text,sizeof(text),"%u/%u %.4s",i+1,i+9,heldfx::Name(i));
+      char text[13];if(i==1)snprintf(text,sizeof(text),"TOY2 RAT10");
+      else snprintf(text,sizeof(text),"%u/%u %.4s",i+1,i+9,heldfx::Name(i));
       label(d,(i%2)*64,12+(i/2)*10,text);
     }
     label(d,0,56,"1-8:BAR  9-16:BEAT");
@@ -765,12 +830,12 @@ void KickPerformance::setHeldFx(uint8_t selection,uint16_t held,uint32_t now){
   heldFxMask_=held;
 }
 void KickPerformance::renderHeldFx(Adafruit_SH1106G& d,uint32_t bpm,uint32_t now){
-  if(!heldFx_ || uint32_t(now-heldFxFrame_)<40)return;
+  if(!heldFx_ || uint32_t(now-heldFxFrame_)<100)return;
   heldFxFrame_=now;
   unsigned mode=(heldFx_-1)%8;bool fast=heldFx_>8;
   d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
-  char title[22];snprintf(title,sizeof(title),"HOLD %u / %s",heldFx_,mode==heldfx::HPF_REPEAT?"KICK ONLY":"EXT ONLY");label(d,0,0,title);
-  label(d,0,12,heldfx::Name(mode),2);
+  char title[22];snprintf(title,sizeof(title),"HOLD %u / %s",heldFx_,(mode==heldfx::HPF_REPEAT || heldFx_==10)?"KICK ONLY":"EXT ONLY");label(d,0,0,title);
+  label(d,0,12,heldFx_==10?"RATCHET":heldfx::Name(mode),2);
   float beats=float(uint32_t(now-heldFxStart_))*(bpm?bpm:120)/60000.f;
   float macro=heldfx::Gesture(beats,fast);
   d.drawRect(3,34,122,9,SH110X_WHITE);d.fillRect(4,35,int(120*macro),7,SH110X_WHITE);
@@ -778,6 +843,6 @@ void KickPerformance::renderHeldFx(Adafruit_SH1106G& d,uint32_t bpm,uint32_t now
     int x=2+int(i)*8;d.drawRect(x,47,5,4,SH110X_WHITE);
     if(heldFxMask_&(1u<<i))d.fillRect(x,47,5,4,SH110X_WHITE);
   }
-  label(d,0,56,mode==heldfx::HPF_REPEAT?(fast?"RANDOM EACH KICK":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
+  label(d,0,56,heldFx_==10?"1/4 > 1/32 / BAR":mode==heldfx::HPF_REPEAT?(fast?"BPF + 1/8 LOOP":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
   d.setTextWrap(true);d.display();
 }

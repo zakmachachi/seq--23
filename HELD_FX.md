@@ -1,35 +1,37 @@
 # Held industrial FX — SEQ23 / Seed3
 
-**When KICK is selected, the 16 step buttons are momentary FX pads on every
-screen.** They no longer edit KICK steps or invoke Function + step shortcuts.
-Other machines keep normal step editing. KICK's generated pattern, density
-controls, transport, knob FX, MIDI receiver, trigger/clock GPIO and mono outputs
-remain in place. Function edits on KICK persist without needing a step-button
-commit. Function + Erosion still controls its frequency.
+Step buttons **1, 2, 3, 4 and 11** are global momentary kick controls on every
+channel and page. Their on/off edges commit on actual MIDI-15 kick events. The
+remaining industrial FX pads are available when KICK is selected; ordinary
+step editing and Function shortcuts remain available elsewhere. Function +
+Erosion still controls its frequency.
 
 No new menu or knobs are required. OLED2 shows the held effect and gesture;
 the existing FX screen's idle view lists the pad pairs. Blue pads are bar
 builds; magenta pads are beat gestures. White marks the most recently pressed
 pad; amber marks earlier keys still held.
 
-| Bar build | Beat gesture | Effect | Transformation |
-| ---: | ---: | --- | --- |
-| 1 | 9 | HPF/RPT | Kick-only resonant HPF (100–1800 Hz) and 1/8 or 1/16 repeat; 1 holds its choice, 9 randomizes every sixteenth |
-| 2 | 10 | TOY | Tiny speaker → unstable sample clock → low-resolution, failing-battery repeats/dropouts |
-| 3 | 11 | RADIO | Narrow communication band → compressed/quantized transmission → flutter, interference and packets dropping out |
-| 4 | 12 | MEMORY | Captured fragments → displaced microloops → reversals and shortened corrupted regions |
-| 5 | 13 | METAL | Input excites six irregularly spaced resonances; size changes the object, character lengthens ringing |
-| 6 | 14 | BINARY | PCM16 bit masking → patterned XOR corruption → bounded bit permutation, keeping the sign bit intact |
-| 7 | 15 | DECAY | Preserved impact followed by progressive sample-rate/bit-depth deterioration; source transients restart degradation |
-| 8 | 16 | HAZARD | Real Geiger speaker click at irregular intervals; gesture and source level increase density |
+| Step | Held control | Behavior |
+| ---: | --- | --- |
+| 1 | KICK MUTE | Smoothly mutes the kick bus from the next kick until the first kick after release; MIDI triggers and clock continue. |
+| 2 | RANDOM KICK HPF | Chooses a held cutoff from 140–800 Hz on the first kick, then bypasses on the next kick after release. |
+| 3 | KICK +1 | Raises kick MIDI pitch by one semitone from the next kick until the first kick after release. |
+| 4 | KICK DECAY 40 ms | Temporarily selects the minimum 40 ms body decay from the next kick until the first kick after release. |
+| 5–8, 12–16 | INDUSTRIAL FX | Existing bar-build and beat gestures on external audio. Step 12 is MEMORY; 5/13 METAL, 6/14 BINARY, 7/15 DECAY, 8/16 HAZARD. |
+| 9 | BPF + LOOP | Holds the random three-layer kick BPF and eighth-note loop. |
+| 10 | RATCHET | Internal kick retriggers accelerate 1/4 → 1/8 → 1/16 → 1/32 across one bar. |
+| 11 | KICK HPF RISE | Starts from HPF off, rises by kick steps to 800 Hz while held, and returns to off at the first kick after release. |
 
-Pads 2–8 rise over four quarter notes and hold their strongest character until
-released. Pads 10–16 repeat a shaped gesture each quarter note. These durations
-are independent of pattern length and follow the existing MIDI BPM estimate.
+The five dedicated kick controls are independent of the channel/page selection.
+Their quantization uses actual MIDI-15 kick events, so holding or releasing
+between kicks never changes the kick mid-hit.
 
-Pressing another pad selects it at the next boundary. Releasing it returns to
-an earlier held pad, restarting that gesture at the next boundary. Only one
-algorithm runs at a time. Releasing the final pad fades to the ordinary external
+The external effects retain latest-held priority: pressing another external pad
+selects it at the next boundary, and releasing returns to the preceding held pad.
+Steps 1, 9 and 10 are independent kick controls, so mute + BPF/loop + ratchet
+can be held together in any press order. Pad 9 starts/stops on a kick or quarter boundary; pad 10
+starts on that boundary and stops retriggering on release. Its bar has 15 hits
+(1 + 2 + 4 + 8); coincident ordinary kick triggers merge into one hit. Releasing the final pad fades to the ordinary external
 FX chain over 8 ms. Changing effects fades the old one out over 8 ms, then the
 new one in over 12 ms; there is no buffer clearing/allocation during that switch.
 
@@ -56,12 +58,16 @@ block precede the actual boundary commit.
 Existing external pump/repeat/filter, pitch, reverb, bitcrush and Erosion
 processing → **held FX** → existing mono mixer/glue/ceiling.
 
-Pads 1/9 exclusively process the generated kick before the mono mixer. A fixed
-32768-sample ring captures the preceding kick fragment; playback freezes that
-capture, without feedback or pitch-changing delay interpolation. Very early
-presses without enough history apply the HPF to live kick until released.
-Other pads affect only the external lane. The shared output glue still responds
-to their combined level. HAZARD may generate clicks with silent external input.
+Pad 9 takes over the generated kick's three BPF layers temporarily and
+captures the first eighth of a fresh kick in a fixed 32768-sample buffer and
+repeats it at unity rate, using a 2 ms wrap overlap and 8 ms entrance/release
+fades. Pad 10 uses the normal internal kick trigger path, preserving the voice's
+phase reset and retrigger bridge. It does not send extra MIDI or Eurorack pulses.
+Other pads affect the external lane. The shared output glue still responds to
+their combined level. HAZARD may generate clicks with silent external input.
+
+The continuous FX-page crusher now spans 16 to 4 bits (about 9.4 bits at 30%)
+and blends up to 80% wet, keeping quiet tails from disappearing completely.
 
 If repeated audio callbacks consume over 90% of their deadline, the firmware
 suspends the held processor and fades its last contribution away. Keepalives
@@ -100,8 +106,9 @@ All CCs use **channel 15**; the existing receiver and its USART3 IRQ are unchang
 | 83 | SIZE | 0–127, default 64; cavity scale, fragment length or degradation/release time, depending on effect |
 | 84 | MIX | 0–127, default 112; smoothed dry/wet blend |
 | 85 | Held-state keepalive | Any value; send at least every 200–500 ms while holding |
+| 86 | Independent kick layers | Bit 0: pad 1 BPF; bit 1: pad 9 BPF/loop; bit 2: pad 10 ratchet; 0 clears |
 
-The Teensy sends pad selection and keepalive; the other four CCs are optional
+The Teensy sends external pad selection, absolute kick-layer bits and keepalive; the other four CCs are optional
 external-sequencer overrides, not newly assigned knobs. They are global to this
 held subsystem, default at Seed startup and are not saved as latched effects.
 Repeated CC80 restarts/requeues a gesture; use CC85 to sustain it instead.
@@ -119,23 +126,22 @@ Repeated CC80 restarts/requeues a gesture; use CC85 to sustain it instead.
 - Existing `SimpleSequencer`, `KickPerformance`, `KickMixer` and
   `midi_oled_monitor.cpp` provide the button/display/MIDI/audio integration.
 
-The new engine uses about **261 KiB of SDRAM**, mostly a 65,536-sample mono
+The new engine uses about **385 KiB of SDRAM**, mostly a 65,536-sample mono
 history (1.37 seconds). It introduces no large per-switch clears, callback heap
 allocations, blocking calls, FFTs or parallel algorithm stack. Filter tuning runs
-at 250 Hz; DECAY's expensive mapping updates every 32 samples. BANE, RADIO and
+at 250 Hz; DECAY's expensive mapping updates every 32 samples. RADIO and
 HAZARD are the main extra CPU candidates; MEMORY/BINARY are lighter. Existing
 `audio_max_cycles` and `audio_overruns` instrument the entire Seed callback.
 Host timings do **not** establish a Seed CPU percentage: profile on hardware
 with the heaviest existing Mackie/FX settings before relying on every combination.
 
-Deliberate approximations: BANE uses formants/ring/comb instead of adding another
-pitch shifter; METAL uses six modal filters rather than physical modelling;
+Deliberate approximations: METAL uses six modal filters rather than physical modelling;
 MEMORY is a bounded, crossfaded glitch sampler, not transparent time stretching.
 Its variable delays and the intentional resonances are coloration, not a promise
 of phase-transparent wet/dry mixing. The hardware's existing mono architecture is
 preserved. CHIPMUNK and NIGHTCORE are excluded as requested.
 
-Tune by ear first: BANE/RADIO level and intensity (CC81/84), METAL object size
+Tune by ear first: RADIO level and intensity (CC81/84), METAL object size
 (CC83), MEMORY fragment length (CC83), DECAY degradation time (CC83), and HAZARD
 activity (CC81/82). The defaults favour controlled levels; the procedural layer
 is intentionally quieter than the original audio.
@@ -143,7 +149,7 @@ is intentionally quieter than the original audio.
 ## Validation
 
 `bash test/held_fx/run.sh` checks priority, release ownership, retries, disconnect
-lease, causal quantization, Stop, all 16 gestures, macro endpoints, finite bounded
+lease, causal quantization, Stop, legacy gestures, stacked kick layers, exact ratchet timing, loop continuity, macro endpoints, finite bounded
 output, circular-buffer wrapping, exact release and preserved DECAY attack under
 ASan/UBSan. `bash test/held_fx/integration.sh` exercises the production MIDI
 parser/audio callback, clock/kick start, GPIO continuity and per-pad isolation.

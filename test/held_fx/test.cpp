@@ -35,6 +35,51 @@ int main(){
     buttons.Service(210);assert(sender.sent.back()==std::make_pair(int(KEEPALIVE),127));
     buttons.Clear();assert(buttons.Release(2)&&buttons.Selected()==0);
 
+    // Independent kick layers must survive either ordering with HAZARD.
+    buttons.Clear();buttons.Service(211);sender.sent.clear();
+    buttons.Press(7);buttons.Press(9);buttons.Press(0);buttons.Service(212);
+    bool hazardSelected=false,stacked=false;
+    for(auto message:sender.sent){
+        hazardSelected|=message==std::make_pair(int(SELECT),8);
+        stacked|=message==std::make_pair(int(LAYERS),int(BPF_HELD|RATCHET));
+    }
+    assert(hazardSelected && stacked);
+    buttons.Release(9);buttons.Service(213);
+    assert(sender.sent.back()==std::make_pair(int(LAYERS),int(BPF_HELD)));
+    buttons.Clear();buttons.Service(214);
+
+    // 15 shots per bar, exactly on 1/4 -> 1/8 -> 1/16 -> 1/32 boundaries.
+    Control layers;engine.Reset();layers.Handle(LAYERS,RATCHET|BPF_HELD,0);
+    const int expected[]={0,8,12,16,18,20,22,24,25,26,27,28,29,30,31};
+    unsigned hits=0;
+    for(unsigned n=0;n<57600;n+=2){
+        if(n%9600==0)layers.Handle(KEEPALIVE,127,n/48);
+        engine.BeginBlock(layers,n/48,true,n==0,n%14400==0,300.f,2);
+        if(engine.ratchetTrigger){
+            assert(hits<15 && std::abs(int(n)-expected[hits]*1800)<=4);++hits;
+        }
+        assert(engine.KickBpfEngaged());
+    }
+    assert(hits==15);
+    layers.Handle(LAYERS,0,1200);engine.BeginBlock(layers,1200,true,false,false,300.f,2);
+    assert(!engine.ratchetActive && !engine.ratchetTrigger && !engine.KickBpfEngaged());
+    layers.Handle(LAYERS,RATCHET|BPF_LOOP,1201);
+    engine.BeginBlock(layers,1201,true,true,true,300.f,2);
+    assert(engine.ratchetTrigger && engine.loopActive);
+    engine.BeginBlock(layers,2202,true,false,false,300.f,2);
+    assert(!engine.ratchetActive && !engine.loopActive); // disconnected controller
+
+    // Eighth-note period, no extra pitch/filtering, bounded splice discontinuity.
+    KickRepeatFx loop;loop.Start(.3f);float prior=0,maxJump=0;
+    std::vector<float> output;
+    for(int i=0;i<30000;++i){
+        float x=.4f*sinf(i*.0347f);float y=loop.Process(x);
+        assert(std::isfinite(y));if(i>1)maxJump=fmaxf(maxJump,fabsf(y-prior));
+        prior=y;output.push_back(y);
+    }
+    assert(loop.length==7200 && maxJump<.04f);
+    for(int i=16000;i<22000;++i)assert(fabsf(output[i]-output[i+7200])<1e-6f);
+
     // No start before a quantization edge; cancel before edge never sounds.
     Control c;engine.Reset();c.Handle(SELECT,1,0);Block(c,0);
     for(int i=0;i<16;++i)assert(engine.Process(.1f)==.1f);

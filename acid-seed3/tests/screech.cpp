@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <vector>
 using namespace synth;
-void CC(Engine& e,unsigned c,unsigned v){e.Midi(0xbd);e.Midi(c);e.Midi(v);}
-void On(Engine& e,unsigned n,unsigned v){e.Midi(0x9d);e.Midi(n);e.Midi(v);}
-void Off(Engine& e,unsigned n){e.Midi(0x8d);e.Midi(n);e.Midi(0);}
+void CC(Engine& e,unsigned c,unsigned v){e.Midi(0xbb);e.Midi(c);e.Midi(v);}
+void On(Engine& e,unsigned n,unsigned v){e.Midi(0x9b);e.Midi(n);e.Midi(v);}
+void Off(Engine& e,unsigned n){e.Midi(0x8b);e.Midi(n);e.Midi(0);}
 void U16(FILE* f,unsigned v){fputc(v&255,f);fputc(v>>8&255,f);}
 void U32(FILE* f,unsigned v){U16(f,v);U16(f,v>>16);}
 int main(int argc,char** argv){

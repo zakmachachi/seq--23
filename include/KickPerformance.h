@@ -7,10 +7,10 @@
 // Controller state, physical input, focus and outgoing MIDI have separate owners.
 class KickPerformance {
 public:
-  static constexpr uint8_t CC_SLOTS = 27; // one per entry of CC[] in the .cpp
+  static constexpr uint8_t CC_SLOTS = 28; // one per entry of CC[] in the .cpp
   enum Parameter : uint8_t {
     STUT, LOOP, DELAY, HPF, LPF, PUMP, REVERB, DECAY, TAIL,
-    BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, BITCRUSH, EROSION, EROSION_FREQ, PITCH, PARAM_COUNT
+    BPF1, BPF2, BPF3, MACKIE, TUBE, SHAPE, BITCRUSH, EROSION, EROSION_FREQ, PITCH, SWEEP, PARAM_COUNT
   };
   struct RepeatState {
     uint8_t position = 0;
@@ -36,6 +36,7 @@ public:
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
+  void bindSweepTime(uint8_t* value) { sweepTime_ = value; }
   void setHeldFx(uint8_t selection,uint16_t held,uint32_t now);
   void renderHeldFx(Adafruit_SH1106G& display,uint32_t bpm,uint32_t now);
   struct FxState { uint8_t repeat=0, filter=0, routes=14; }; // DLY, HPF; pump EXT, others E+I. Routes bit4: reverb INT only.
@@ -43,6 +44,7 @@ public:
   void setFunctionHeld(bool held);
   void transport(bool running, uint32_t bar);
   FxState fxState() const { return fx_; }
+  void setInternalOnlyReverb();
   void restoreFx(const FxState& state);
   bool resetPending(Parameter p) const;
   uint32_t takeResetParameters();
@@ -110,6 +112,8 @@ private:
   void drawFxFocus(Adafruit_SH1106G& display, bool idle);
 
   uint8_t erosion_=0, erosionFrequency_=64, pitch_=64;
+  uint8_t standaloneSweepTime_=64;
+  uint8_t* sweepTime_=&standaloneSweepTime_;
   uint8_t bitcrush_ = 0; // saved separately to preserve legacy EEPROM offsets
   PhysicalPot physical_[6];
   ButtonState buttons_[6];

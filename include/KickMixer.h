@@ -3,61 +3,39 @@
 #include <Arduino.h>
 #include <Adafruit_SH110X.h>
 
-// Output/mix stage of the Daisy kick. Same ownership split as KickPerformance:
-// state, physical input, focus and outgoing MIDI are separate.
+// Raw-909 back menu 2: K1 turns output gain and pushes EXT KICK source mode.
+// The six-byte patch payload stays in place for EEPROM compatibility.
 class KickMixer {
 public:
-  // DIST drives both distortion gains (Mackie CC54, Tube CC55 at their old
-  // default ratio). Pot 3 is BELLY (CC61, the old TAIL ATTACK slot): how long
-  // the punch carries the body before TAIL DELAY ducks it, 64 = 1x.
   enum Control : uint8_t { LINE, DIST, BELLY, BPF, SUB, PUNCH, CONTROL_COUNT };
-  // Flat POD so the patch can persist the page without touching privates.
   struct SavedState {
-    uint8_t value[CONTROL_COUNT] = {89,65,64,64,75,64};
+    uint8_t value[CONTROL_COUNT] = {64,65,64,64,75,64};
   };
   using SendCC = bool (*)(void*, uint8_t, uint8_t);
   void begin(SendCC send, void* context);
   void setActive(bool active);
   void invalidate(){dirty_=true;}
-  void sampleAngle(uint8_t knob, float angle); // Existing dual-track ADC angle.
+  void sampleAngle(uint8_t knob, float angle);
   void buttonEdge(uint8_t button, bool pressed, uint32_t now);
   void service(uint32_t now);
   void render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus, uint32_t now);
   void saveTo(SavedState& out) const;
-  uint8_t belly() const { return value_[BELLY]; }
-  uint8_t punch() const { return value_[PUNCH]; }
-  uint8_t sub() const { return value_[SUB]; }
+  uint8_t belly() const { return 64; }
+  uint8_t punch() const { return 127; }
+  uint8_t sub() const { return 0; }
+  bool externalKickMode() const { return externalKickMode_; }
   void restoreFrom(const SavedState& in);
 private:
-  struct PhysicalPot {
-    bool initialized = false;
-    float angle = 0;
-    float accumulated = 0; // Signed relative movement in MIDI-value units.
-  };
-  struct MidiState {
-    SendCC send = nullptr;
-    void* context = nullptr;
-    bool initialized = false;
-    bool pending[CONTROL_COUNT + 1] = {};   // + the Tube half of DIST
-    uint8_t value[CONTROL_COUNT + 1] = {};
-  };
-  uint8_t value_[CONTROL_COUNT] = {89,65,64,64,75,64};
-  void queueControl(uint8_t control);
-  void valueText(uint8_t control, char* out, size_t size) const;
-  PhysicalPot physical_[6];
-  bool buttonDown_[6] = {};
-  uint8_t focusKnob_ = 0;
-  MidiState midi_;
+  SendCC send_ = nullptr;
+  void* context_ = nullptr;
+  uint8_t legacy_values_[CONTROL_COUNT] = {64,65,64,64,75,64};
+  bool externalKickMode_ = false;
   bool active_ = false, dirty_ = true, rendered_ = false;
+  bool gainPending_ = false, buttonDown_ = false, potInitialized_ = false;
+  float potAngle_ = 0.f, potAccumulated_ = 0.f;
   uint32_t lastFrameMs_ = 0;
-
-  void queue(uint8_t cc, uint8_t value);
-  void flushMidi();
-  void snapshot();
-  void focusControl(uint8_t knob);
-  void adjust(uint8_t knob, int delta);
-  static uint8_t percent(uint8_t value);
-  void drawOverview(Adafruit_SH1106G& display);
-  void drawFocus(Adafruit_SH1106G& display);
+  void sendSource();
+  void sendOutputGain();
+  void draw(Adafruit_SH1106G& display, bool focus);
 };
 #endif

@@ -9,13 +9,13 @@ struct IndustrialFx {
     Band bands[6];
     Random rng;
     float phase=0,lp=0,hp=0,held=0,clock=0,rate=0,bits=0,drift=0;
-    float colour=0,drop=0,dropTarget=0;
+    float colour=0,drop=0,dropTarget=0,tailGain=1;
     uint32_t event=0;
     void Reset(unsigned mode){
         for(auto& b:bands)b.Reset();
         rng.Reset();
         phase=lp=hp=held=clock=drift=colour=drop=dropTarget=0;
-        rate=48000;bits=16;event=0;
+        rate=48000;bits=16;event=0;tailGain=1;
         (void)mode;
     }
     void Tune(unsigned mode,const Macro& m,float beats){
@@ -84,11 +84,12 @@ struct IndustrialFx {
         case DECAY:{
             if(event++%32==0){
                 float t=float(input.since)/SR;
-                float degrade=c*(1.f-expf(-t/(.035f+.6f*m.size)));
-                rate=48000.f*powf(2000.f/48000.f,degrade);bits=16.f-12.f*degrade;
+                float degrade=c*(1.f-expf(-t/(.012f+.10f*m.size)));
+                rate=48000.f*powf(650.f/48000.f,degrade);bits=16.f-12.f*degrade;
+                tailGain=1.f-.70f*degrade;
             }
             clock+=rate/SR;if(clock>=1.f){clock-=1.f;held=Quantize(x,bits);}
-            wet=held;break;}
+            wet=held*tailGain;break;}
         default:break;
         }
         return wet;
@@ -113,8 +114,13 @@ struct MemoryFx {
             lastStep=step;
             if(!initialized || rng.Uniform()<.20f+.80f*m.character){
                 previous=current;
-                float length=Clamp(m.quarter*SR*(.025f+.18f*m.size)*(1.f-.72f*m.character),96.f,12000.f);
-                float displacement=32.f+rng.Uniform()*23000.f*m.character;
+                // Whole clock divisions: repeats lock to sixteenths/eighths,
+                // and recalled material comes from the same rhythmic grid.
+                float grid=m.quarter*SR*.25f;
+                float length=Clamp(grid*(m.character>.70f?1.f:2.f),96.f,28800.f);
+                unsigned maxBack=unsigned((History::N-length-128.f)/grid);
+                unsigned back=unsigned(rng.Uniform()*float(maxBack+1)*m.character);
+                float displacement=32.f+float(back)*grid;
                 current={float(history.write)-length-displacement,0,length,
                     m.character>.65f && rng.Uniform()<.45f?-1.f:1.f};
                 if(current.rate<0)current.pos=length-1;

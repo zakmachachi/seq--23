@@ -83,7 +83,7 @@ Do not describe the earlier ACID draft as a validated accurate TB-303 model.
 The codec callback averages internal L/R onto Audio Out 1 and silences Audio
 Out 2. This preserves both moving BPF branches on the single connected jack.
 No channel is discarded and no extra gain is added by the mono sum. MIDI uses
-channel 14 (zero-based 13); PC11 / D1, USART3 RX matches the kick Seed wiring.
+channels 12, 13 and 14; PC11 / D1, USART3 RX matches the kick Seed wiring.
 
 ## Audio versus pattern selection and output level
 

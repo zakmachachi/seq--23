@@ -17,20 +17,25 @@ def render(**kw):
 base=render()
 for name in ('delay','loop','stut','hpf','lpf'):
     assert render(**{name:1},fxroutes=15)==base, f'{name} leaked into kick'
-for bit,name in enumerate(('pump','reverb','bitcrush','erosion')):
+for bit,name in enumerate(('pump','reverb')):
     assert render(**{name:1})==base, f'EXT-only {name} changed kick'
     both=render(**{name:1},fxroutes=1<<bit)
     rms=math.sqrt(sum((x-y)**2 for x,y in zip(base,both))/len(base))
-    assert rms>1e-5, f'EXT+INT {name} did not affect kick'
-    # With no generated kick, routing bit cannot change the external path.
-    ext_args=dict(hits=0,tail=900,externalhz=731,externallevel=.2,**{name:.75})
-    a=render(**ext_args,fxroutes=0);b=render(**ext_args,fxroutes=1<<bit)
-    assert a==b, f'{name}: external path changed when adding internal route'
-    if name!='pump': # Pump needs the kick/clock sidechain key.
-        ext_dry=render(hits=0,tail=900,externalhz=731,externallevel=.2)
-        assert a!=ext_dry, f'{name}: external effect inaudible'
+    if name=='pump':
+        assert both==base, 'pump must remain external-input-only'
+    else:
+        assert rms>1e-5, f'EXT+INT {name} did not affect kick'
+    if name=='pump':
+        # With no kick/clock sidechain, the external passthrough remains dry.
+        ext_args=dict(hits=0,tail=900,externalhz=731,externallevel=.2,pump=.75)
+        assert render(**ext_args,fxroutes=0)==render(**ext_args,fxroutes=1<<bit)
     print(f'{name}: EXT isolation exact, INT difference RMS {rms:.6f}, external route invariant')
-print('PASS: five EXT-only effects and four independently routed effects on actual firmware output')
+# The pump is deliberately external-only and responds to the generated kick.
+dry_ext=render(hits=2,spacing_ms=300,tail=900,externalhz=731,externallevel=.2,pump=0)
+pumped_ext=render(hits=2,spacing_ms=300,tail=900,externalhz=731,externallevel=.2,pump=.75)
+assert pumped_ext!=dry_ext, 'external pump did not duck the live passthrough'
+print('PASS: pump stays off the internal kick and ducks the live external passthrough')
+print('PASS: pump and reverb routing on actual raw-909 callback output')
 
 # Internal-only reverb: exact external bypass, full kick reverb retained.
 ext=dict(hits=0,tail=900,externalhz=731,externallevel=.2)

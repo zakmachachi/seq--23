@@ -4,13 +4,14 @@ Firmware built and host-tested; not uploaded by the assistant.
 
 | Signal | Seed name | Physical header pin | Behavior |
 | --- | --- | --- | --- |
-| Kick trigger | D2 / PC10 | 3 | Positive 5 ms pulse for each nonzero-velocity Note On on MIDI channel 15 |
+| Kick trigger | D12 / PB9 | 13 | Positive 5 ms pulse for each nonzero-velocity Note On on MIDI channel 15 |
 | MIDI clock | D3 / PC9 | 4 | Positive 1 ms pulse per received MIDI F8, 24 PPQN |
 | Ground | DGND | 40 | Common reference / jack sleeves |
 
 These pin assignments are free in this firmware and the user reports no other
-GPIO wiring besides MIDI RX on D1. D2 is also an optional USART3 TX pin, but
-this firmware enables USART3 RX only. Neither output is an analog audio pin.
+GPIO wiring besides MIDI RX on D1. D12 also supports alternate I2C1-SDA and
+UART4-TX functions, neither of which this firmware enables. Neither output is
+an analog audio pin.
 
 **Electrical levels:** GPIO outputs are 0–3.3 V regardless of VIN voltage.
 Use a protected, non-inverting 3.3-to-5 V trigger driver for a module that
@@ -24,9 +25,10 @@ R21 (22k) -> Q5 base, with R28 (10k) to ground. Assuming ~0.7 V base turn-on,
 the unloaded divider gives a nominal ~2.24 V onset; this is not a guaranteed
 manufacturer threshold. A 3.3 V edge should trigger the internal transistor
 pulse stage, but pulse shape, component tolerances and board revisions matter.
-A test hookup is D2 through 1k to the TRIG jack tip, DGND to sleeve. The added
-1k raises that nominal estimate to ~2.31 V. Use TRIG, not ACCENT. A buffered
-5 V pulse provides extra margin if 3.3 V gives weak or missed hits.
+For a test hookup, connect D12 through 1k to the TRIG jack tip and DGND to
+sleeve; use TRIG, not ACCENT. The added 1k raises the estimated onset to
+~2.31 V. A buffered 5 V pulse provides extra margin if 3.3 V gives weak or
+missed hits.
 
 Sources:
 - [Seed3 datasheet, pin functions/electrical specifications](https://daisy.nyc3.cdn.digitaloceanspaces.com/products/seed3/Daisy_Seed3_datasheet.pdf)

@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <vector>
 using namespace synth;
-void CC(Engine& e,int cc,int v){e.Midi(0xbd);e.Midi(cc);e.Midi(v);}
-void On(Engine& e,int note,int velocity){e.Midi(0x9d);e.Midi(note);e.Midi(velocity);}
-void Off(Engine& e,int note){e.Midi(0x8d);e.Midi(note);e.Midi(0);}
+void CC(Engine& e,int cc,int v){e.Midi(0xbb);e.Midi(cc);e.Midi(v);}
+void On(Engine& e,int note,int velocity){e.Midi(0x9b);e.Midi(note);e.Midi(velocity);}
+void Off(Engine& e,int note){e.Midi(0x8b);e.Midi(note);e.Midi(0);}
 void U16(FILE* f,unsigned x){fputc(x&255,f);fputc((x>>8)&255,f);}
 void U32(FILE* f,unsigned x){U16(f,x);U16(f,x>>16);}
 void Wav(const char* path,const std::vector<float>& a){

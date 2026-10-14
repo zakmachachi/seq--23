@@ -8,12 +8,13 @@ namespace heldfx {
 // Existing USART implementation is untouched. SELECT carries absolute held state;
 // keepalives renew a lease so a missing release/disconnected controller fades dry.
 struct Control {
-    volatile uint32_t request=0,lastRx=0;
+    volatile uint32_t request=0,lastRx=0,layerRequest=0;
     volatile uint8_t character=DEFAULT_CHARACTER,motion=DEFAULT_MOTION,size=DEFAULT_SIZE,mix=DEFAULT_MIX;
     bool Handle(uint8_t cc,uint8_t value,uint32_t now){
         switch(cc){
         case SELECT:lastRx=now;request=((request+256u)&~255u)|(value<=16?value:0);return true;
         case KEEPALIVE:lastRx=now;return true;
+        case LAYERS:lastRx=now;layerRequest=((layerRequest+256u)&~255u)|(value&7u);return true;
         case CHARACTER:character=value;return true;
         case MOTION:motion=value;return true;
         case SIZE:size=value;return true;
@@ -42,18 +43,64 @@ struct Engine {
     Random bpfRng;
     float kickBpfHz[3]={330.f,700.f,1450.f};
     bool kickBpfSet=false;
+    uint8_t layers=0;
+    uint32_t blockedLayers=~0u,blockedSelect=~0u,lastLayerRequest=0;
+    bool loopActive=false,ratchetActive=false,ratchetTrigger=false;
+    float loopGain=0,ratchetPhase=0,ratchetNext=0,ratchetError=0;
+    void UpdateLayers(const Control& control,bool expired,bool stop,bool running,
+                      bool kick,bool edge,unsigned frames){
+        if(stop || expired){blockedLayers=control.layerRequest;blockedSelect=control.request;}
+        if(control.layerRequest!=lastLayerRequest){
+            lastLayerRequest=control.layerRequest;
+            if(uint8_t(lastLayerRequest)==0 && uint8_t(control.request)==0)suspended=false;
+        }
+        layers=expired || suspended || control.layerRequest==blockedLayers?0:uint8_t(control.layerRequest);
+        if(suspended || control.request==blockedSelect)controlRequest=0;
+        const bool loopWanted=(layers&BPF_LOOP) || controlRequest==9;
+        if(loopWanted!=loopActive && (expired || stop || !running || kick || edge)){
+            loopActive=loopWanted && !expired && !stop;
+            if(loopActive)repeat.Start(quarter);
+        }
+        const bool ratchetWanted=(layers&RATCHET)!=0;
+        ratchetTrigger=false;
+        if(!ratchetWanted){ratchetActive=false;ratchetPhase=ratchetNext=ratchetError=0;}
+        else if(!ratchetActive){
+            if(kick || edge || !running){
+                ratchetActive=true;ratchetPhase=ratchetError=0;ratchetNext=1;ratchetTrigger=true;
+            }
+        }else{
+            // One bar: quarter, eighth, sixteenth, thirty-second. Independent
+            // of the selected external effect; normal coincident hits merge.
+            if(edge){ratchetPhase=floorf(ratchetPhase+.5f);ratchetError=0;}
+            if(ratchetPhase>=4.f){ratchetPhase-=4.f;ratchetNext-=4.f;}
+            if(ratchetPhase+float(frames)*.5f/(quarter*SR)>=ratchetNext){
+                ratchetTrigger=true;
+                float interval=ratchetNext<1.f?1.f:ratchetNext<2.f?.5f:ratchetNext<3.f?.25f:.125f;
+                ratchetNext+=interval;
+            }
+        }
+        if(ratchetActive){
+            // Compensated float accumulation avoids drift at small audio blocks.
+            float step=float(frames)/(quarter*SR)-ratchetError;
+            float nextPhase=ratchetPhase+step;
+            ratchetError=(nextPhase-ratchetPhase)-step;ratchetPhase=nextPhase;
+        }
+    }
     float emergencyOffset=0,lastDelta=0;
     bool emergencyKick=false;
     void Suspend(){
-        if(!active || suspended)return;
+        if((!active && !loopActive && !ratchetActive && !layers) || suspended)return;
         suspended=true;emergencyOffset=lastDelta;emergencyKick=active==1 || active==9;
-        pending=next=active=0;gain=0;fadingOut=false;++faults;
+        pending=next=active=0;gain=0;fadingOut=false;
+        loopActive=ratchetActive=ratchetTrigger=false;layers=0;++faults;
     }
 
     void Reset(){
         history.Reset();industrial.Reset(0);memory.Reset();hazard.Reset();analysis.Reset();
         repeat.Reset();suspended=false;releasePending=false;emergencyOffset=lastDelta=0;emergencyKick=false;
         controlRequest=0;bpfRng.Reset();kickBpfSet=false;
+        layers=0;lastLayerRequest=0;blockedLayers=blockedSelect=~0u;loopActive=ratchetActive=ratchetTrigger=false;
+        loopGain=ratchetPhase=ratchetNext=ratchetError=0;
         macro={};lastRequest=pendingSamples=controlCounter=0;pending=active=next=0;
         fadingOut=wasRunning=false;gain=beats=dcIn=dcOut=0;quarter=.5f;
         targetCharacter=targetMotion=targetSize=targetMix=0;faults=0;
@@ -63,7 +110,10 @@ struct Engine {
         quarter=Clamp(quarterMs*.001f,.12f,1.2f);
         uint32_t command=control.request;
         bool expired=uint32_t(now-control.lastRx)>LEASE_MS;
-        if(wasRunning && !running){pending=next=0;fadingOut=true;lastRequest=command;}
+        const bool stopped=wasRunning && !running;
+        if(stopped){pending=next=0;fadingOut=true;lastRequest=command;}
+        if(expired)controlRequest=0;
+        UpdateLayers(control,expired,stopped,running,kick,quarterEdge,frames);
         wasRunning=running;
         // Re-anchor the gesture to actual MIDI quarter edges; smoothing absorbs
         // small timing corrections without read-head or parameter discontinuities.
@@ -97,7 +147,7 @@ struct Engine {
     }
     bool KickBpfForKick(bool kick){
         if(!kick || suspended)return false;
-        uint8_t command=uint8_t(controlRequest);
+        uint8_t command=(loopActive || (layers&BPF_LOOP))?9:(layers&BPF_HELD)?1:uint8_t(controlRequest);
         if(command!=1 && command!=9){kickBpfSet=false;return false;}
         if(command==9 || !kickBpfSet){
             float centre=120.f+2680.f*bpfRng.Uniform();
@@ -108,13 +158,12 @@ struct Engine {
         }
         return true;
     }
-    bool KickBpfEngaged() const { return controlRequest==1 || controlRequest==9 || releasePending; }
+    bool KickBpfEngaged() const { return loopActive || (layers&(BPF_HELD|BPF_LOOP)) || controlRequest==1 || controlRequest==9 || releasePending; }
     void Activate(){
         active=next;next=0;beats=0;controlCounter=0;dcIn=dcOut=0;macro.character=0;
         if(active){
             unsigned mode=(active-1)%MODE_COUNT;
-            if(mode==HPF_REPEAT)repeat.Start(quarter);
-            else if(mode==MEMORY)memory.Reset();else if(mode==HAZARD)hazard.Reset();else industrial.Reset(mode);
+            if(mode==MEMORY)memory.Reset();else if(mode==HAZARD)hazard.Reset();else industrial.Reset(mode);
         }
         fadingOut=false;
     }
@@ -129,7 +178,11 @@ struct Engine {
         }
         if(suspended)return input;
         history.Push(input);analysis.Process(input);
-        if(active!=1 && active!=9)repeat.Capture(kick?*kick:input);
+        loopGain=Clamp(loopGain+(loopActive?1.f:-1.f)/384.f,0.f,1.f);
+        if(kick && (loopActive || loopGain>0.f)){
+            float looped=repeat.Process(*kick);
+            *kick+=(looped-*kick)*loopGain;
+        }
         if(fadingOut){gain=fmaxf(0.f,gain-1.f/384.f);if(gain==0.f)Activate();}
         else if(active)gain=fminf(1.f,gain+1.f/576.f);
         if(!active)return input;
@@ -139,6 +192,8 @@ struct Engine {
         if(mode==HPF_REPEAT && kick)input=*kick;
         bool fast=active>MODE_COUNT;
         float character=Gesture(beats,fast)*targetCharacter;
+        if(mode==RADIO)character*=.80f;
+        if(mode==BINARY)character*=.85f;
         // 25 ms smoothing of all externally controllable continuous parameters.
         macro.character+=(character-macro.character)*.000833f;
         macro.motion+=(targetMotion-macro.motion)*.000833f;
@@ -164,6 +219,17 @@ struct Engine {
         lastDelta=(ac-input)*mix;
         if(mode==HPF_REPEAT)return external;
         return input+lastDelta;
+    }
+    // The raw kick path uses only the clocked kick looper. This keeps its
+    // capture/crossfade alive without running the unrelated external-pad DSP.
+    float ProcessKick(float kick){
+        if(suspended)return kick;
+        loopGain=Clamp(loopGain+(loopActive?1.f:-1.f)/384.f,0.f,1.f);
+        if(loopActive || loopGain>0.f){
+            float looped=repeat.Process(kick);
+            kick+=(looped-kick)*loopGain;
+        }
+        return kick;
     }
 };
 }

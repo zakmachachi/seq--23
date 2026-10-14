@@ -1,7 +1,26 @@
 #pragma once
 #include <stdint.h>
 namespace softsynth {
-constexpr uint8_t CHANNEL=13; // wire channel 14; kick is wire channel 15
+// Teensy row 5 is the editable synth voice on MIDI 12; the kick follower also
+// uses this voice on its offbeats. Other synth lanes use MIDI 13 and 14
+// (zero-based 12/13); the kick remains on MIDI channel 15.
+constexpr uint8_t CHANNEL=11;
+constexpr uint8_t CHANNEL_B=12;
+constexpr uint8_t CHANNEL_C=13;
+constexpr uint8_t CHANNEL_COUNT=3;
+constexpr uint8_t USER_CHANNEL_FIRST=CHANNEL_B;
+constexpr uint8_t USER_CHANNEL_LAST=CHANNEL_C;
+inline int8_t VoiceIndex(uint8_t channel){
+    return channel==CHANNEL?0:channel==CHANNEL_B?1:channel==CHANNEL_C?2:-1;
+}
+constexpr uint8_t KICK_CHANNEL=14;
+// Kick Seed next-hit packet. CC 110..114 stage one complete kick preset;
+// CC 115 commits it atomically for the next MIDI kick trigger.
+constexpr uint8_t KICK_NEXT_PITCH=110, KICK_NEXT_DECAY=111,
+                  KICK_NEXT_SHAPE=112, KICK_NEXT_SWEEP=113,
+                  KICK_NEXT_TAIL=114, KICK_NEXT_COMMIT=115;
+constexpr uint8_t KICK_PUMP_AMOUNT=35; // shared KICK FX-menu PUMP macro
+constexpr uint8_t KICK_FX_ROUTES=92;   // bit 0 enables the internal pump route
 constexpr uint8_t ENGINE=119, SLIDE=29, HOOVER_BASE=70, PERIOD=76, BAND_MIX=77, LEVEL=78;
 constexpr uint8_t FX_BASE=80; // BPF, tube send, HPF, delay, reverb, tracking erosion
 constexpr uint8_t SKITTER=87;

@@ -2,7 +2,7 @@
 #include "Blocks.h"
 namespace synth {
 struct AcidVoice {
-    float phase=0,frequency=110,target=110,glide=0;
+    float phase=0,frequency=110,target=110,glide=0,pitchBendSemitones=0;
     float cutoff=720,resonance=.55f,envMod=.72f,decay=.24f,accent=.75f,wave=.0f,drive=.18f,master=.75f;
     int currentNote=-1;
     float pulse=.5f,env=0,amp=0,filterEnv=0,gate=0,last=0,stage[4]={},decayEnv=0;
@@ -33,7 +33,7 @@ struct AcidVoice {
         }
     }
     void NoteOn(uint8_t note,uint8_t velocity){
-        currentNote=note;target=440.f*powf(2.f,(int(note)-69)/12.f);
+        currentNote=note;target=440.f*powf(2.f,(int(note)-69+pitchBendSemitones)/12.f);
         bool slide=slideNext;slideNext=false;
         accentNext=velocity>=96;
         // The 303 filter envelope has a fast attack, not a one-sample jump.
@@ -43,6 +43,12 @@ struct AcidVoice {
         // the VCA is open produces a discontinuity on overlapping notes.
         if(!slide){filterAttack=true;decayAttack=true;}
         gate=1; if(!slide)frequency=target;
+    }
+    void SetPitchBend(uint16_t value){
+        const float normalized=(float(value)-8192.f)/8192.f;
+        pitchBendSemitones=Clamp(normalized*2.f,-2.f,2.f);
+        if(currentNote>=0)
+            target=440.f*powf(2.f,(float(currentNote)-69.f+pitchBendSemitones)/12.f);
     }
     void NoteOff(uint8_t note){if(currentNote==note){gate=0;currentNote=-1;}}
     float Tick(){
@@ -76,10 +82,13 @@ struct AcidVoice {
         float osc=saw*(1.f-waveState)+square*waveState;
         float a=accentState;
         float v=osc*(.72f+.28f*a)*(1.f+.2f*driveState);
-        float fc=Clamp(cutoffState*(1.f+envModState*(.15f+.85f*filterEnv)*(1.f+.8f*a)),35.f,11000.f);
+        float fc=Clamp(cutoffState*(1.f+envModState*(.15f+.85f*filterEnv)*(1.f+.8f*a)),35.f,9000.f);
         float g=1.f-expf(-(2*PI)*fc/SR);
-        float feedback=last*(resState*(1.15f+.85f*a));
-        float input=tanhf((v-feedback)*(1.f+4.f*driveState));
+        // Bound the resonant loop just below unity. The previous >1.9x
+        // feedback at full resonance/accent could settle into a sample-rate
+        // limit cycle, especially while the envelope opened the filter.
+        float feedback=last*(resState*(.98f+.03f*a));
+        float input=tanhf((v-feedback)*(1.f+3.f*driveState));
         // Saturate the stage input, not its stored integrator value. Repeated
         // gain on the state created an unintended positive-feedback latch,
         // strongest at low cutoff, followed by abrupt polarity switches.
@@ -88,7 +97,7 @@ struct AcidVoice {
         // Original nonlinear state-feedback ladder: deliberately available
         // for its aggressive latch/break-up character. Run both filters so
         // mode changes can crossfade without resetting their memories.
-        float oldInput=tanhf((v-oldLast*(resState*(1.15f+.85f*a)))*(1.f+4.f*driveState));
+        float oldInput=tanhf((v-oldLast*(resState*(.98f+.03f*a)))*(1.f+3.f*driveState));
         for(int i=0;i<4;++i){
             oldStage[i]+=g*(oldInput-oldStage[i]);
             oldStage[i]=tanhf(oldStage[i]*(1.f+.18f*resState));
