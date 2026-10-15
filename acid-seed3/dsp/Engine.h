@@ -5,13 +5,16 @@
 #include "OutputStage.h"
 #include "SynthFx.h"
 #include "Skitter.h"
+#include "../../include/SoftSynthProtocol.h"
 namespace synth {
 struct Engine {
     struct Part {
         AcidVoice acid;
         Hoover hoover;
         Screech screech;
-        uint8_t engine=0,fxValue[6]={},skitterMode=0;
+        uint8_t engine=0,fxValue[6]={},skitterMode=0,delayRate=64,bpfPeriod=0;
+        bool dubEcho=false;
+        uint32_t dubAge=0;
         bool mackie=false;
         int8_t note=-1;
         void Panic(){acid.gate=0;acid.currentNote=-1;acid.slideNext=false;hoover.Panic();screech.Panic();note=-1;}
@@ -22,6 +25,7 @@ struct Engine {
         }
         void On(uint8_t n,uint8_t velocity){
             note=n;
+            dubAge=0;
             if(engine==2)screech.On(n,velocity);else if(engine==1)hoover.On(n,velocity);else acid.NoteOn(n,velocity);
         }
         float Tick(const Clock& clock,uint32_t samples,float& l,float& r){
@@ -36,6 +40,8 @@ struct Engine {
     AcidVoice& acid;Hoover& hoover;Screech& screech;
     Clock clock;uint32_t samples=0;
     OutputStage output;KickOutputPump kickPump;SynthFx fx;Skitter skitter;
+    TanhCompressor compressor;
+    float outputLevel=1.f,outputLevelTarget=1.f;
     uint8_t engine=0,status=0,data=0,count=0,activePart=0;
     uint8_t pendingPart=255,pendingNote=0,pendingVelocity=0;
     uint16_t handoffOut=0,handoffIn=0;
@@ -50,6 +56,8 @@ struct Engine {
     }
     void LoadFx(uint8_t p){
         for(unsigned i=0;i<6;++i)fx.CC(softsynth::FX_BASE+i,parts[p].fxValue[i]);
+        fx.SetDelayRate(parts[p].delayRate);
+        fx.SetBpfPeriod(parts[p].bpfPeriod);
         fx.SetMackie(parts[p].mackie);skitter.Set(parts[p].skitterMode);
     }
     void Panic(){
@@ -74,6 +82,7 @@ struct Engine {
             }
             const int8_t index=PartIndex(channel);if(index<0)return;
             Part& part=parts[index];
+            if(data==softsynth::ACID_DUB_ECHO){part.dubEcho=b>=64;part.dubAge=0;return;}
             if(data==softsynth::ENGINE){
                 uint8_t next=b==64?2:(b>=64?1:0);
                 if(next!=part.engine){part.Panic();part.engine=next;if(index==activePart)engine=next;}
@@ -85,6 +94,11 @@ struct Engine {
             else if(data>=70&&data<=78)part.hoover.CC(data,b);
             else if(data==softsynth::SKITTER){part.skitterMode=b<=4?b:0;if(index==activePart)skitter.Set(part.skitterMode);}
             else if(data==softsynth::DIST_MODEL){part.mackie=b>=64;if(index==activePart)fx.SetMackie(part.mackie);}
+            else if(data==softsynth::ACID_DELAY_RATE){part.delayRate=b;if(index==activePart)fx.SetDelayRate(b);}
+            else if(data==softsynth::ACID_BPF_PERIOD){part.bpfPeriod=b;if(index==activePart)fx.SetBpfPeriod(b);}
+            else if(data==softsynth::ACID_COMP_AMOUNT)compressor.SetAmount(b);
+            else if(data==softsynth::ACID_COMP_ENABLE)compressor.SetEnabled(b>=64);
+            else if(data==softsynth::ACID_OUTPUT_LEVEL){float v=b/127.f;outputLevelTarget=v*v;}
             else if(data>=softsynth::FX_BASE&&data<softsynth::FX_BASE+6){
                 part.fxValue[data-softsynth::FX_BASE]=b;if(index==activePart)fx.CC(data,b);
             }
@@ -163,10 +177,14 @@ struct Engine {
     }
     void TickOutput(float& output1,float& output2){
         float dry=Tick();
-        const Part& part=parts[activePart];
+        Part& part=parts[activePart];
         float noteHz=engine==2?part.screech.frequency:engine==1?part.hoover.frequency:part.acid.frequency;
         dry=skitter.Process(dry,clock,samples-1);
-        output1=kickPump.Process(output.Tick(fx.Process(dry,noteHz,clock)));output2=0;
+        dry=fx.Process(dry,noteHz,clock,samples-1,part.engine==0);
+        dry=compressor.Process(dry);
+        dry=kickPump.Process(dry);
+        outputLevel+=(outputLevelTarget-outputLevel)*.001f;
+        output1=output.Tick(dry*outputLevel);output2=0;
     }
 };
 }

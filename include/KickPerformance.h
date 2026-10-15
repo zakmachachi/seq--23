@@ -73,6 +73,8 @@ public:
     return parameter != STUT && parameter != LOOP && parameter < PARAM_COUNT;
   }
   void setParameterValue(Parameter parameter, uint8_t value);
+  // Keep a shared CC parameter in sync when another hardware page edits it.
+  void syncParameterValue(Parameter parameter, uint8_t value);
   // Legacy ControllerState stays a flat POD with stable EEPROM offsets.
   // The appended BITCRUSH value is saved separately through parameterValue().
   void saveTo(ControllerState& out) const;

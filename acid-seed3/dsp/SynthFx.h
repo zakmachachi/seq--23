@@ -4,7 +4,10 @@
 namespace synth {
 struct SynthFx {
     float target[6]={},amount[6]={};
-    SVF bpf,hpf,delaySendHp,delayReturnHp,reverbSendHp,reverbReturnHp;
+    float bpfMotion=0.f,bpfWet=0.f,bpfCentre=440.f;
+    uint8_t delayRate=64;
+    uint8_t bpfPeriod=0;
+    SVF bpf,bpfUp,bpfDown,hpf,delaySendHp,delayReturnHp,reverbSendHp,reverbReturnHp;
     float bpfLp=0,tubeDc=0,mackieDcX[3]={},mackieDcY[3]={};
     bool mackieTarget=false;float mackieMix=0;
     float delay[65536]={};unsigned delayWrite=0,delayValid=0;
@@ -16,6 +19,8 @@ struct SynthFx {
         reverbSendHp.Tune(250.f,.707f);reverbReturnHp.Tune(180.f,.707f);
     }
     void CC(uint8_t cc,uint8_t value){if(cc>=softsynth::FX_BASE&&cc<softsynth::FX_BASE+6)target[cc-softsynth::FX_BASE]=value/127.f;}
+    void SetBpfPeriod(uint8_t value){bpfPeriod=value>=8?8:value>=4?4:value>=2?2:value?1:0;}
+    void SetDelayRate(uint8_t value){delayRate=value;}
     void SetMackie(bool enabled){mackieTarget=enabled;}
     float Mackie(float input,float drive){
         float y=input;
@@ -27,12 +32,32 @@ struct SynthFx {
         }
         return y/(1.f+1.8f*drive);
     }
-    float Process(float input,float trackingHz,const Clock& clock){
+    float Process(float input,float trackingHz,const Clock& clock,uint32_t now,bool acidMode){
         for(unsigned i=0;i<6;++i)amount[i]+=.0007f*(target[i]-amount[i]);
         mackieMix+=.0007f*((mackieTarget?1.f:0.f)-mackieMix);
-        // Resonant parallel band-pass: centre sweeps 120 Hz..5.4 kHz.
-        float x=amount[0],fc=120.f*powf(45.f,x);bpf.Tune(fc,.75f+4.5f*x*x);
-        float band=bpf.Process(input,true);float y=input+x*.75f*band;
+        // Hoover-style dual BPF: opposing filter centres travel around the
+        // note's fourth harmonic. Depth controls both sweep span and wet mix.
+        float x=amount[0],y=input;
+        if(acidMode){
+            float phase=bpfPeriod?clock.Phase(bpfPeriod,now):0.f;
+            float motion=bpfPeriod?(1.f-4.f*fabsf(phase-.5f))*2.5f*x*x:0.f;
+            bpfMotion+=.001f*(motion-bpfMotion);
+            bpfWet+=.001f*((bpfPeriod?x:0.f)-bpfWet);
+            float centreTarget=Clamp(trackingHz*4.f,220.f,4200.f);
+            bpfCentre+=.001f*(centreTarget-bpfCentre);
+            float q=.75f+4.75f*x*x;
+            bpfUp.Tune(Clamp(bpfCentre*exp2f(bpfMotion),30.f,9500.f),q);
+            bpfDown.Tune(Clamp(bpfCentre*exp2f(-bpfMotion),30.f,9500.f),q);
+            float band=.5f*(bpfUp.Process(input,true)+bpfDown.Process(input,true));
+            // At full depth the resonant mid peak adds 4.62x the dry signal,
+            // giving approximately +15 dB at the moving filter centres.
+            // The final output limiter catches accumulated peaks downstream.
+            const float peakBoost=4.6234f*x;
+            y=input+bpfWet*peakBoost*band;
+        }else{
+            float fc=120.f*powf(45.f,x);bpf.Tune(fc,.75f+4.5f*x*x);
+            y=input+x*.75f*bpf.Process(input,true);
+        }
         // Parallel tube-style branch with even asymmetry and level compensation.
         x=amount[1];float driven=y*(1+7*x*x)+.18f*x;float tube=Sat(driven)-.12f*x;
         tubeDc+=.0015f*(tube-tubeDc);tube-=tubeDc;
@@ -41,9 +66,13 @@ struct SynthFx {
         // Performance HPF. Resonance rises moderately without self oscillation.
         x=amount[2];hpf.Tune(28.f*powf(85.f,x),.707f+1.25f*x*x);
         float low=hpf.Process(y);y+=(y-low-y)*Smooth(x); // exact dry at zero, HP at one
-        // Match the kick external delay: dotted quarter, 1.5 beats, capped
-        // at 840 ms. Two stationary taps crossfade without resampling pitch.
-        x=amount[3];float desiredDelay=clock.haveTick?Clamp(clock.periodSamples*36.f,960.f,40320.f):24000.f; // 180 BPM fallback, same as kick
+        // Clock division is selected by the back-menu macro. Two stationary
+        // taps crossfade to the new period without resampling pitch.
+        static const float beats[7]={.25f,.5f,1.f,1.5f,2.f,3.f,4.f};
+        unsigned rate=(unsigned(delayRate)*6u+63u)/127u;if(rate>6u)rate=6u;
+        x=amount[3];float desiredDelay=clock.haveTick
+            ?Clamp(clock.periodSamples*24.f*beats[rate],960.f,65000.f)
+            :Clamp(24000.f*(beats[rate]/1.5f),960.f,65000.f);
         float echo=delayTap.Process(delay,65536,delayWrite,delayValid,desiredDelay);
         float delaySend=y-delaySendHp.Process(y);
         float delayReturn=echo-delayReturnHp.Process(echo);

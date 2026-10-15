@@ -155,6 +155,7 @@ SimpleSequencer::SimpleSequencer()
     for(unsigned i=0;i<6;++i){hooverParam[c][i]=softsynth::HOOVER_DEFAULTS[i];screechParam[c][i]=softsynth::SCREECH_DEFAULTS[i];}
     screechLevel[c]=96;skitterTiming[c]=1;
     hooverPeriod[c]=1;hooverMix[c]=64;hooverLevel[c]=96;acidLevel[c]=96;acidModded[c]=true;
+    acidOutputLevel[c]=127;
     acidParam[c][0]=62; acidParam[c][1]=76; acidParam[c][2]=92;
     acidParam[c][3]=48; acidParam[c][4]=88; acidParam[c][5]=0;
     machineExtraCount[c] = 0;
@@ -331,7 +332,19 @@ void SimpleSequencer::syncKickHeldControls(uint8_t ch){
   kickHeldMuteActive=mute;
   midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_MUTE,mute?127:0,true);
 
-  const bool shortDecay=kickHeldButtonDown[4];
+  const bool levelDown=kickHeldButtonDown[3];
+  if(levelDown!=kickHeldLevelActive){
+    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_LEVEL,levelDown?127:0,true))
+      kickHeldLevelActive=levelDown;
+  }
+
+  const bool dub=kickDubButtonHeld;
+  if(dub!=kickDubActive){
+    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_DUB_ECHO,dub?127:0,true))
+      kickDubActive=dub;
+  }
+
+  const bool shortDecay=kickHeldButtonDown[4]||dub;
   if(shortDecay!=kickHeldDecayActive){
     if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_DECAY,shortDecay?127:0,true))
       kickHeldDecayActive=shortDecay;
@@ -345,11 +358,7 @@ void SimpleSequencer::syncKickHeldControls(uint8_t ch){
   if(!randomHeld)kickHeldRandomHpfValue=0;
   kickHeldRandomHpfActive=randomHeld;
 
-  const bool sweepHeld=kickHeldButtonDown[3];
-  if(sweepHeld&&!kickHeldSweepActive)kickHeldSweepHpfValue=0;
-  else if(sweepHeld)kickHeldSweepHpfValue=(uint8_t)min(127,(int)kickHeldSweepHpfValue+32);
-  else kickHeldSweepHpfValue=0;
-  kickHeldSweepActive=sweepHeld;
+  kickHeldSweepHpfValue=0;kickHeldSweepActive=false;
 
   uint8_t hpf=kickHeldSweepHpfValue>kickHeldRandomHpfValue
                  ?kickHeldSweepHpfValue:kickHeldRandomHpfValue;
@@ -464,15 +473,7 @@ void SimpleSequencer::applyKickProgression(uint8_t& note){
 }
 
 void SimpleSequencer::sendKickOverlay(uint8_t mode,const KickPreset& preset){
-  // 95..99 are reserved for the second, 275 Hz high-passed kick layer.
-  static constexpr uint8_t CC_MODE=95,CC_NOTE=96,CC_DECAY=97,CC_SHAPE=98,CC_SWEEP=99;
-  const uint8_t values[5]={mode,preset.note,preset.decay,preset.shape,preset.sweep};
-  uint8_t* sent[5]={&kickOverlaySentMode,&kickOverlaySentNote,&kickOverlaySentDecay,
-                    &kickOverlaySentShape,&kickOverlaySentSweep};
-  const uint8_t cc[5]={CC_MODE,CC_NOTE,CC_DECAY,CC_SHAPE,CC_SWEEP};
-  for(uint8_t i=0;i<5;++i)if(*sent[i]!=values[i]){
-    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,cc[i],values[i],true))*sent[i]=values[i];
-  }
+  (void)mode;(void)preset; // Step 6/8 overlay audio path is temporarily disabled.
 }
 
 bool SimpleSequencer::synthMidiChannelInUse(uint8_t midiCh,uint8_t except) const{
@@ -517,6 +518,11 @@ void SimpleSequencer::syncAudioMachine(uint8_t ch){
   for(uint8_t i=0;i<6;++i)sendAcidCC(ch,softsynth::FX_BASE+i,synthFx[ch][i]);
   sendAcidCC(ch,softsynth::DIST_MODEL,synthMackie[ch]?127:0);
   sendAcidCC(ch,softsynth::SKITTER,skitterEnabled[ch]?skitterTiming[ch]+1:0);
+  sendAcidCC(ch,softsynth::ACID_COMP_AMOUNT,acidCompAmount[ch]);
+  sendAcidCC(ch,softsynth::ACID_COMP_ENABLE,acidCompEnabled[ch]?127:0);
+  sendAcidCC(ch,softsynth::ACID_OUTPUT_LEVEL,acidOutputLevel[ch]);
+  static const uint8_t acidBpfPeriodCC[5]={0,1,2,4,8};
+  sendAcidCC(ch,softsynth::ACID_BPF_PERIOD,acidBpfPeriodCC[acidBpfPeriod[ch]%5]);
 }
 
 void SimpleSequencer::cycleAudioMachine(uint8_t ch){
@@ -648,7 +654,9 @@ void SimpleSequencer::loop(){
     kickUiSyncedValid=true;
     kickPresetCommitted=false;
   }
-  heldFxButtons.Scope(isKickChannel(selectedChannel)?selectedChannel+1:0);
+  // Kick performance pads remain armed while the sequencer is focused on any
+  // channel; the MIDI gestures still target the dedicated Kick Seed channel.
+  heldFxButtons.Scope(1);
   if(heldFxTransportWasRunning && !isRunning)heldFxButtons.Clear();
   heldFxTransportWasRunning=isRunning;
   heldFxButtons.Service(now);
@@ -1024,6 +1032,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   uint8_t i = matrixIndex(row, col);
   if(isKickChannel(selectedChannel))heldStep=-1;
 
+
   // --- Channel select buttons ---
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++){
     if (i == MATRIX_BTN_CH[ch]){
@@ -1053,6 +1062,11 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   // Function flips that step's Fill state (0 = normal, 1 = fill-only).
   // Also: 5 quick taps in a row (no step held) saves the patch to EEPROM.
   if (i == MATRIX_BTN_FUNCTION_INDEX){
+    static uint8_t fnTapCount=0;static uint32_t fnLastTapMs=0;
+    const uint32_t now=millis();
+    if(now-fnLastTapMs>2000)fnTapCount=0;
+    fnLastTapMs=now;
+    if(++fnTapCount>=5){fnTapCount=0;saveState();return;}
     if (heldStep >= 0 && heldStep < (int8_t)NUM_STEPS){
       uint16_t eHs = editIdx(selectedChannel, (uint8_t)heldStep);
       uint8_t &fs = fillState[selectedChannel][eHs];
@@ -1066,18 +1080,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
       Serial.print(" Step ");  Serial.print(heldStep+1);
       Serial.print(" = ");     Serial.println(fs);
     } else {
-      // Tap-counter for save: 5 quick taps within 2s of each other.
-      static uint8_t fnTapCount = 0;
-      static uint32_t fnLastTapMs = 0;
-      uint32_t now = millis();
-      if (now - fnLastTapMs > 2000) fnTapCount = 0;
-      fnTapCount++;
-      fnLastTapMs = now;
-      Serial.print("FN tap "); Serial.print(fnTapCount); Serial.println("/5");
-      if (fnTapCount >= 5){
-        fnTapCount = 0;
-        saveState(); // shows its own SAVED splash
-      }
+      // Tap-count retained when a performance pad held the step context.
     }
     return;
   }
@@ -1130,9 +1133,11 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     // Function selects the kick's mix stage; a plain tap always returns to the
     // performance page so the modifier can never strand you on the wrong one.
     kickMixMode = isFunctionHeld() && isKickChannel(selectedChannel);
+    acidCompMode = isFunctionHeld() && synthMachine(selectedChannel);
     if (!kickCCPage() && !kickMixPage() && !synthMachine(selectedChannel)) ensurePixi();
     Serial.println(kickMixPage() ? "MENU2 -> Kick MIX (CH15)"
-                 : kickCCPage()  ? "MENU2 -> Kick CC (CH15)" : "MENU2 -> Analog Outs");
+                 : kickCCPage()  ? "MENU2 -> Kick CC (CH15)"
+                 : acidCompPage() ? "MENU2 -> Acid compressor" : "MENU2 -> Analog Outs");
     return;
   }
   if (i == MATRIX_BTN_MENU3_INDEX){
@@ -1155,19 +1160,31 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
-  // The four dedicated kick gestures are global: they work from every row
+  // Dedicated kick controls are global: they work from every row
   // and menu, and their state changes only at an actual MIDI-15 kick.
   int8_t kickGesture=-1;
   if(i==0)kickGesture=0;       // step 1: temporary mute
   else if(i==1)kickGesture=1;  // step 2: random 140..800 Hz HPF
   else if(i==2)kickGesture=2;  // step 3: temporary +1 semitone
   else if(i==3)kickGesture=4;  // step 4: temporary 40 ms decay
-  else if(i==10)kickGesture=3; // step 11: rising HPF
   if(kickGesture>=0){
     kickHeldButtonDown[(uint8_t)kickGesture]=true;
     pendingToggle[i]=false;heldStep=-1;
     Serial.print("KICK GESTURE DOWN step ");Serial.println(i+1);
     return;
+  }
+  if(i==10){kickHeldButtonDown[3]=true;pendingToggle[i]=false;heldStep=-1;return;}
+  if(i==11){
+    if(isKickChannel(selectedChannel)){kickDubGestureMask|=1u;kickDubButtonHeld=true;}
+    pendingToggle[i]=false;heldStep=-1;return;
+  }
+  if(i==12){
+    if(!synthMachine(selectedChannel)){kickDubGestureMask|=2u;kickDubButtonHeld=true;}
+    pendingToggle[i]=false;heldStep=-1;return;
+  }
+  if(i==4&&synthMachine(selectedChannel)){
+    // Let existing notes and feedback tails ring; block only subsequent triggers.
+    acidTriggerBlockHeld=true;pendingToggle[i]=false;heldStep=-1;return;
   }
 
   // Six kick-progression pads are global to the selected KICK machine and
@@ -1182,10 +1199,11 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     if(i==15){kickPresetPending=2;pendingToggle[i]=false;heldStep=-1;return;} // step 16: commit cue
   }
 
-  // Other step keys remain momentary performance pads while KICK is selected.
-  // Claim before Function shortcuts/pattern editing, so held FX cannot alter steps.
-  heldFxButtons.Scope(isKickChannel(selectedChannel)?selectedChannel+1:0);
-  if(i<NUM_STEPS && heldFxButtons.Press(i)){
+  // On other channels only pads 9/10 are claimed here; they always address the
+  // Kick Seed. The remaining industrial pads stay available on the KICK row.
+  // Claim before Function shortcuts/pattern editing, so FX cannot alter steps.
+  heldFxButtons.Scope(1);
+  if(i<NUM_STEPS && (isKickChannel(selectedChannel)||i==8||i==9) && heldFxButtons.Press(i)){
     pendingToggle[i]=false;heldStep=-1;return;
   }
 
@@ -1274,11 +1292,23 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
   else if(i==1)kickGesture=1;
   else if(i==2)kickGesture=2;
   else if(i==3)kickGesture=4;
-  else if(i==10)kickGesture=3;
   if(kickGesture>=0){
     kickHeldButtonDown[(uint8_t)kickGesture]=false;
     pendingToggle[i]=false;if(heldStep==int8_t(i))heldStep=-1;
     Serial.print("KICK GESTURE UP step ");Serial.println(i+1);
+    return;
+  }
+  if(i==10){kickHeldButtonDown[3]=false;pendingToggle[i]=false;return;}
+  if(i==4&&acidTriggerBlockHeld){acidTriggerBlockHeld=false;pendingToggle[i]=false;return;}
+  if(i==11&&(kickDubGestureMask&1u)){
+    kickDubGestureMask&=(uint8_t)~1u;kickDubButtonHeld=kickDubGestureMask!=0;pendingToggle[i]=false;
+    if(!kickDubButtonHeld&&midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_DUB_ECHO,0,true))kickDubActive=false;
+    return;
+  }
+  if(i==11&&isKickChannel(selectedChannel)){pendingToggle[i]=false;return;}
+  if(i==12&&(kickDubGestureMask&2u)){
+    kickDubGestureMask&=(uint8_t)~2u;kickDubButtonHeld=kickDubGestureMask!=0;pendingToggle[i]=false;
+    if(!kickDubButtonHeld&&midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_DUB_ECHO,0,true))kickDubActive=false;
     return;
   }
   if(i<16&&(kickProgressionOwnedMask&(1u<<i))){
@@ -1467,12 +1497,27 @@ void SimpleSequencer::readEncoders(){
 // --- POT BUTTON PRESS HANDLER: Context-dependent actions -------
 void SimpleSequencer::onPotButtonPress(uint8_t pot){
   if (kickCCPage() || kickFxPage() || kickMixPage()) return; // Debounced edges handled by the kick components.
+  if (acidCompPage()){
+    if(pot==0){
+      acidCompEnabled[selectedChannel]=!acidCompEnabled[selectedChannel];
+      const uint8_t value=acidCompEnabled[selectedChannel]?127:0;
+      for(uint8_t c=0;c<NUM_CHANNELS;++c){acidCompEnabled[c]=value!=0;if(synthMachine(c))sendAcidCC(c,softsynth::ACID_COMP_ENABLE,value);}
+      lastTouchedPot=0;lastPotTouchMs=millis();
+    }
+    return;
+  }
   // Knob 2 selects the distortion character from either the physical Menu 2
   // voice page or the synth FX page; its rotation remains the page parameter.
   if((activeMenu==6 || activeMenu==2) && synthMachine(selectedChannel) && pot==1){
     synthMackie[selectedChannel]=!synthMackie[selectedChannel];
     sendAcidCC(selectedChannel,softsynth::DIST_MODEL,synthMackie[selectedChannel]?127:0);
     lastTouchedPot=1;lastPotTouchMs=millis();return;
+  }
+  if(activeMenu==2 && synthMachine(selectedChannel) && audioMachine[selectedChannel]==AM_ACID && pot==0){
+    uint8_t& period=acidBpfPeriod[selectedChannel];period=(period+1)%5;
+    static const uint8_t periodCC[5]={0,1,2,4,8};
+    sendAcidCC(selectedChannel,softsynth::ACID_BPF_PERIOD,periodCC[period]);
+    lastTouchedPot=0;lastPotTouchMs=millis();return;
   }
   if (activeMenu == 4 && pot == 0){cycleAudioMachine(selectedChannel);return;}
   if (activeMenu == 6 && synthMachine(selectedChannel)){
@@ -1673,11 +1718,11 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   static int potAcc[6] = {0,0,0,0,0,0};
   static uint8_t lastMenu = 0;
   static bool lastKickPage = false;
-  bool kickPage = kickCCPage() || kickFxPage() || kickMixPage();
-  if (lastMenu != activeMenu || lastKickPage != kickPage){
+  bool specialPage = kickCCPage() || kickFxPage() || kickMixPage() || acidCompPage();
+  if (lastMenu != activeMenu || lastKickPage != specialPage){
     for (uint8_t i = 0; i < 6; i++) potAcc[i] = 0;
     lastMenu = activeMenu;
-    lastKickPage = kickPage;
+    lastKickPage = specialPage;
   }
   const uint8_t* divTable = divDefault;
   // A KICK channel's Menu 1 pots 2, 3 and 5 are plain 0..127 kick controls,
@@ -1694,11 +1739,23 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   if (forward == 0) return;
   ticks = forward;
 
-  if (kickPage) return; // Relative endless-pot input belongs to the kick components.
+  if (kickCCPage() || kickFxPage() || kickMixPage()) return; // Relative endless-pot input belongs to the kick components.
 
   // Track which pot was last actually rotated so screen 2 can focus on it.
   lastTouchedPot  = (int8_t)pot;
   lastPotTouchMs  = millis();
+  if(acidCompPage()){
+    if(pot==0){
+      acidCompAmount[selectedChannel]=constrain(int(acidCompAmount[selectedChannel])+ticks,0,127);
+      const uint8_t value=acidCompAmount[selectedChannel];
+      for(uint8_t c=0;c<NUM_CHANNELS;++c){acidCompAmount[c]=value;if(synthMachine(c))sendAcidCC(c,softsynth::ACID_COMP_AMOUNT,value);}
+    }else if(pot==1){
+      acidOutputLevel[selectedChannel]=constrain(int(acidOutputLevel[selectedChannel])+ticks,0,127);
+      const uint8_t value=acidOutputLevel[selectedChannel];
+      for(uint8_t c=0;c<NUM_CHANNELS;++c){acidOutputLevel[c]=value;if(synthMachine(c))sendAcidCC(c,softsynth::ACID_OUTPUT_LEVEL,value);}
+    }
+    return;
+  }
   if(activeMenu==6 && synthMachine(selectedChannel)){
     const bool hoover=audioMachine[selectedChannel]==AM_HOOVER;
     const bool screech=audioMachine[selectedChannel]==AM_SCREECH;
@@ -2288,10 +2345,13 @@ static const uint32_t SAVE_MAGIC_V19 = 13572485;
 static const uint32_t SAVE_MAGIC_V20 = 13572486;
 static const uint32_t SAVE_MAGIC_V21 = 13572487;
 static const uint32_t SAVE_MAGIC_V22 = 13572488;
+static const uint32_t SAVE_MAGIC_V23 = 13572489;
+static const uint32_t SAVE_MAGIC_V24 = 13572490;
+static const uint32_t SAVE_MAGIC_V25 = 13572491;
 
 void SimpleSequencer::saveState() {
   SaveData data;
-  data.magicNumber = SAVE_MAGIC_V22;
+  data.magicNumber = SAVE_MAGIC_V25;
   data.savedKickPitch=kickPerformance.parameterValue(KickPerformance::PITCH);
   data.savedKickFx=kickPerformance.fxState();
   data.savedBpm = bpm;
@@ -2336,6 +2396,9 @@ void SimpleSequencer::saveState() {
     data.savedKickSweepTime[c]      = kickSweepTime[c];
     data.savedKickTailMod[c]        = kickTailMod[c];
     data.savedKickWave[c]           = kickWave[c];
+    data.savedAcidCompAmount[c]     = acidCompAmount[c];
+    data.savedAcidCompEnabled[c]    = acidCompEnabled[c]?1:0;
+    data.savedAcidOutputLevel[c]    = acidOutputLevel[c];
   }
   // Write to EEPROM
   EEPROM.put(0, data);
@@ -2354,11 +2417,18 @@ void SimpleSequencer::saveState() {
 void SimpleSequencer::loadState() {
   SaveData data;
   EEPROM.get(0, data);
+  const bool isV25=data.magicNumber==SAVE_MAGIC_V25;
+  const bool isV24=isV25||data.magicNumber==SAVE_MAGIC_V24;
+  const bool hasV23KickState=isV24||data.magicNumber==SAVE_MAGIC_V23;
+  const bool hasV22KickState=hasV23KickState||data.magicNumber==SAVE_MAGIC_V22;
+  const bool hasV21KickState=hasV22KickState||data.magicNumber==SAVE_MAGIC_V21;
+  const bool hasV20KickState=hasV21KickState||data.magicNumber==SAVE_MAGIC_V20;
+  const bool hasV19KickState=hasV20KickState||data.magicNumber==SAVE_MAGIC_V19;
+  const bool hasAnySavedState=isV25||isV24||data.magicNumber==SAVE_MAGIC_V23||data.magicNumber==SAVE_MAGIC_V22||data.magicNumber==SAVE_MAGIC_V21||data.magicNumber==SAVE_MAGIC_V20||data.magicNumber==SAVE_MAGIC_V19||data.magicNumber==SAVE_MAGIC_V18||data.magicNumber==SAVE_MAGIC_V17||data.magicNumber==SAVE_MAGIC_V16||data.magicNumber==SAVE_MAGIC_V15||data.magicNumber==SAVE_MAGIC_V14||data.magicNumber==SAVE_MAGIC_V13||data.magicNumber==SAVE_MAGIC_V12||data.magicNumber==SAVE_MAGIC_V11;
+  const bool hasKickMixState=isV25||isV24||data.magicNumber==SAVE_MAGIC_V23||data.magicNumber==SAVE_MAGIC_V22||data.magicNumber==SAVE_MAGIC_V21||data.magicNumber==SAVE_MAGIC_V20||data.magicNumber==SAVE_MAGIC_V19||data.magicNumber==SAVE_MAGIC_V18||data.magicNumber==SAVE_MAGIC_V17||data.magicNumber==SAVE_MAGIC_V16||data.magicNumber==SAVE_MAGIC_V15||data.magicNumber==SAVE_MAGIC_V14||data.magicNumber==SAVE_MAGIC_V13;
+  const bool hasKickSweepState=hasV22KickState||data.magicNumber==SAVE_MAGIC_V21||data.magicNumber==SAVE_MAGIC_V20||data.magicNumber==SAVE_MAGIC_V19||data.magicNumber==SAVE_MAGIC_V18||data.magicNumber==SAVE_MAGIC_V17||data.magicNumber==SAVE_MAGIC_V16||data.magicNumber==SAVE_MAGIC_V15||data.magicNumber==SAVE_MAGIC_V14;
 
-  if ((((data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21) || data.magicNumber == SAVE_MAGIC_V20) || data.magicNumber == SAVE_MAGIC_V19) || data.magicNumber == SAVE_MAGIC_V18 || data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
-      data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14 ||
-      data.magicNumber == SAVE_MAGIC_V13 || data.magicNumber == SAVE_MAGIC_V12 ||
-      data.magicNumber == SAVE_MAGIC_V11) {
+  if (hasAnySavedState) {
     bpm = data.savedBpm;
 
     for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -2395,6 +2465,9 @@ void SimpleSequencer::loadState() {
       bool packed=(savedMachine&0xc8)==0x80 && savedAudio>0 && savedAudio<AM_COUNT && (savedMachine&7)<TM_COUNT;
       audioMachine[c]=packed?savedAudio:AM_NONE;
       trigMachine[c]=packed?(savedMachine&7):(savedMachine<TM_COUNT?savedMachine:TM_OFF);
+      acidCompAmount[c]=isV24&&data.savedAcidCompAmount[c]<=127?data.savedAcidCompAmount[c]:0;
+      acidCompEnabled[c]=isV24&&data.savedAcidCompEnabled[c]!=0;
+      acidOutputLevel[c]=isV25&&data.savedAcidOutputLevel[c]<=127?data.savedAcidOutputLevel[c]:127;
       // Earlier drafts stored ACID/HOOVER as pattern IDs and overwrote this channel.
       if((savedMachine==7 || savedMachine==8) && midiChannel[c]==13)midiChannel[c]=c;
       trigDensity[c]     = (data.savedTrigDensity[c] <= 100)     ? data.savedTrigDensity[c]     : 50;
@@ -2411,6 +2484,16 @@ void SimpleSequencer::loadState() {
       if (euclidEnabled[c]) updateEuclid(c);
       regenerateMachinePattern(c);
     }
+    // Compressor and output level are shared by all Seed voices. If loading
+    // an older per-track snapshot with different values, use the first active
+    // synth lane and mirror it across every lane before routing MIDI.
+    uint8_t sharedSource=0;
+    while(sharedSource<NUM_CHANNELS&&!synthMachine(sharedSource))++sharedSource;
+    if(sharedSource<NUM_CHANNELS){
+      const uint8_t amount=acidCompAmount[sharedSource],level=acidOutputLevel[sharedSource];
+      const bool enabled=acidCompEnabled[sharedSource];
+      for(uint8_t c=0;c<NUM_CHANNELS;++c){acidCompAmount[c]=amount;acidCompEnabled[c]=enabled;acidOutputLevel[c]=level;}
+    }
     // Lock kick/off-acid lanes before assigning the remaining synth voices.
     midiChannel[3]=softsynth::KICK_CHANNEL;
     synthMidiChannel[3]=softsynth::KICK_CHANNEL;
@@ -2422,27 +2505,24 @@ void SimpleSequencer::loadState() {
     // Resolve older track assignments that collide with either fixed row.
     for(uint8_t c=0;c<NUM_CHANNELS;++c)
       if(c!=3&&c!=4&&(midiChannel[c]==softsynth::CHANNEL || midiChannel[c]==softsynth::KICK_CHANNEL))midiChannel[c]=c;
-    if ((((data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21) || data.magicNumber == SAVE_MAGIC_V20) || data.magicNumber == SAVE_MAGIC_V19) || data.magicNumber == SAVE_MAGIC_V18 || data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
-        data.magicNumber == SAVE_MAGIC_V15 ||
-        data.magicNumber == SAVE_MAGIC_V14 || data.magicNumber == SAVE_MAGIC_V13) {
+    if (hasKickMixState) {
       // Restoring re-sends both pages; the Daisy boots to its own defaults.
       KickMixer::SavedState mix = data.savedKickMixer;
-      if (data.magicNumber != SAVE_MAGIC_V22 && data.magicNumber != SAVE_MAGIC_V21 && data.magicNumber != SAVE_MAGIC_V20 && data.magicNumber != SAVE_MAGIC_V19 && data.magicNumber != SAVE_MAGIC_V18 && data.magicNumber != SAVE_MAGIC_V17) mix.value[KickMixer::BELLY] = 64;
+      if (!isV24 && data.magicNumber != SAVE_MAGIC_V23) mix = KickMixer::SavedState{};
       kickPerformance.restoreFrom(data.savedKickPerformance);
       kickPerformance.setParameterValue(KickPerformance::BITCRUSH,
-          (((data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21) || data.magicNumber == SAVE_MAGIC_V20) || data.magicNumber == SAVE_MAGIC_V19) && data.savedKickBitcrush <= 127 ? data.savedKickBitcrush : 0);
+          hasV19KickState && data.savedKickBitcrush <= 127 ? data.savedKickBitcrush : 0);
       kickPerformance.setParameterValue(KickPerformance::EROSION,
-          ((data.magicNumber==SAVE_MAGIC_V22 || data.magicNumber==SAVE_MAGIC_V21) || data.magicNumber==SAVE_MAGIC_V20) && data.savedKickErosion<=127 ? data.savedKickErosion:0);
+          hasV20KickState && data.savedKickErosion<=127 ? data.savedKickErosion:0);
       kickPerformance.setParameterValue(KickPerformance::EROSION_FREQ,
-          ((data.magicNumber==SAVE_MAGIC_V22 || data.magicNumber==SAVE_MAGIC_V21) || data.magicNumber==SAVE_MAGIC_V20) && data.savedKickErosionFreq<=127 ? data.savedKickErosionFreq:64);
-      kickPerformance.restoreFx((data.magicNumber==SAVE_MAGIC_V22 || data.magicNumber==SAVE_MAGIC_V21) ? data.savedKickFx : KickPerformance::FxState{});
-      kickPerformance.setParameterValue(KickPerformance::PITCH,data.magicNumber==SAVE_MAGIC_V22 && data.savedKickPitch<=127 ? data.savedKickPitch:64);
+          hasV20KickState && data.savedKickErosionFreq<=127 ? data.savedKickErosionFreq:64);
+      kickPerformance.restoreFx(hasV21KickState ? data.savedKickFx : KickPerformance::FxState{});
+      kickPerformance.setParameterValue(KickPerformance::PITCH,hasV22KickState && data.savedKickPitch<=127 ? data.savedKickPitch:64);
       kickMixer.restoreFrom(mix);
     }
-    if ((((data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21) || data.magicNumber == SAVE_MAGIC_V20) || data.magicNumber == SAVE_MAGIC_V19) || data.magicNumber == SAVE_MAGIC_V18 || data.magicNumber == SAVE_MAGIC_V17 || data.magicNumber == SAVE_MAGIC_V16 ||
-        data.magicNumber == SAVE_MAGIC_V15 || data.magicNumber == SAVE_MAGIC_V14) {
+    if (hasKickSweepState) {
       bool v15 = data.magicNumber != SAVE_MAGIC_V14;
-      bool v18 = (((data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21) || data.magicNumber == SAVE_MAGIC_V20) || data.magicNumber == SAVE_MAGIC_V19) || data.magicNumber == SAVE_MAGIC_V18;
+      bool v18 = (isV25 || data.magicNumber == SAVE_MAGIC_V24 || data.magicNumber == SAVE_MAGIC_V23 || data.magicNumber == SAVE_MAGIC_V22 || data.magicNumber == SAVE_MAGIC_V21 || data.magicNumber == SAVE_MAGIC_V20 || data.magicNumber == SAVE_MAGIC_V19 || data.magicNumber == SAVE_MAGIC_V18);
       for (uint8_t c = 0; c < NUM_CHANNELS; c++){
         kickSweepTime[c] = data.savedKickSweepTime[c] <= 127 ? data.savedKickSweepTime[c] : 64;
         kickTailMod[c]     = (v18 && data.savedKickTailMod[c] <= 127) ? data.savedKickTailMod[c] : 0;
@@ -3110,11 +3190,19 @@ void SimpleSequencer::onFunctionReleased(){
   laneRecording = false;
   if (!snapArmed){ snapKind = 0; return; }
   if (!snapCommitted){
-    // restoreFrom re-sends every CC, so the Daisy follows the revert too.
-    if (snapKind == 1) restoreChannel(snapBack);
-    else if (snapKind == 2) { restoreChannel(snapBack); kickMixer.restoreFrom(snapKickMix); const uint16_t pendingResets = kickPerformance.pendingResetMask(); kickPerformance.restoreFrom(snapKickPerf); kickPerformance.setParameterValue(KickPerformance::BITCRUSH,snapKickBitcrush); kickPerformance.setParameterValue(KickPerformance::EROSION,snapKickErosion); kickPerformance.setParameterValue(KickPerformance::EROSION_FREQ,snapKickErosionFreq); kickPerformance.restoreFx(snapKickFx); kickPerformance.setParameterValue(KickPerformance::PITCH,snapKickPitch); kickPerformance.restorePendingResets(pendingResets); }
-    else if (snapKind == 3) kickMixer.restoreFrom(snapKickMix);
-    Serial.println("SNAP revert");
+    // Function+Menu2 enters the Kick back menu. Function was pressed before
+    // Menu2 is dispatched, so the performance snapshot may already be armed;
+    // restoring it on release would resend stale mixer CCs (including the
+    // tail-start time) and undo edits made on the back-menu page.
+    if (kickMixPage()) {
+      // Keep the current back-menu values and their pending MIDI updates.
+    } else {
+      // restoreFrom re-sends every CC, so the Daisy follows the revert too.
+      if (snapKind == 1) restoreChannel(snapBack);
+      else if (snapKind == 2) { restoreChannel(snapBack); kickMixer.restoreFrom(snapKickMix); const uint16_t pendingResets = kickPerformance.pendingResetMask(); kickPerformance.restoreFrom(snapKickPerf); kickPerformance.setParameterValue(KickPerformance::BITCRUSH,snapKickBitcrush); kickPerformance.setParameterValue(KickPerformance::EROSION,snapKickErosion); kickPerformance.setParameterValue(KickPerformance::EROSION_FREQ,snapKickErosionFreq); kickPerformance.restoreFx(snapKickFx); kickPerformance.setParameterValue(KickPerformance::PITCH,snapKickPitch); kickPerformance.restorePendingResets(pendingResets); }
+      else if (snapKind == 3) kickMixer.restoreFrom(snapKickMix);
+      Serial.println("SNAP revert");
+    }
   } else {
     Serial.println("SNAP kept");
   }
@@ -3670,6 +3758,7 @@ void SimpleSequencer::runEngine(){
 void SimpleSequencer::triggerChannel(uint8_t ch){
   // 1. THE NORMAL MUTE & FILL BLOCK — per-step values resolve via playIdx()
   if (muted[ch]) return;
+  if(acidTriggerBlockHeld&&synthMachine(ch))return;
   // A normal row-5 note can take over the mono MIDI-12 voice from a still
   // sounding kick follower; cancel its pending release before retriggering.
   if(ch==4&&kickOffbassPlaying<128){
@@ -4001,7 +4090,7 @@ void SimpleSequencer::drawDisplay(){
   if (activeMenu == 3){ drawStepVisualiser(); return; }
   if (activeMenu == 4){ drawTrigMachineView(); return; }
   if (activeMenu == 5){ drawPagesView();      return; }
-  if (activeMenu == 6){ if(synthMachine(selectedChannel))drawAcidView();else drawAnalogView(); return; }
+  if (activeMenu == 6){ if(acidCompPage())drawAcidCompView();else if(synthMachine(selectedChannel))drawAcidView();else drawAnalogView(); return; }
 
   display.clearDisplay();
 
@@ -5341,14 +5430,33 @@ void SimpleSequencer::drawAcidView(){
 void SimpleSequencer::drawSynthFxView(){
   static const char* labels[6]={"BPF","TUBE","HPF","DLY","VERB","EROS"};
   display.clearDisplay();display.setTextSize(1);display.setTextColor(SH110X_WHITE);
-  display.setCursor(2,1);display.print("SYNTH FX  CH");display.print(outputMidiChannel(selectedChannel)+1);
+  display.setCursor(2,1);display.print("FX CH");display.print(outputMidiChannel(selectedChannel)+1);
+  if(audioMachine[selectedChannel]==AM_ACID){
+    static const char* rates[5]={"OFF","1 BAR","2 BAR","4 BAR","8 BAR"};
+    display.setCursor(52,1);display.print("BPF ");display.print(rates[acidBpfPeriod[selectedChannel]%5]);
+  }
   for(uint8_t i=0;i<6;++i){
     int x=2+(i%3)*43,y=i<3?15:39;
-    display.setCursor(x,y);display.print(i==1&&synthMackie[selectedChannel]?"MACK":labels[i]);
+    display.setCursor(x,y);display.print(i==0&&audioMachine[selectedChannel]==AM_ACID?"DEPTH":i==1&&synthMackie[selectedChannel]?"MACK":labels[i]);
     display.setCursor(x,y+9);display.print(synthFx[selectedChannel][i]);
     display.drawRect(x,y+18,36,4,SH110X_WHITE);
     display.fillRect(x+1,y+19,(synthFx[selectedChannel][i]*34)/127,2,SH110X_WHITE);
   }
+  display.display();
+}
+
+void SimpleSequencer::drawAcidCompView(){
+  const uint8_t ch=selectedChannel;
+  display.clearDisplay();display.setTextSize(1);display.setTextColor(SH110X_WHITE);
+  display.setCursor(2,1);display.print("ACID BACK CH");display.print(outputMidiChannel(ch)+1);
+  display.setTextSize(2);display.setCursor(8,13);display.print(acidCompAmount[ch]);
+  display.setCursor(75,13);display.print(acidOutputLevel[ch]);
+  display.setTextSize(1);display.setCursor(10,32);display.print("COMP ");display.print(acidCompEnabled[ch]?"ON":"BYPASS");
+  display.setCursor(78,32);display.print("LEVEL");
+  display.drawRect(8,43,52,5,SH110X_WHITE);display.fillRect(9,44,(acidCompAmount[ch]*50)/127,3,SH110X_WHITE);
+  display.drawRect(72,43,52,5,SH110X_WHITE);display.fillRect(73,44,(acidOutputLevel[ch]*50)/127,3,SH110X_WHITE);
+  display.setCursor(3,50);display.print("K1 AMT / PUSH: COMP");
+  display.setCursor(3,59);display.print("K2 LEVEL: ALL VOICES");
   display.display();
 }
 
@@ -5811,10 +5919,13 @@ void SimpleSequencer::drawOverview(){
     uint8_t focus=lastTouchedPot>=0?uint8_t(lastTouchedPot):0;
     uint8_t value=synthFx[ch][focus];
     display2.setTextSize(1);display2.setCursor(2,1);
-    display2.print(focus==1&&synthMackie[ch]?"MACKIE SEND":names[focus]);
+    display2.print(focus==0&&audioMachine[ch]==AM_ACID?"DUAL INVERTED BPF":focus==1&&synthMackie[ch]?"MACKIE SEND":names[focus]);
     display2.setTextSize(2);display2.setCursor(2,14);display2.print(value);
     display2.setTextSize(1);display2.setCursor(2,53);
-    if(focus==5)display2.print("FREQ FOLLOWS NOTE");
+    if(focus==0&&audioMachine[ch]==AM_ACID){
+      static const char* rates[5]={"OFF","1 BAR","2 BAR","4 BAR","8 BAR"};
+      display2.print("K1 PUSH: ");display2.print(rates[acidBpfPeriod[ch]%5]);
+    }else if(focus==5)display2.print("FREQ FOLLOWS NOTE");
     else if(focus==3)display2.print("1/8 CLOCKED + HPF");
     else if(focus==4)display2.print("AUTO HP SEND/RETURN");
     else if(focus==1)display2.print("CLICK: TUBE / MACK");
@@ -5834,6 +5945,15 @@ void SimpleSequencer::drawOverview(){
     display2.setTextSize(1);display2.setCursor(2,31);display2.print("PAT:");display2.print(patterns[trigMachine[ch]]);
     display2.setCursor(2,43);display2.print("K1 TURN: PATTERN");
     display2.setCursor(2,55);display2.print("K1 PRESS: AUDIO");display2.display();return;
+  }
+  if(activeMenu==6 && synthMachine(ch) && acidCompMode){
+    display2.setTextSize(1);display2.setCursor(2,1);display2.print("COMP ");display2.print(acidCompEnabled[ch]?"ON":"BYPASS");
+    display2.setCursor(70,1);display2.print("VOL ");display2.print(acidOutputLevel[ch]);
+    display2.drawRect(2,15,124,6,SH110X_WHITE);display2.fillRect(3,16,(acidCompAmount[ch]*122)/127,4,SH110X_WHITE);
+    display2.drawRect(2,30,124,6,SH110X_WHITE);display2.fillRect(3,31,(acidOutputLevel[ch]*122)/127,4,SH110X_WHITE);
+    display2.setCursor(2,46);display2.print("K1 AMOUNT / PRESS=ON-OFF");
+    display2.setCursor(2,57);display2.print("K2 LEVEL (ALL VOICES)");
+    display2.display();return;
   }
   if(activeMenu==6 && synthMachine(ch)){
     bool h=audioMachine[ch]==AM_HOOVER;
@@ -6450,6 +6570,10 @@ bool SimpleSequencer::kickCCPage() const {
   return activeMenu == 6 && isKickChannel(selectedChannel) && !kickMixMode;
 }
 
+bool SimpleSequencer::acidCompPage() const {
+  return activeMenu==6 && synthMachine(selectedChannel) && acidCompMode;
+}
+
 // Function + MENU2 on the same KICK machine: the Daisy's output/mix stage.
 bool SimpleSequencer::kickMixPage() const {
   return activeMenu == 6 && isKickChannel(selectedChannel) && kickMixMode;
@@ -6515,6 +6639,14 @@ void SimpleSequencer::flushFillCC(){
 }
 
 bool SimpleSequencer::sendPerformanceCC(void* context,uint8_t cc,uint8_t value){
-  // Existing controller mailboxes retry latest values when CC capacity returns.
-  return static_cast<SimpleSequencer*>(context)->midiSendMessage(0xBE,cc,value,true);
+  auto* self=static_cast<SimpleSequencer*>(context);
+  if(cc==42)self->kickPerformance.syncParameterValue(KickPerformance::TAIL,value);
+  if(cc==36)self->kickPerformance.syncParameterValue(KickPerformance::REVERB,value);
+  if(cc==108){
+    bool found=false;
+    for(uint8_t ch=0;ch<NUM_CHANNELS;++ch)
+      if(self->audioMachine[ch]==AM_ACID){self->sendAcidCC(ch,cc,value);found=true;}
+    return found;
+  }
+  return self->midiSendMessage(0xBE,cc,value,true);
 }

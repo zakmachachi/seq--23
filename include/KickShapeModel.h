@@ -88,6 +88,23 @@ inline float tailDelayMs(uint8_t amount, uint32_t bpm){
   return 2400.f * powf(amount / 127.f, 1.7f);
 }
 
+// CC42: reserve a small range for sweep-length holds, concentrate most knob
+// positions across the useful 90..400 ms zone, then leave the top for long
+// whole-note holds. The same mapping drives the controller readout and Seed.
+inline float ampHoldMs(uint8_t amount, float sweepMs, float wholeNoteMs){
+  const float low = fmaxf(sweepMs,90.f);
+  const float middle = fmaxf(low,400.f);
+  const float whole = fmaxf(wholeNoteMs,middle);
+  const float x = float(amount) / 127.f;
+  const float first = 8.f / 127.f;
+  const float last = 116.f / 127.f;
+  if(x <= first)
+    return sweepMs + (low-sweepMs) * (x/first);
+  if(x <= last)
+    return low + (middle-low) * ((x-first)/(last-first));
+  return middle + (whole-middle) * ((x-last)/(1.f-last));
+}
+
 } // namespace kickdaisy
 
 struct KickShapeInputs {

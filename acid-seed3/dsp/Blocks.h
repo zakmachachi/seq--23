@@ -59,7 +59,7 @@ struct Clock {
         }
     }
     float Phase(unsigned bars,uint32_t now)const{
-        unsigned length=bars==8?768:384;
+        unsigned length=bars>=8?768:bars>=4?384:bars>=2?192:96;
         float fraction=running&&haveTick?fminf(1.f,float(uint32_t(now-last))/periodSamples):heldFraction;
         return Wrap((float(ticks%length)+fraction)/length);
     }

@@ -1,18 +1,23 @@
-Five held step keys are global kick controls on every page/channel: steps
-1/2/3/4/11 control mute, random HPF, pitch +1 semitone, 40 ms decay and rising
-HPF. Their releases commit at a kick boundary. Remaining performance pads are
-available when KICK is selected. See [HELD_FX.md](HELD_FX.md).
+Held kick controls target the Kick Seed across every selected channel and page;
+they never redirect those effects to the channel currently being edited.
+Steps 1/2/3/4/11 retain their hit suppression, random HPF, pitch, short decay
+and level ramp. Step 12 is a held dub echo; its input send stops on release and
+the repeats fade over three sixteenth-note steps. Step 13 starts at a kick
+boundary with a 12 ms static crackle, then 500 ms of silence. The distorted
+50 Hz feedback scream then plays alone for four seconds. Kick hits return at
+150 ms decay and ramp from silence to full level over four seconds. The scream ducks on each kick and fades
+over 800 ms after the first kick boundary after release. See
+[HELD_FX.md](HELD_FX.md).
 
 # KICK sound and FX menus
 
 **Current audio-engine note:** the Seed is in the incremental raw-909 phase.
 The active path is one oscillator or EXT KICK input, an optional
 three-layer BPF bank into the selected Mackie/Tube model, then clocked reverse,
-the soft tail pump and routed internal reverb. With EXT KICK off, EXT IN1 is
+the tail gate and routed internal reverb. With EXT KICK off, EXT IN1 is
 still a live passthrough; the PUMP sidechain affects only that external branch.
-Function + Menu 2 knob 1 controls the summed output trim from −15 to +15 dB;
-CC53 value 64 is unity. Standalone HPF/LPF, protected bands, the old mix lanes,
-and master glue are bypassed.
+Function + Menu 2 now gives each knob one end-stage control. Standalone HPF/LPF,
+protected bands, the old mix lanes and master glue are bypassed.
 When the stored PUMP route is set to EXT+INT, its amount and kick-triggered envelope
 also duck the Acid/Hoover Seed's separate output after its effects. The two
 Seed outputs can therefore stay separate at the mixer. This route is ignored
@@ -22,15 +27,16 @@ The tested pitch/time ranges and comparison plot are in
 below retain the earlier controller/FX architecture where it is not part of
 this current path.
 
-Held sequencer step 9 re-rolls a three-band mid profile per kick and adds a
-tempo-locked 1/8 kick loop. Internal reverb follows the pump, so its filtered
-tail can ring through the dip.
+Held sequencer step 9 re-rolls a three-band mid profile per eighth-note kick
+retrigger. It does not capture or replay audio. Internal reverb follows the
+pump, so its filtered tail can ring through the dip.
 
 Select KICK in Trigger Machines. Menu 1 is the kick generator page; Menu 2
 contains the sound controls; Menu 3 is Euclid again. Enabling Euclid on a kick
 replaces the generated trigger rhythm only. It does not rewrite key, pitch,
-scale, or timbre settings. FUNCTION + MENU3 still opens Pages. All CCs use
-MIDI channel 15 (`0xBE`).
+scale, or timbre settings. FUNCTION + MENU3 still opens Pages. Kick Seed CCs
+use MIDI channel 15 (`0xBE`); Acid delay-rate CC108 is sent on each active
+Acid part's configured MIDI channel.
 
 ## Kick generator — MENU1
 
@@ -47,7 +53,7 @@ existing 0–5 semitone variation range.
 | --- | --- | --- |
 | 1 | SWEEP time / CC78 | — |
 | 2 | DECAY / CC40 | REVERSE / CC41 |
-| 3 | TAIL DELAY / CC42 | TAIL ENABLE / CC43 |
+| 3 | AMP ENV HOLD / CC42, sweep length to one whole note | Fixed 32 ms tail gap / CC43 toggle |
 | 4 | BPF1/2/3 / CC44–46 | Layer count / CC47 |
 | 5 | MACKIE / CC48 or TUBE / CC49 | Model / CC50 |
 | 6 | SHAPE / CC51 | — |
@@ -91,25 +97,27 @@ Save format v21 appends the two cycling-slot selections and routing mask without
 moving legacy fields. Older patches use the default layout/routes; all stored effect amounts remain active. v20 Erosion/frequency and v19 bitcrush values
 remain compatible. Existing motion-lane parameter IDs are unchanged.
 
-## Tail delay and the mix page (v1.3.0)
+## Tail gate and back menu (v1.3.0)
 
-The current raw path treats TAIL DELAY as a **soft tempo-locked pump**, not a hard gate. It starts 60 ms into the hit, fades down over 18 ms, holds the dip for up to an eighth-note gap, then recovers over about 55–90 ms. Maximum attenuation is about 14 dB; the signal never gets forced to silence. Reverb follows the pump and can fill the dip. The earlier BELLY/gate/mix-page behavior described in the remaining table is historical and bypassed in this build.
+The kick's 5 ms attack / 20 ms release AHD is applied before internal reverb/delay, so the clean low/sub tail and effect send stop together while the effect tail can ring. Retriggers continue from the current envelope level instead of restarting it from zero. The original brief 5 ms raised-cosine voice handoff is retained. CC42 places most knob values across 90–400 ms, while preserving sweep-length holds at the low end and whole-note holds at the top. The separate tail gate starts at the Function + Menu 2 time (0–200 ms, CC64 about 130 ms) and holds silence for a fixed 32 ms when CC43 is on. Back-menu K5 still selects a 2–60 ms gate edge; K5 off restores the existing 3 ms edge.
 
-The single body oscillator resets each shaped kick and follows the pitch sweep. At SHAPE=0, it carries phase and glides across notes without resetting its envelope. Sequencer note-off controls that legato voice; DECAY sets its body fall, while the maximum holds sustain only while the MIDI gate remains on and releases smoothly after note-off. For shaped kicks, DECAY sets the body tail after the 60 ms plateau. SHAPE controls attack sweep depth and character; SWEEP sets pitch-sweep timing independently.
+The single body oscillator resets each shaped kick and follows the pitch sweep. A new hit starts its own envelope; the outgoing kick is crossfaded away over 5 ms and then stopped. With no new trigger, the current hit rings out naturally. DECAY is captured per hit, so a new shorter value applies to the next trigger without changing the current hit. At SHAPE=0, the oscillator carries phase and glides across notes without resetting its envelope. Sequencer note-off controls that legato voice; DECAY sets its body fall, while the maximum holds sustain only while the MIDI gate remains on and releases smoothly after note-off. For shaped kicks, DECAY sets the body tail after the 60 ms plateau. SHAPE controls attack sweep depth and character; SWEEP sets pitch-sweep timing independently.
 
-The mix page (FUNCTION + MENU2) has these roles:
+Steps 6 and 8 (previous/cue kick overlays) are temporarily disabled at both the Teensy controller and Daisy receiver because they caused audio callback hangs. Their CCs are ignored and no overlay voice is mixed. Step 11 ramps the kick down to a quiet level over about two seconds, then restores it over about half a second after release; both edges are quantized to a kick. Step 12 shortens each new kick and enables the clocked, high-passed internal dub echo/reverb. Its above-unity feedback builds repeated echoes into a bounded saturation; on release, new send stops immediately and the repeats fade over three sixteenth-note steps. Step 13 starts with a 12 ms static crackle and 500 ms dead-air pause, followed by a four-second solo distorted 50 Hz ground-loop feedback scream. Kicks then return with a 150 ms decay and a four-second volume ramp; they sidechain the scream. Release is quantized to a kick, then the scream fades over 800 ms.
 
-| Control | Function |
+The back menu (FUNCTION + MENU2 while KICK is selected) has one sound parameter per knob:
+
+| Knob | Control |
 | --- | --- |
-| OUT GAIN / CC53 | Function + Menu 2, knob 1: −15 to +15 dB output trim; 64 is unity. Applies after the kick and external input are summed. |
-| DIST / CC54 + CC55 | Dirty-return level. The controller sends Tube at 80/65 of Mackie's value, capped at 127. This is separate from K5's distortion amount. |
-| BELLY / CC61 | Gate start: 50 ms × 0.35–2, never before pitch settling plus one sub cycle. Value 64 is 1×. No effect with tail gate off. |
-| BPF / CC56 | Common boost for up to three serial broad mid peaks. Zero layers bypasses them; each reaches +15 dB. |
-| SUB / CC57 | Clean bass boost: 0 is flat; 100% blends in the full +15 dB / 120 Hz low shelf. No new lower pitch is generated. |
-| PUNCH / CC58 | Clean low-pass lane gain, 0–100%. Zero mutes this lane including its SUB bass boost; DIST remains independent. |
-| K1 push / CC59 | Toggles EXT KICK. The external input replaces the synth source and passes through the same clean SUB/punch and BPF+Mackie/Tube lanes, then the existing FX. The synthesized voice and unprocessed input are faded out. The display shows EXT KICK ON/OFF. |
+| 1 | Tail gate start / CC67, 0–200 ms; CC64 remains about 130 ms, with fine control across the audible zone. |
+| 2 | Acid Seed clock division / CC108: 1/16, 1/8, 1/4, dotted quarter, 1/2, 3/4 or 1 bar. Sent to active Acid parts. |
+| 3 | Tanh compressor amount / CC68. Press K3 / CC69 to enable or cleanly bypass it. A smoothed level matcher supplies makeup gain; bypass returns the untouched signal at unity. |
+| 4 | Kick output gain / CC53, −15 to +21 dB; centre is unity. |
+| 5 | Tail-gate fade / CC71, 2–60 ms; press K5 / CC72 to enable or restore the default 3 ms edge. |
+| 6 | Internal reverb amount / CC36. |
 
-EXT KICK starts OFF. Press the first encoder button while FUNCTION + MENU2 is open to toggle it. The external input remains live without MIDI notes; MIDI triggers can still clock the existing tempo-synced FX. The mode is session state and returns OFF after a Teensy restart.
+K6 reverb stays synchronized with its sound-control page value. The six-byte saved menu payload keeps its size; older patches load safe
+defaults for the redesigned controls.
 
 The body/attack is cloned into clean LPF → PUNCH and serial mid EQ / Mackie preamps (or Tube) → BITCRUSH → HPF → DIST. SUB boosts the clean LPF output before PUNCH, never distortion's input. Clean LPF and dirty HPF are matched fourth-order Linkwitz-Riley filters at 240 Hz. Filtering remains phase-shifting, but the generators cannot drift and the linear crossover paths have matching phase. Nonlinear/BPF settings still change dirty harmonic phase; they are not guaranteed to reconstruct the original waveform.
 

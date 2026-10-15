@@ -319,7 +319,19 @@ void SimpleSequencer::syncKickHeldControls(uint8_t ch){
   kickHeldMuteActive=mute;
   midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_MUTE,mute?127:0,true);
 
-  const bool shortDecay=kickHeldButtonDown[4];
+  const bool levelDown=kickHeldButtonDown[3];
+  if(levelDown!=kickHeldLevelActive){
+    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_LEVEL,levelDown?127:0,true))
+      kickHeldLevelActive=levelDown;
+  }
+
+  const bool dub=kickDubButtonHeld;
+  if(dub!=kickDubActive){
+    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_DUB_ECHO,dub?127:0,true))
+      kickDubActive=dub;
+  }
+
+  const bool shortDecay=kickHeldButtonDown[4]||dub;
   if(shortDecay!=kickHeldDecayActive){
     if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_DECAY,shortDecay?127:0,true))
       kickHeldDecayActive=shortDecay;
@@ -333,11 +345,7 @@ void SimpleSequencer::syncKickHeldControls(uint8_t ch){
   if(!randomHeld)kickHeldRandomHpfValue=0;
   kickHeldRandomHpfActive=randomHeld;
 
-  const bool sweepHeld=kickHeldButtonDown[3];
-  if(sweepHeld&&!kickHeldSweepActive)kickHeldSweepHpfValue=0;
-  else if(sweepHeld)kickHeldSweepHpfValue=(uint8_t)min(127,(int)kickHeldSweepHpfValue+32);
-  else kickHeldSweepHpfValue=0;
-  kickHeldSweepActive=sweepHeld;
+  kickHeldSweepHpfValue=0;kickHeldSweepActive=false;
 
   uint8_t hpf=kickHeldSweepHpfValue>kickHeldRandomHpfValue
                  ?kickHeldSweepHpfValue:kickHeldRandomHpfValue;
@@ -472,16 +480,7 @@ void SimpleSequencer::applyKickProgression(uint8_t& note){
 }
 
 void SimpleSequencer::sendKickOverlay(uint8_t mode,const KickPreset& preset){
-  // 95..99 are reserved for the second, high-passed kick layer. The 225 Hz
-  // corner is applied by the Daisy firmware, not here.
-  static constexpr uint8_t CC_MODE=95,CC_NOTE=96,CC_DECAY=97,CC_SHAPE=98,CC_SWEEP=99;
-  const uint8_t values[5]={mode,preset.note,preset.decay,preset.shape,preset.sweep};
-  uint8_t* sent[5]={&kickOverlaySentMode,&kickOverlaySentNote,&kickOverlaySentDecay,
-                    &kickOverlaySentShape,&kickOverlaySentSweep};
-  const uint8_t cc[5]={CC_MODE,CC_NOTE,CC_DECAY,CC_SHAPE,CC_SWEEP};
-  for(uint8_t i=0;i<5;++i)if(*sent[i]!=values[i]){
-    if(midiSendMessage(0xB0|softsynth::KICK_CHANNEL,cc[i],values[i],true))*sent[i]=values[i];
-  }
+  (void)mode;(void)preset; // Step 6/8 overlay audio path is temporarily disabled.
 }
 
 bool SimpleSequencer::synthMidiChannelInUse(uint8_t midiCh,uint8_t except) const{
@@ -1107,20 +1106,21 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
-  // The four dedicated kick gestures are global: they work from every row
+  // Dedicated kick controls are global: they work from every row
   // and menu, and their state changes only at an actual MIDI-15 kick.
   int8_t kickGesture=-1;
   if(i==0)kickGesture=0;       // step 1: temporary mute
   else if(i==1)kickGesture=1;  // step 2: random 140..800 Hz HPF
   else if(i==2)kickGesture=2;  // step 3: temporary +1 semitone
   else if(i==3)kickGesture=4;  // step 4: temporary 40 ms decay
-  else if(i==10)kickGesture=3; // step 11: rising HPF
   if(kickGesture>=0){
     kickHeldButtonDown[(uint8_t)kickGesture]=true;
     pendingToggle[i]=false;heldStep=-1;
     Serial.print("KICK GESTURE DOWN step ");Serial.println(i+1);
     return;
   }
+  if(i==10){kickHeldButtonDown[3]=true;pendingToggle[i]=false;heldStep=-1;return;}
+  if(i==11&&isKickChannel(selectedChannel)){kickDubButtonHeld=true;pendingToggle[i]=false;heldStep=-1;return;}
 
   // Six kick-progression pads are global to the selected KICK machine and
   // remain usable from any sequencer page. State changes are consumed only
@@ -1226,13 +1226,14 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
   else if(i==1)kickGesture=1;
   else if(i==2)kickGesture=2;
   else if(i==3)kickGesture=4;
-  else if(i==10)kickGesture=3;
   if(kickGesture>=0){
     kickHeldButtonDown[(uint8_t)kickGesture]=false;
     pendingToggle[i]=false;if(heldStep==int8_t(i))heldStep=-1;
     Serial.print("KICK GESTURE UP step ");Serial.println(i+1);
     return;
   }
+  if(i==10){kickHeldButtonDown[3]=false;pendingToggle[i]=false;return;}
+  if(i==11&&kickDubButtonHeld){kickDubButtonHeld=false;pendingToggle[i]=false;return;}
   if(i<16&&(kickProgressionOwnedMask&(1u<<i))){
     kickProgressionOwnedMask&=~(1u<<i);
     if(i==5)kickPreviousLayerHeld=false;

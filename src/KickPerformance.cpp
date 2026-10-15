@@ -95,6 +95,12 @@ void KickPerformance::setParameterValue(Parameter p, uint8_t value){
   flushMidi();
   dirty_ = true;
 }
+void KickPerformance::syncParameterValue(Parameter p,uint8_t value){
+  if(!parameterIsLaneable(p))return;
+  if(value>127)value=127;
+  position(p)=value;
+  dirty_=true;
+}
 uint8_t KickPerformance::outputValue(Parameter p) const {
   if (p == STUT) return state_.stutter.on ? STUT_VALUES[state_.stutter.division] : 0;
   if (p == LOOP) return state_.looper.on ? LOOP_VALUES[state_.looper.division] : 0;
@@ -420,7 +426,15 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     float ms = releaseMs(v);
     if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
     else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
-  } else if (p == TAIL) snprintf(out,size,compact ? "%.1fS" : "%.2f STEP",2.f*v/127.f);
+  } else if (p == TAIL){
+    const uint8_t sweep = sweepTime_ ? *sweepTime_ : 64;
+    const float sweep_ms = kickdaisy::sweepMs(state_.kickShape,sweep);
+    const uint32_t bpm = renderedBpm_ ? renderedBpm_ : 120u;
+    const float whole_note_ms = 240000.f / float(bpm);
+    const float hold_ms = kickdaisy::ampHoldMs(v,sweep_ms,whole_note_ms);
+    if(hold_ms < 1000.f) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",hold_ms);
+    else snprintf(out,size,compact ? "%.1fS" : "%.1f s",hold_ms/1000.f);
+  }
   else if (p == SWEEP){
     float ms = kickdaisy::sweepMs(state_.kickShape,v);
     snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
@@ -617,7 +631,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   else if (p == SWEEP) snprintf(title,sizeof(title),"PITCH SWEEP TIME");
   else if (p <= REVERB) snprintf(title,sizeof(title),"%s",FX_NAMES[p]);
   else if (p == DECAY) snprintf(title,sizeof(title),"DECAY");
-  else if (p == TAIL) snprintf(title,sizeof(title),"TAIL DELAY");
+  else if (p == TAIL) snprintf(title,sizeof(title),"AMP ENV HOLD");
   else if (p <= BPF3) snprintf(title,sizeof(title),"BPF %u EDIT L%u",state_.bpfLayerCount,state_.editedBpfLayer+1);
   else if (p == MACKIE || p == TUBE) snprintf(title,sizeof(title),"%s",p == MACKIE ? "MACKIE" : "TUBE");
   else snprintf(title,sizeof(title),"SHAPE");
@@ -648,8 +662,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   } else if (p == DECAY) snprintf(footer,sizeof(footer),"REV %s",state_.reverseEnabled ? "ON" : "OFF");
   else if (p == SWEEP) snprintf(footer,sizeof(footer),"18 - 200 ms");
   else if (p == TAIL){
-    unsigned ms = (unsigned)(kickdaisy::tailDelayMs(v,bpm)+.5f);
-    snprintf(footer,sizeof(footer),"GAP %ums PUMP %s",ms,state_.tailDelayEnabled ? "ON" : "OFF");
+    snprintf(footer,sizeof(footer),"A5 R20 GAP32 %s",state_.tailDelayEnabled ? "ON" : "OFF");
   } else if (p <= BPF3) snprintf(footer,sizeof(footer),"85Hz ------ 3.2kHz");
   else if (p == MACKIE || p == TUBE){
     unsigned pct = percent(v);
@@ -682,9 +695,10 @@ void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus
   // enough foreground time for matrix scanning and control handling.
   if (rendered_ && (uint32_t)(now-lastFrameMs_) < 100) return;
   if (dirty_) {
+    renderedBpm_ = bpm;
     drawOverview(overview);
     if (focus) drawFocus(*focus,bpm);
-    dirty_ = false; rendered_ = true; renderedBpm_ = bpm;
+    dirty_ = false; rendered_ = true;
   } else if (idle && focus && dotStep != idleDotStep_) {
     drawFocus(*focus,bpm);
   } else return;
@@ -843,6 +857,6 @@ void KickPerformance::renderHeldFx(Adafruit_SH1106G& d,uint32_t bpm,uint32_t now
     int x=2+int(i)*8;d.drawRect(x,47,5,4,SH110X_WHITE);
     if(heldFxMask_&(1u<<i))d.fillRect(x,47,5,4,SH110X_WHITE);
   }
-  label(d,0,56,heldFx_==10?"1/4 > 1/32 / BAR":mode==heldfx::HPF_REPEAT?(fast?"BPF + 1/8 LOOP":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
+  label(d,0,56,heldFx_==10?"1/4 > 1/32 / BAR":mode==heldfx::HPF_REPEAT?(fast?"BPF + 1/8 RETRIG":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
   d.setTextWrap(true);d.display();
 }

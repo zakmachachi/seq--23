@@ -8,6 +8,7 @@
 #include "erosion_fx.h"
 #include "external_pitch_fx.h"
 #include "../include/FixedDelayTap.h"
+#include "../include/KickShapeModel.h"
 #include "effects/HeldFxEngine.h"
 #include "../include/SoftSynthProtocol.h"
 
@@ -110,7 +111,7 @@ static constexpr float PI =
 
 
 /* External input. */
-static constexpr float EXTERNAL_INPUT_1_GAIN = 1.00f;
+static constexpr float EXTERNAL_INPUT_1_GAIN = 0.00f;
 // Input 2 is intentionally quarantined: leave the ADC channel disconnected
 // without allowing its floating/noisy pin to enter the external bus.
 static constexpr float EXTERNAL_INPUT_2_GAIN = 0.00f;
@@ -412,8 +413,8 @@ static constexpr uint8_t CC_KICK_BELLY = 61;
  * Remaining macros / state:
  *   CC40 DECAY
  *   CC41 REVERSE STATE          0=OFF, 127=ON
- *   CC42 TAIL DELAY AMOUNT
- *   CC43 TAIL DELAY STATE       0=OFF, 127=ON
+ *   CC42 AMP AHD HOLD           sweep time..one whole note
+ *   CC43 FIXED TAIL GAP STATE   0=OFF, 127=ON; 32 ms gap
  *   CC44 BPF CENTRE             85 Hz..3.2 kHz
  *   CC45/46 legacy BPF centres  retained, not used by the raw path
  *   CC47 BPF SEND               absolute OFF / 1/3 / 2/3 / FULL
@@ -446,8 +447,11 @@ static constexpr uint8_t CC_MACRO_FX_PUMP          = 35;
 static constexpr uint8_t CC_MACRO_FX_REVERB        = 36;
 static constexpr uint8_t CC_MACRO_FX_BITCRUSH      = 37;
 static constexpr uint8_t CC_KICK_TEMP_MUTE = 60;
+static constexpr uint8_t CC_KICK_TEMP_LEVEL = 66;
 static constexpr uint8_t CC_KICK_PERFORMANCE_HPF = 62;
 static constexpr uint8_t CC_KICK_TEMP_DECAY = 63;
+static constexpr uint8_t CC_KICK_DUB_ECHO = 65;
+static constexpr uint8_t CC_KICK_GROUND_MACHINE = 70;
 static volatile float bitcrush_target = 0.f;
 static constexpr uint8_t CC_EROSION_AMOUNT=38, CC_EROSION_FREQUENCY=39;
 static volatile float erosion_amount=0.f, erosion_frequency=64.f/127.f;
@@ -485,6 +489,11 @@ static constexpr uint8_t CC_MIX_BPF_GAIN            = 56;
 static constexpr uint8_t CC_MIX_SUB_GAIN            = 57;
 static constexpr uint8_t CC_MIX_PUNCH_GAIN          = 58;
 static constexpr uint8_t CC_MIX_EXT_KICK_MODE      = 59;
+static constexpr uint8_t CC_KICK_TAIL_START        = 67;
+static constexpr uint8_t CC_KICK_COMP_AMOUNT       = 68;
+static constexpr uint8_t CC_KICK_COMP_ENABLE       = 69;
+static constexpr uint8_t CC_KICK_CUTOFF_TIME       = 71;
+static constexpr uint8_t CC_KICK_CUTOFF_ENABLE     = 72;
 
 // EXT KICK is a volatile source switch. A short audio-rate fade prevents a
 // discontinuity when the external signal replaces the synthesized voice.
@@ -550,7 +559,11 @@ static volatile float macro_fx_value_hpf = 0.0f;
 static volatile float macro_fx_value_lpf = 0.0f;
 static volatile float macro_fx_value_pump = 0.0f;
 static volatile bool kick_temp_mute_target = false;
-static float kick_temp_mute_gain = 1.0f;
+static volatile bool kick_temp_level_target = false;
+static volatile bool kick_dub_echo_target = false;
+static volatile bool kick_ground_machine_target = false;
+static volatile bool kick_ground_decay_override = false;
+static float kick_temp_level_gain = 1.f;
 
 
 /* ============================================================
@@ -599,12 +612,6 @@ static inline void PostStutterCommand(uint32_t command)
 
 
 /*
- * DECAY (CC40) changes are also handed to the audio thread rather than
- * directly mutating its envelope from ServiceMidi().
- */
-static volatile bool master_decay_retime_pending = false;
-
-/*
  * Raised by the audio thread when the kick output stops being a finite
  * number. The recovery itself runs in the control loop: it clears the
  * 43200-sample loop capture, which is far too long to sit inside an audio
@@ -613,13 +620,7 @@ static volatile bool master_decay_retime_pending = false;
 static volatile bool audio_panic_pending = false;
 
 
-/* DECAY (CC40): true lifetime of the complete generated body. */
-static volatile float macro_decay = 0.50f;
-/*
- * CC40 writes the TARGET; macro_decay slews toward it in the audio loop.
- * Writing the live value straight from MIDI stepped the decay coefficient
- * once per CC message, which zippers audibly while the knob is turning.
- */
+/* DECAY (CC40): the target is snapshotted when a new hit starts. */
 static volatile float macro_decay_target = 0.50f;
 static bool reverse_bass_enabled = false;
 
@@ -637,8 +638,13 @@ static volatile bool reverse_enable_pending = false;
 static volatile bool reverse_disable_pending = false;
 
 
-/* TAIL DELAY AMOUNT/STATE (CC42/43): tempo-related soft tail pump. */
-static volatile float macro_tail_delay = 0.0f;
+/* CC42 controls AHD hold; CC43 toggles the fixed 32 ms tail gate. */
+static volatile float macro_amp_hold = 0.0f;
+static volatile float macro_tail_start = 64.0f / 127.0f;
+static volatile float kick_comp_amount = 0.0f;
+static volatile bool kick_comp_enabled = false;
+static volatile float kick_cutoff_time = 64.0f / 127.0f;
+static volatile bool kick_cutoff_enabled = false;
 static bool tail_delay_enabled = false;
 
 /*
@@ -834,15 +840,6 @@ static float MacroKickSweepSeconds(float x)
 {
     return KickSweepTimeMs(x) * .001f;
 }
-/* Soft-pump plateau follows the sequencer: zero to one eighth note. */
-static float MacroTailPumpGapMs(float x)
-{
-    x = Clamp01Added(x);
-    /* 0..2.4 s gap range; the envelope is smoothed at the output below. */
-    return 2400.0f * powf(x,1.70f);
-}
-
-
 /*
  * Macro 4 — musical logarithmic BPF centre.
  */
@@ -1029,7 +1026,7 @@ static float OutputGainFromCC(uint8_t value)
 {
     const float db = value <= 64
         ? -15.0f * (64.0f - value) / 64.0f
-        :  15.0f * (value - 64.0f) / 63.0f;
+        :  21.0f * (value - 64.0f) / 63.0f;
     return powf(10.0f, db / 20.0f);
 }
 static float ShapeStartRatio(float shape)
@@ -1236,7 +1233,7 @@ struct KickVoice
             instantaneous_hz = sustain_hz;
             character_mix = was_active ? old_character : 0.0f;
             body_env = was_active ? old_env : 1.0f;
-            infinite_sustain = macro_decay >= 0.99999f;
+            infinite_sustain = macro_decay_target >= 0.99999f;
             decay_coeff_target = decay_coeff = infinite_sustain ? 1.0f : BodyDecayCoefficient(ClampAdded(decay_seconds,.0212f,2.4f));
             sweep_start_ratio = sweep_peak_ratio = sweep_tail = 1.0f;
             tail_pitch_semitones = 0.0f;
@@ -1375,107 +1372,7 @@ struct KickVoice
         }
     }
 
-    // Preserved retrigger tails keep their pitch sweep and decay, but the
-    // transient has already passed. Run them as a single sine oscillator
-    // instead of recalculating the full 2nd/3rd/5th/7th-partial waveform for
-    // every sample. Long decays can leave several tails active together.
-    void ProcessTail(KickVoiceOut& o)
-    {
-        if(!active) return;
-        decay_coeff += (decay_coeff_target-decay_coeff) * KICK_DECAY_COEFF_SMOOTH;
-        character_mix += (character_mix_target-character_mix) * 0.00104112f;
-
-        float ratio;
-        if(sustained)
-        {
-            sustain_hz += (base_hz-sustain_hz) * 0.000694203f;
-            ratio = 1.0f;
-        }
-        else if(age < sweep_rise_samples)
-        {
-            const float rise = SmoothstepAdded(float(age) / float(sweep_rise_samples));
-            ratio = sweep_start_ratio + (sweep_peak_ratio-sweep_start_ratio)*rise;
-        }
-        else
-        {
-            ratio = 1.0f + (sweep_peak_ratio-1.0f)*sweep_tail;
-        }
-
-        float tail_pitch = 0.0f;
-        if(!sustained && age > body_hold_samples && tail_lfo_increment > 0.0f)
-        {
-            const float p = tail_lfo_phase;
-            const float tri = p < 0.25f ? 4.0f*p
-                : p < 0.75f ? 2.0f-4.0f*p : 4.0f*p-4.0f;
-            tail_pitch = tail_pitch_semitones * tri;
-            tail_lfo_phase += tail_lfo_increment;
-            tail_lfo_phase -= floorf(tail_lfo_phase);
-        }
-
-        const float frequency = sustained
-            ? sustain_hz : base_hz * ratio * TailPitchRatio(tail_pitch);
-        instantaneous_hz = frequency;
-        const float sample = sinf(phase * TWO_PI) * body_env * KICK_BODY_INTERNAL_LEVEL;
-        o.punch = sample;
-        o.gate = 1.0f;
-
-        phase += frequency / SAMPLE_RATE;
-        phase -= floorf(phase);
-        if(age >= sweep_rise_samples) sweep_tail *= sweep_decay_coeff;
-        if(sustained && note_gate && infinite_sustain)
-            body_env += (1.0f-body_env) * 0.00041658f;
-        else if(sustained)
-            body_env *= infinite_sustain ? BodyDecayCoefficient(.040f) : decay_coeff;
-        else if(age >= body_hold_samples)
-        {
-            const float effective_decay = 1.0f-character_mix*(1.0f-decay_coeff);
-            body_env *= effective_decay;
-        }
-        ++age;
-        last_output = sample;
-        if(body_env < KICK_MIN_AUDIO_ENV)
-        {
-            active = false;
-            body_env = 0.0f;
-        }
-    }
 };
-struct KickTailVoice
-{
-    KickVoice voice;
-    uint32_t fade_in_age = RAW_909_RETRIGGER_SAMPLES;
-    void Reset(){voice.Reset();fade_in_age=RAW_909_RETRIGGER_SAMPLES;}
-};
-static constexpr uint8_t KICK_TAIL_VOICE_COUNT = 4;
-static constexpr uint8_t KICK_OVERLAY_TAIL_VOICE_COUNT = 2;
-static KickTailVoice kick_tail_voices[KICK_TAIL_VOICE_COUNT];
-static KickTailVoice kick_overlay_tail_voices[KICK_OVERLAY_TAIL_VOICE_COUNT];
-static uint8_t kick_tail_voice_cursor=0,kick_overlay_tail_voice_cursor=0;
-
-static void PreserveKickTail(const KickVoice& source, KickTailVoice* tails,
-                             uint8_t count, uint8_t& cursor)
-{
-    if(!source.active || !count) return;
-    uint8_t slot=cursor%count;
-    bool found=false;
-    for(uint8_t n=0;n<count;++n){
-        uint8_t candidate=(uint8_t)((cursor+n)%count);
-        if(!tails[candidate].voice.active){slot=candidate;found=true;break;}
-    }
-    if(!found){
-        // If all tail slots are occupied, replace the quietest one first.
-        float quietest=2.0f;
-        for(uint8_t n=0;n<count;++n){
-            uint8_t candidate=(uint8_t)((cursor+n)%count);
-            if(tails[candidate].voice.body_env<quietest){
-                quietest=tails[candidate].voice.body_env;slot=candidate;
-            }
-        }
-    }
-    tails[slot].voice=source;
-    tails[slot].fade_in_age=0;
-    cursor=(uint8_t)((slot+1)%count);
-}
 
 static KickVoice kick_voice;
 static KickVoice kick_voice_previous;
@@ -1486,6 +1383,9 @@ static uint32_t kick_overlay_handoff_age = RAW_909_RETRIGGER_SAMPLES;
 static uint32_t kick_overlay_attack_age = RAW_909_RETRIGGER_SAMPLES;
 static float kick_overlay_hpf_x1=0.f,kick_overlay_hpf_y1=0.f;
 static constexpr float KICK_OVERLAY_HPF_COEFF = 0.97091f; // 225 Hz @ 48 kHz
+static constexpr float KICK_OVERLAY_EXTRA_GAIN = 2.0f;     // +6 dB before HPF
+static constexpr uint32_t KICK_OVERLAY_MACKIE_FLUSH_SAMPLES = 480u; // 10 ms
+static uint32_t kick_overlay_mackie_flush_samples = 0;
 
 static float kick_punch_gain_smoothed = 1.0f;
 static float kick_sub_gain_smoothed = 1.0f;
@@ -1494,13 +1394,11 @@ static float kick_sub_gain_smoothed = 1.0f;
 static void TriggerKickVoice(uint8_t velocity)
 {
     const bool continuous_bass = macro_kick_shape <= 0.000001f;
-    // Preserve the outgoing decay independently; the short handoff below is
-    // only for a click-free attack and must not terminate the old body.
-    if(!continuous_bass && kick_voice.active)
-        PreserveKickTail(kick_voice,kick_tail_voices,KICK_TAIL_VOICE_COUNT,
-                         kick_tail_voice_cursor);
-    // Keep the outgoing note alive for a short raised-cosine handoff;
-    // the new oscillator still resets to the same deterministic phase.
+    const float hit_decay = kick_ground_decay_override ? 0.323f
+        : (kick_temp_decay_active ? 0.0f : macro_decay_target);
+    const float hit_decay_seconds = MacroDecaySeconds(hit_decay);
+    // Keep the outgoing-hit handoff brief, then stop it so long-decay hits
+    // cannot continue phasing against later notes.
     if(continuous_bass)
     {
         // SHAPE zero is legato: the voice itself glides to the next note and
@@ -1523,29 +1421,25 @@ static void TriggerKickVoice(uint8_t velocity)
         kick_frequency,
         macro_kick_shape,
         kick_sweep_time,
-        MacroDecaySeconds(macro_decay),
+        hit_decay_seconds,
         tune,
         kick_tail_mod_cc,
         macro_harmonics
     );
-    kick_voice.SetDecay(MacroDecaySeconds(kick_temp_decay_active ? 0.f : macro_decay),
-                        !kick_temp_decay_active && macro_decay >= 0.99999f);
+    kick_voice.SetDecay(hit_decay_seconds,
+                        !kick_temp_decay_active && hit_decay >= 0.99999f);
     kick_tail_pitch_pending = false;
 
+    if(kick_overlay_voice.active){
+        kick_overlay_previous=kick_overlay_voice;
+        kick_overlay_handoff_age=0;
+    }else if(!kick_overlay_previous.active){
+        kick_overlay_handoff_age=RAW_909_RETRIGGER_SAMPLES;
+    }
+    kick_overlay_voice.active=false;
     if(kick_overlay_mode){
-        if(kick_overlay_voice.active){
-            PreserveKickTail(kick_overlay_voice,kick_overlay_tail_voices,
-                             KICK_OVERLAY_TAIL_VOICE_COUNT,
-                             kick_overlay_tail_voice_cursor);
-            kick_overlay_previous=kick_overlay_voice;
-            kick_overlay_handoff_age=0;
-        }else{
-            kick_overlay_previous.active=false;
-            kick_overlay_handoff_age=RAW_909_RETRIGGER_SAMPLES;
-        }
         // The parallel hit is an independent one-shot even when SHAPE is at
         // its sustained-bass endpoint; never inherit a free-running phase.
-        kick_overlay_voice.active=false;
         kick_overlay_voice.Trigger(
             MidiNoteToFrequency(kick_overlay_note),
             float(kick_overlay_shape)/127.f,
@@ -1555,6 +1449,11 @@ static void TriggerKickVoice(uint8_t velocity)
         );
         kick_overlay_voice.SetDecay(MacroDecaySeconds(float(kick_overlay_decay)/127.f));
         kick_overlay_attack_age=0;
+    }else{
+        // With no new layer, the previous overlay fades to silence over the
+        // same short handoff and cannot ring into the next current kick.
+        kick_overlay_voice.active=false;
+        kick_overlay_attack_age=RAW_909_RETRIGGER_SAMPLES;
     }
 }
 
@@ -1870,6 +1769,7 @@ static float DSY_SDRAM_BSS external_reverb_delay_buffer[REVERB_DELAY_SIZE];
 static Biquad external_reverb_return_hp, external_reverb_echo_hp, external_reverb_echo_lp;
 static constexpr float REVERB_ECHO_QUARTER_NOTES = .5f;
 static constexpr float REVERB_ECHO_RETURN = .72f; // +4.08 dB vs previous .45
+static constexpr float DUB_ECHO_FEEDBACK = 1.04f; // deliberately grows over successive repeats
 
 struct KickSidechainReverb
 {
@@ -1880,8 +1780,8 @@ struct KickSidechainReverb
     float lp0=0,lp1=0,lp2=0,lp3=0,send_lp=0,echo_lp=0;
     float amount_smooth=0,detector=0,duck_gain=0;
     float tap=0,next_tap=0,tap_fade=0;
-    uint32_t duck_hold=0,clock_divider=0,idle_samples=0;
-    bool changing_tap=false;
+    uint32_t duck_hold=0,clock_divider=0,idle_samples=0,dub_tail_samples=0,dub_tail_total_samples=0;
+    bool changing_tap=false,dub_was_active=false;
     // At zero amount the wet is muted; after the tank has rung below
     // -120 dB (combs .86, echo .35 per repeat of up to 1.2 s) stop it.
     static constexpr uint32_t IDLE_AFTER_SAMPLES=15u*48000u;
@@ -1904,7 +1804,7 @@ struct KickSidechainReverb
         ci0=ci1=ci2=ci3=ai0=ai1=write=0;
         lp0=lp1=lp2=lp3=send_lp=echo_lp=0;
         amount_smooth=detector=0;duck_gain=1;
-        duck_hold=clock_divider=idle_samples=0;changing_tap=false;tap_fade=0;
+        duck_hold=clock_divider=idle_samples=dub_tail_samples=dub_tail_total_samples=0;changing_tap=false;dub_was_active=false;tap_fade=0;
         tap=next_tap=ClampAdded(perf_quarter_note_ms*(SAMPLE_RATE*.001f)*REVERB_ECHO_QUARTER_NOTES,48.f,48000.f);
         return_hp->Reset();return_hp->SetHighpass(180.f,.70710678f);
         echo_hp->Reset();echo_hp->SetHighpass(240.f,.70710678f);
@@ -1940,18 +1840,35 @@ struct KickSidechainReverb
         return delay_buffer[i]
             +(delay_buffer[previous]-delay_buffer[i])*fraction;
     }
-    float Process(float dry,float amount)
+    float Process(float dry,float amount,bool dub=false,bool allow_dub_tail=true)
     {
-        amount_smooth+=(Clamp01Added(amount)-amount_smooth)*.0006942034f; // 30 ms
+        if(!allow_dub_tail){dub_tail_samples=dub_tail_total_samples=0;dub_was_active=false;}
+        else if(dub){
+            if(!dub_was_active){
+                const float three_steps=perf_quarter_note_ms*.75f;
+                dub_tail_total_samples=uint32_t(ClampAdded(three_steps*.001f*SAMPLE_RATE,4800.f,72000.f));
+                dub_tail_samples=dub_tail_total_samples;
+            }
+            dub_was_active=true;
+        }else{
+            dub_was_active=false;
+            if(dub_tail_samples)--dub_tail_samples;
+        }
+        const bool releasing_dub=!dub&&dub_tail_samples>0;
+        const bool dub_path=allow_dub_tail&&(dub||dub_tail_samples>0);
+        const float dub_fade=dub?1.f:(dub_tail_total_samples?float(dub_tail_samples)/dub_tail_total_samples:0.f);
+        const float amount_target=dub_path?fmaxf(amount,.90f*dub_fade):amount;
+        amount_smooth+=(Clamp01Added(amount_target)-amount_smooth)*.0006942034f; // 30 ms
         if(amount==0.f && amount_smooth<1e-7f)amount_smooth=0.f;
         const float x=amount_smooth;
-        const float echo_mix=SmoothstepAdded(Clamp01Added((x-.65f)/.35f));
+        const float echo_mix=dub_path?1.f:SmoothstepAdded(Clamp01Added((x-.65f)/.35f));
         // Update at 1 kHz; hysteresis rejects clock jitter. Fixed read heads
         // crossfade over 50 ms, rather than pitching a moving delay line.
         if(++clock_divider>=48)
         {
             clock_divider=0;
-            float wanted=ClampAdded(perf_quarter_note_ms*(SAMPLE_RATE*.001f)*REVERB_ECHO_QUARTER_NOTES,48.f,48000.f);
+            float ratio=dub_path?.75f:REVERB_ECHO_QUARTER_NOTES;
+            float wanted=ClampAdded(perf_quarter_note_ms*(SAMPLE_RATE*.001f)*ratio,48.f,48000.f);
             if(!changing_tap && fabsf(wanted-tap)>fmaxf(24.f,tap*.01f))
             {next_tap=wanted;tap_fade=0;changing_tap=true;}
         }
@@ -1980,10 +1897,21 @@ struct KickSidechainReverb
         // Feedback stays below unity. Damping and HP keep repetitions dark
         // and out of the clean bass; the dry path is never filtered here.
         send_lp+=(dry-send_lp)*.03851f; // original ~300 Hz send HP
-        float send=(dry-send_lp)*x*.65f;
+        float send=releasing_dub?0.f:(dry-send_lp)*x*.65f;
         // Filter each audible repeat AND its feedback, not only the send.
         echo_lp=echo_filter->Process(echo_hp->Process(echo));
-        delay_buffer[write]=send+echo_lp*(.35f+.25f*echo_mix);
+        const float dub_feedback=dub?DUB_ECHO_FEEDBACK:(.65f+.39f*dub_fade);
+        float delay_write=send+echo_lp*(dub_path?dub_feedback:(.35f+.25f*echo_mix));
+        if(dub_path){
+            // Above-unity feedback builds the dub repeats. A smooth rational
+            // ceiling bounds the stored loop level before it can run away.
+            const float magnitude=fabsf(delay_write);
+            if(magnitude>1.2f){
+                const float excess=magnitude-1.2f;
+                delay_write=copysignf(1.2f+.8f*(excess/(.8f+excess)),delay_write);
+            }
+        }
+        delay_buffer[write]=delay_write;
         if(++write==REVERB_DELAY_SIZE)write=0;
         float feed=send+echo_lp*echo_mix*.25f;
         float fb=.86f+.07f*x;
@@ -4412,6 +4340,11 @@ struct MacroMackieProcessor
     }
 };
 
+// Step 6/8's previous/cue voice has its own Mackie state. It is mixed after
+// the main character stage so it cannot drive or alter the current kick's
+// distortion path.
+static MacroMackieProcessor kick_overlay_mackie;
+
 /* ============================================================
    TUBE — TWO-STAGE TRIODE PREAMP
    ============================================================
@@ -4448,8 +4381,10 @@ static constexpr float TUBE_STAGE1_BIAS = -0.18f;
 static constexpr float TUBE_STAGE2_BIAS = -0.32f;
 
 /* Input drive into stage 1 at full amount (the amount knob adds more). */
-static constexpr float TUBE_INPUT_GAIN = 3.2f;
-static constexpr float TUBE_INTERSTAGE_GAIN = 2.4f;
+// The output trim cannot undo distortion made before it, so keep the Tube
+// stages below the harsh digital-sounding overload region.
+static constexpr float TUBE_INPUT_GAIN = 1.45f;
+static constexpr float TUBE_INTERSTAGE_GAIN = 1.25f;
 
 /* Blocking: how much grid current shifts the bias, and how fast it recovers. */
 static constexpr float TUBE_BLOCKING_DEPTH = 0.45f;
@@ -6544,9 +6479,20 @@ static bool HandleSixMacroCC(
             kick_temp_mute_target=value>=64;
             return true;
 
+        case CC_KICK_TEMP_LEVEL:
+            kick_temp_level_target=value>=64;
+            return true;
+
         case CC_KICK_TEMP_DECAY:
             kick_temp_decay_active=value>=64;
-            master_decay_retime_pending=true;
+            return true;
+
+        case CC_KICK_DUB_ECHO:
+            kick_dub_echo_target=value>=64;
+            return true;
+
+        case CC_KICK_GROUND_MACHINE:
+            kick_ground_machine_target=value>=64;
             return true;
 
         case CC_KICK_PERFORMANCE_HPF:
@@ -6571,6 +6517,26 @@ static bool HandleSixMacroCC(
             param_reverb_amount = v * REVERB_AMOUNT_MAX;
             return true;
 
+        case CC_KICK_COMP_AMOUNT:
+            kick_comp_amount = v;
+            return true;
+
+        case CC_KICK_COMP_ENABLE:
+            kick_comp_enabled = value >= 64;
+            return true;
+
+        case CC_KICK_TAIL_START:
+            macro_tail_start = v;
+            return true;
+
+        case CC_KICK_CUTOFF_TIME:
+            kick_cutoff_time = v;
+            return true;
+
+        case CC_KICK_CUTOFF_ENABLE:
+            kick_cutoff_enabled = value >= 64;
+            return true;
+
 
         /* ====================================================
            DECAY / REVERSE — ABSOLUTE STATE
@@ -6579,15 +6545,6 @@ static bool HandleSixMacroCC(
         case CC_DECAY_ABSOLUTE:
         {
             macro_decay_target = v;
-
-            /* DECAY (CC40) controls the complete body lifetime; it never changes only the wet level. */
-
-            /*
-             * Audio callback safely updates the currently-running tail
-             * envelope from its present amplitude.
-             */
-            master_decay_retime_pending = true;
-
             return true;
         }
 
@@ -6634,12 +6591,12 @@ static bool HandleSixMacroCC(
 
 
         /* ====================================================
-           TAIL DELAY — ABSOLUTE INTERNAL-SIDECHAIN AMOUNT + STATE
+           AMP HOLD / FIXED TAIL GAP — ABSOLUTE AMOUNT + STATE
            ==================================================== */
 
         case CC_TAIL_DELAY_ABSOLUTE:
         {
-            macro_tail_delay = v;
+            macro_amp_hold = v;
             return true;
         }
 
@@ -6825,11 +6782,8 @@ static bool HandleSixMacroCC(
             return true;
         }
 
-        case 95: kick_overlay_mode=value<=2?value:0; return true;
-        case 96: kick_overlay_note=value; return true;
-        case 97: kick_overlay_decay=value; return true;
-        case 98: kick_overlay_shape=value; return true;
-        case 99: kick_overlay_sweep=value; return true;
+        case 95: case 96: case 97: case 98: case 99:
+            kick_overlay_mode=0; return true; // step 6/8 overlay route disabled
 
 
         /* ====================================================
@@ -7397,23 +7351,48 @@ static void AudioCallback(
     ServiceEuroOutputs(static_cast<uint32_t>(size));
 
     /* Raw 909 path: source -> optional three-band BPF / character model ->
-     * clocked reverse -> smooth tail pump -> routed internal reverb. Standalone
+     * clocked reverse -> tail gate -> routed internal reverb -> AHD output
+     * envelope. Standalone
      * HPF/LPF, crossover, protected bands and master FX stay out of this path. */
     static bool raw_was_external = false;
     static uint32_t raw_kick_age_samples = UINT32_MAX;
-    static float tail_amount_smooth = 0.0f;
+    static uint32_t amp_hold_samples_for_hit = 0;
+    static float amp_env_gain = 0.0f;
+    static float amp_env_trigger_start_gain = 0.0f;
+    static float tail_start_smooth = 64.0f / 127.0f;
     static float tail_enable_smooth = 0.0f;
     static float tail_pump_smooth = 1.0f;
+    static float compressor_amount_smooth = 0.0f;
+    static float compressor_mix = 0.0f;
+    static float compressor_input_level = 0.0f;
+    static float compressor_output_level = 0.0f;
+    static float compressor_makeup = 1.0f;
     static float raw_bpf_gain_smooth = 0.70f;
+    // 0 idle, 1 crackle, 2 dead-air pause, 3 held scream, 4 release tail.
+    static uint8_t ground_machine_stage = 0;
+    static uint32_t ground_machine_stage_samples = 0;
+    static float ground_machine_sine = 0.0f;
+    static float ground_machine_cosine = 1.0f;
+    static float ground_machine_osc_phase = 0.0f;
+    static float ground_machine_scream_gain = 0.0f;
+    static float ground_machine_kick_gain = 1.0f;
+    static float ground_machine_kick_detector = 0.0f;
+    static float ground_machine_comp_level = 0.0f;
+    static bool ground_machine_kick_started = false;
+    static bool ground_machine_scream_started = false;
+    static uint32_t ground_machine_rng = 0x9173a5c1u;
+    static float ground_feedback[32] = {};
+    static uint8_t ground_feedback_pos = 0;
     if(external_kick_mode_target && !raw_was_external)
     {
         kick_voice.Reset();
         kick_voice_previous.Reset();
         kick_voice_handoff_age = RAW_909_RETRIGGER_SAMPLES;
-        for(auto& tail:kick_tail_voices)tail.Reset();
-        for(auto& tail:kick_overlay_tail_voices)tail.Reset();
         kick_overlay_voice.Reset();kick_overlay_previous.Reset();
         kick_overlay_handoff_age=kick_overlay_attack_age=RAW_909_RETRIGGER_SAMPLES;
+        kick_overlay_mackie.Reset();
+        kick_overlay_mackie_flush_samples=0;
+        kick_overlay_hpf_x1=kick_overlay_hpf_y1=0.f;
     }
     raw_was_external = external_kick_mode_target;
 
@@ -7421,11 +7400,10 @@ static void AudioCallback(
     held_fx_engine.BeginBlock(held_fx_control, System::GetNow(), midi_running,
         kick_trigger_pending, quarter_edge, perf_quarter_note_ms,
         static_cast<unsigned>(size));
-    if(held_fx_engine.ratchetTrigger)
+    if(held_fx_engine.ratchetTrigger || held_fx_engine.retriggerTrigger)
         kick_trigger_pending = true;
 
-    // Held sequencer step 9 re-rolls a three-band BPF per kick and starts the
-    // existing tempo-locked eighth-note loop; step 1 is the global mute hold.
+    // Step 9 re-rolls the BPF on each clocked retrigger; it does not capture audio.
     static bool raw_kick_bpf_override = false;
     static uint8_t raw_kick_bpf_saved_count = 0;
     static float raw_kick_bpf_saved_hz[3] = {};
@@ -7468,6 +7446,27 @@ static void AudioCallback(
     if(kick_trigger_pending)
     {
         kick_trigger_pending = false;
+        if(kick_ground_machine_target && ground_machine_stage!=1 &&
+           ground_machine_stage!=2 && ground_machine_stage!=3)
+        {
+            ground_machine_stage = 1;
+            ground_machine_stage_samples = 0;
+            ground_machine_scream_gain = 0.0f;
+            ground_machine_kick_gain = 0.0f;
+            ground_machine_kick_started = false;
+            ground_machine_scream_started = false;
+            kick_voice.active=false;kick_voice_previous.active=false;
+        }
+        else if(!kick_ground_machine_target && ground_machine_stage!=0 &&
+                ground_machine_stage!=4)
+        {
+            ground_machine_stage = 4;
+            ground_machine_stage_samples = 0;
+        }
+        if(ground_machine_stage==3 && kick_ground_machine_target &&
+           ground_machine_stage_samples>=uint32_t(4.0f*SAMPLE_RATE))
+            ground_machine_kick_started = true;
+        kick_ground_decay_override = ground_machine_stage==3 && ground_machine_kick_started;
         if(reverse_disable_pending)
         {
             reverse_bass_enabled = false;
@@ -7484,20 +7483,37 @@ static void AudioCallback(
             kick_frequency=ClampAdded(MidiNoteToFrequency(pitch),
                                       KICK_CHROMATIC_MIN_HZ,
                                       KICK_CHROMATIC_MAX_HZ);
-            macro_decay=macro_decay_target=float(kick_pending_preset[1])/127.f;
+            macro_decay_target=float(kick_pending_preset[1])/127.f;
             macro_kick_shape=float(kick_pending_preset[2])/127.f;
             kick_sweep_time=float(kick_pending_preset[3])/127.f;
             kick_tail_pitch_cc=kick_pending_preset[4];
             kick_tail_pitch_pending=true;
             kick_pending_preset_valid=false;
         }
-        if(!external_kick_mode_target)
+        // Pad 1 suppresses each new generated hit at its trigger boundary.
+        // Keep the existing voice/tails running so muting a hit never chops
+        // the decay that was already in progress.
+        const bool suppress_new_hit = (kick_temp_mute_target ||
+                                       ground_machine_stage==1 ||
+                                       ground_machine_stage==2 ||
+                                       (ground_machine_stage==3 && !ground_machine_kick_started)) &&
+                                      !external_kick_mode_target;
+        if(!external_kick_mode_target && !suppress_new_hit)
             TriggerKickVoice(last_velocity);
-        added_performance_fx.TriggerKick();
         macro_bpf_layer_count_latched = raw_held_kick_bpf ? 3 : macro_bpf_layer_count;
-        macro_whole_kick_reverse.Trigger();
-        kick_reverb.Trigger();
-        raw_kick_age_samples = 0;
+        if(!suppress_new_hit){
+            added_performance_fx.TriggerKick();
+            macro_whole_kick_reverse.Trigger();
+            kick_reverb.Trigger();
+            amp_env_trigger_start_gain = amp_env_gain;
+            raw_kick_age_samples = 0;
+            const float sweep_ms = KickSweepTimeMs(kick_sweep_time);
+            const float whole_note_ms = perf_quarter_note_ms*4.0f;
+            const uint8_t hold_cc = static_cast<uint8_t>(
+                Clamp01Added(macro_amp_hold)*127.f + 0.5f);
+            const float hold_ms = kickdaisy::ampHoldMs(hold_cc,sweep_ms,whole_note_ms);
+            amp_hold_samples_for_hit = static_cast<uint32_t>(hold_ms*0.001f*SAMPLE_RATE);
+        }
     }
 
     raw_bpf_gain_smooth +=
@@ -7506,16 +7522,6 @@ static void AudioCallback(
     param_line_gain +=
         (param_line_gain_target - param_line_gain) * PARAM_GAIN_SLEW;
     macro_bpf_bank.Update(static_cast<unsigned>(size));
-
-    const float decay_target = kick_temp_decay_active ? 0.f : macro_decay_target;
-    float decay_error = decay_target - macro_decay;
-    if(fabsf(decay_error) > 0.00005f)
-        macro_decay += decay_error * 0.06f;
-    else
-        macro_decay = decay_target;
-    kick_voice.SetDecay(MacroDecaySeconds(macro_decay),
-                        !kick_temp_decay_active && macro_decay >= 0.99999f);
-    master_decay_retime_pending = false;
 
     for(size_t i = 0; i < size; ++i)
     {
@@ -7540,20 +7546,9 @@ static void AudioCallback(
             if(++kick_voice_handoff_age >= RAW_909_RETRIGGER_SAMPLES)
                 kick_voice_previous.active = false;
         }
-        float carried_kick_tail=0.f;
-        for(auto& tail:kick_tail_voices){
-            KickVoiceOut old;
-            const bool wasActive=tail.voice.active;
-            tail.voice.ProcessTail(old);
-            if(wasActive){
-                const float fade=tail.fade_in_age<RAW_909_RETRIGGER_SAMPLES
-                    ?SmoothstepAdded(float(tail.fade_in_age)/RAW_909_RETRIGGER_SAMPLES):1.f;
-                carried_kick_tail+=old.punch*(0.5f*fade);
-                if(tail.fade_in_age<RAW_909_RETRIGGER_SAMPLES)++tail.fade_in_age;
-            }
-        }
-        voice.punch+=carried_kick_tail;
         KickVoiceOut overlay, overlay_previous;
+        bool overlay_layer_active =
+            kick_overlay_voice.active || kick_overlay_previous.active;
         kick_overlay_previous.Process(overlay_previous);
         kick_overlay_voice.Process(overlay);
         float overlaySample=overlay.punch;
@@ -7564,30 +7559,11 @@ static void AudioCallback(
             if(++kick_overlay_handoff_age>=RAW_909_RETRIGGER_SAMPLES)
                 kick_overlay_previous.active=false;
         }
-        float carried_overlay_tail=0.f;
-        for(auto& tail:kick_overlay_tail_voices){
-            KickVoiceOut old;
-            const bool wasActive=tail.voice.active;
-            tail.voice.ProcessTail(old);
-            if(wasActive){
-                const float fade=tail.fade_in_age<RAW_909_RETRIGGER_SAMPLES
-                    ?SmoothstepAdded(float(tail.fade_in_age)/RAW_909_RETRIGGER_SAMPLES):1.f;
-                carried_overlay_tail+=old.punch*(0.5f*fade);
-                if(tail.fade_in_age<RAW_909_RETRIGGER_SAMPLES)++tail.fade_in_age;
-            }
-        }
-        overlaySample+=carried_overlay_tail;
         if(kick_overlay_attack_age < 96u){
             overlaySample*=SmoothstepAdded(float(kick_overlay_attack_age)/96.f);
             ++kick_overlay_attack_age;
         }
-        // A fixed, continuously-stateful 275 Hz HPF keeps this parallel layer
-        // out of the main body's way. Its short fade-in avoids filter-state
-        // steps on repeated hits; the oscillator itself phase-resets per shot.
-        const float overlayHigh=overlaySample-kick_overlay_hpf_x1+
-                                KICK_OVERLAY_HPF_COEFF*kick_overlay_hpf_y1;
-        kick_overlay_hpf_x1=overlaySample;kick_overlay_hpf_y1=overlayHigh;
-        float raw = voice.punch + overlayHigh*.5f +
+        float raw = voice.punch +
                     (external_pumped - voice.punch) * external_kick_mode_mix;
         if(!std::isfinite(raw)) raw = 0.0f;
 
@@ -7595,50 +7571,244 @@ static void AudioCallback(
         float dry = clean_alignment.Process(raw);
         float character_send = macro_bpf_bank.ProcessDriveFeed(raw);
         float output_sample = macro_character_processor.ProcessWet(dry, character_send);
+
         output_sample = held_fx_engine.ProcessKick(output_sample);
         output_sample = macro_whole_kick_reverse.Process(output_sample);
 
-        // A tempo-locked dip with a finite attack and recovery. The tank sits
-        // after this envelope, so its return fills the break rather than gating.
-        tail_amount_smooth += (Clamp01Added(macro_tail_delay) - tail_amount_smooth) * 0.002f;
-        tail_enable_smooth += ((tail_delay_enabled ? 1.0f : 0.0f) - tail_enable_smooth) * 0.001f;
-        float pump_target = 1.0f;
-        if(raw_kick_age_samples != UINT32_MAX && tail_enable_smooth > 0.0001f &&
-           tail_amount_smooth > 0.0001f)
+        // Tempo-locked hard gate. Smoothstep edges reach exact silence without
+        // discontinuities; the short bounded slew also protects retriggers or
+        // a state change that lands while the gate is closed. Reverb follows
+        // the gate; the final AHD envelope then cuts the complete kick bus.
+        tail_start_smooth += (Clamp01Added(macro_tail_start) - tail_start_smooth) * 0.001f;
+        tail_enable_smooth = tail_delay_enabled ? 1.0f : 0.0f;
+        float gate_target = 1.0f;
+        if(raw_kick_age_samples != UINT32_MAX && tail_enable_smooth > 0.5f)
         {
             const float age = static_cast<float>(raw_kick_age_samples) / SAMPLE_RATE;
-            const float elapsed = age - 0.060f;
-            const float down = 0.018f;
-            const float gap = MacroTailPumpGapMs(tail_amount_smooth) * 0.001f;
-            const float up = 0.055f + 0.035f * sqrtf(tail_amount_smooth);
-            float dip = 0.0f;
-            if(elapsed >= 0.0f && elapsed < down)
-                dip = SmoothstepAdded(elapsed / down);
-            else if(elapsed >= down && elapsed < down + gap)
-                dip = 1.0f;
-            else if(elapsed >= down + gap && elapsed < down + gap + up)
-                dip = 1.0f - SmoothstepAdded((elapsed - down - gap) / up);
-            // SHAPE zero is a steady bass tone: keep the kick's own tail
-            // pump out there, then bring it in continuously with the macro.
-            const float shape_activity = SmoothstepAdded(
-                Clamp01Added(macro_kick_shape) * 5.0f);
-            const float depth = 0.82f * powf(tail_amount_smooth, 0.65f) * shape_activity;
-            pump_target -= tail_enable_smooth * depth * dip;
+            // Map the full control to the audible 0..200 ms range. Preserve
+            // the established centre setting (CC64 = 130 ms), with finer
+            // resolution throughout the useful range.
+            const float tail_start_value = tail_start_smooth * 127.0f;
+            const float start_ms = tail_start_value <= 64.0f
+                ? tail_start_value * (130.0f / 64.0f)
+                : 130.0f + (tail_start_value - 64.0f) * (70.0f / 63.0f);
+            const float start_seconds = start_ms * 0.001f;
+            const float elapsed = age - start_seconds;
+            const float edge = kick_cutoff_enabled
+                ? (0.002f + 0.058f * Clamp01Added(kick_cutoff_time))
+                : 0.003f;
+            const float reopen_edge = 0.003f;
+            constexpr float gap = 0.032f;
+            if(elapsed >= 0.0f && elapsed < edge)
+                gate_target = 1.0f - SmoothstepAdded(elapsed / edge);
+            else if(elapsed >= edge && elapsed < edge + gap)
+                gate_target = 0.0f;
+            else if(elapsed >= edge + gap && elapsed < edge + gap + reopen_edge)
+                gate_target = SmoothstepAdded((elapsed - edge - gap) / reopen_edge);
         }
-        // A hit restarts the delay phase. Slew back to the new phase so a
-        // retrigger during the dip cannot make the output gain jump.
-        tail_pump_smooth += (pump_target-tail_pump_smooth)*0.00104112f;
+        // Bound gain movement to a 3 ms edge if a hit restarts the gate phase
+        // or the quantized enable state changes while it is closed.
+        const float gate_step = 1.0f / (0.003f * SAMPLE_RATE);
+        const float gate_delta = gate_target - tail_pump_smooth;
+        tail_pump_smooth += ClampAdded(gate_delta, -gate_step, gate_step);
         const float pump=tail_pump_smooth;
         output_sample *= pump;
-        output_sample = kick_reverb.Process(
-            output_sample, (fx_internal_routes & 2) ? param_reverb_amount : 0.0f);
+        // Apply the AHD to the dry kick/effect send. Reverb and delay receive
+        // the shaped signal, so their tails are not abruptly cut by the amp
+        // envelope itself.
+        float amp_env_target = 0.0f;
+        if(raw_kick_age_samples != UINT32_MAX)
+        {
+            constexpr uint32_t attack_samples = uint32_t(0.005f*SAMPLE_RATE);
+            constexpr uint32_t release_samples = uint32_t(0.020f*SAMPLE_RATE);
+            const uint32_t age = raw_kick_age_samples;
+            if(age < attack_samples)
+                amp_env_target = amp_env_trigger_start_gain +
+                    (1.0f-amp_env_trigger_start_gain) *
+                    SmoothstepAdded(float(age)/attack_samples);
+            else if(age < attack_samples+amp_hold_samples_for_hit)
+                amp_env_target = 1.0f;
+            else if(age < attack_samples+amp_hold_samples_for_hit+release_samples)
+                amp_env_target = 1.0f-SmoothstepAdded(
+                    float(age-attack_samples-amp_hold_samples_for_hit)/release_samples);
+        }
+        const float amp_env_step=1.0f/(0.001f*SAMPLE_RATE);
+        amp_env_gain += ClampAdded(amp_env_target-amp_env_gain,
+                                   -amp_env_step,amp_env_step);
+        output_sample *= amp_env_gain;
+        float kick_reverb_amount=(fx_internal_routes & 2) ? param_reverb_amount : 0.0f;
+        const bool dub_echo_active=kick_dub_echo_target && !external_kick_mode_target;
+        if(dub_echo_active)kick_reverb_amount=fmaxf(kick_reverb_amount,.90f);
+        output_sample = kick_reverb.Process(output_sample,kick_reverb_amount,dub_echo_active,
+                                            !external_kick_mode_target);
         output_sample = kick_performance_hpf.Process(output_sample);
-        const float mute_target=kick_temp_mute_target?0.f:1.f;
-        kick_temp_mute_gain+=(mute_target-kick_temp_mute_gain)*.0035f;
-        output_sample*=kick_temp_mute_gain;
+        float ground = 0.0f;
+        const bool ground_transition = ground_machine_stage==1 || ground_machine_stage==2;
+        if(ground_machine_stage!=0)
+        {
+            ++ground_machine_stage_samples;
+            const float old_sine=ground_machine_sine;
+            ground_machine_sine=old_sine*0.9999786f+ground_machine_cosine*0.0065449f;
+            ground_machine_cosine=ground_machine_cosine*0.9999786f-old_sine*0.0065449f;
+            ground_machine_osc_phase+=50.0f/SAMPLE_RATE;
+            if(ground_machine_osc_phase>=1.0f)ground_machine_osc_phase-=1.0f;
+            if(ground_machine_stage==1)
+            {
+                // Brief sharp static crackle, isolated from the old kick tail.
+                ground_machine_rng ^= ground_machine_rng << 13;
+                ground_machine_rng ^= ground_machine_rng >> 17;
+                ground_machine_rng ^= ground_machine_rng << 5;
+                const float noise=float(int32_t(ground_machine_rng))/2147483648.0f;
+                ground=ClampAdded(5.0f*(noise*.22f+ground_machine_sine*.42f),-1.0f,1.0f);
+                if(ground_machine_stage_samples>=uint32_t(SAMPLE_RATE*.012f))
+                { ground_machine_stage=2;ground_machine_stage_samples=0; }
+            }
+            else if(ground_machine_stage==2)
+            {
+                // A full half-second break before the electrical scream.
+                ground=0.0f;
+                if(ground_machine_stage_samples>=uint32_t(SAMPLE_RATE*.5f))
+                {
+                    ground_machine_stage=3;ground_machine_stage_samples=0;
+                    ground_machine_kick_gain=0.0f;ground_machine_kick_started=false;
+                    ground_machine_scream_started=true;
+                    ground_machine_comp_level=0.0f;
+                    kick_ground_decay_override=true;
+                    for(uint8_t j=0;j<32;++j)ground_feedback[j]=0.0f;
+                    ground_feedback_pos=0;
+                }
+            }
+            else if(ground_machine_stage==3 || ground_machine_stage==4)
+            {
+                const uint8_t read=uint8_t((ground_feedback_pos+1u)&31u);
+                const float feedback=ground_feedback[read];
+                const float decay=ground_machine_stage==4
+                    ? SmoothstepAdded(1.0f-fminf(1.0f,float(ground_machine_stage_samples)/(0.8f*SAMPLE_RATE)))
+                    : 1.0f;
+                // A 50 Hz saw contains the 50/100/150/200 Hz mains harmonics
+                // through the bright upper range. Resonant feedback and hard
+                // clipping turn it into a loud, metallic electrical roar.
+                const float saw=2.0f*ground_machine_osc_phase-1.0f;
+                ground_machine_rng ^= ground_machine_rng << 13;
+                ground_machine_rng ^= ground_machine_rng >> 17;
+                ground_machine_rng ^= ground_machine_rng << 5;
+                const float fuzz=float(int32_t(ground_machine_rng))/2147483648.0f*.025f;
+                const float mains=saw*.72f+ground_machine_sine*.22f+fuzz;
+                const float detector=fabsf(mains);
+                ground_machine_comp_level+=(detector-ground_machine_comp_level)*
+                    (detector>ground_machine_comp_level?.025f:.00025f);
+                // Near-infinite compression with strong makeup, followed by
+                // a hard drive ceiling: the scream stays full and aggressive.
+                const float comp_gain=ClampAdded(.96f/(ground_machine_comp_level+.001f),.25f,8.0f);
+                const float feedback_gain=1.08f-.30f*(1.0f-decay);
+                const float drive=(mains+feedback*feedback_gain)*comp_gain*8.0f;
+                ground=ClampAdded(drive,-1.0f,1.0f);
+                ground_feedback[ground_feedback_pos]=ground;
+                ground_feedback_pos=uint8_t((ground_feedback_pos+1u)&31u);
+                ground_machine_scream_gain=ground_machine_scream_started?decay:0.0f;
+                if(ground_machine_stage==4 && ground_machine_stage_samples>=uint32_t(SAMPLE_RATE*.8f))
+                {
+                    ground_machine_stage=0;ground_machine_stage_samples=0;
+                    ground_machine_scream_gain=0.0f;ground_machine_kick_gain=1.0f;
+                    ground_machine_scream_started=false;
+                    kick_ground_decay_override=false;
+                }
+            }
+        }
+        if(ground_transition) output_sample=0.0f;
+        if(ground_machine_stage==1 || ground_machine_stage==2)
+            ground_machine_kick_gain=0.0f;
+        else if(ground_machine_stage==3)
+        {
+            if(ground_machine_kick_started)
+                ground_machine_kick_gain=fminf(1.0f,ground_machine_kick_gain+1.0f/(4.0f*SAMPLE_RATE));
+            else ground_machine_kick_gain=0.0f;
+        }
+        else if(ground_machine_stage==4)
+            ground_machine_kick_gain=fminf(1.0f,ground_machine_kick_gain+1.0f/(2.0f*SAMPLE_RATE));
+        else ground_machine_kick_gain=1.0f;
+        const float kick_level=fabsf(output_sample);
+        ground_machine_kick_detector+=(kick_level-ground_machine_kick_detector)*
+            (kick_level>ground_machine_kick_detector?.012f:.00022f);
+        const float scream_duck=ground_machine_stage>=3
+            ?1.0f-.85f*Clamp01Added(ground_machine_kick_detector*2.5f):1.0f;
+        // Send the saturated SFX almost at full scale; only the kick sidechain
+        // and release envelope pull it down. The final output ceiling protects
+        // the converter while preserving the dense, overdriven level.
+        const float ground_scream_output=ground*ground_machine_scream_gain*scream_duck*.96f;
+        const float level_target=(kick_temp_level_target && !external_kick_mode_target)?.12f:1.f;
+        const float level_step=(level_target<kick_temp_level_gain)
+            ?(.88f/(2.0f*SAMPLE_RATE))   // two-second fade down
+            :(.88f/(.5f*SAMPLE_RATE));   // half-second recovery
+        if(kick_temp_level_gain<level_target)
+            kick_temp_level_gain=fminf(level_target,kick_temp_level_gain+level_step);
+        else if(kick_temp_level_gain>level_target)
+            kick_temp_level_gain=fmaxf(level_target,kick_temp_level_gain-level_step);
+        output_sample*=kick_temp_level_gain;
+        // Keep the added voice out of the current kick's distortion and shared
+        // effect path. Process it through its independent Mackie/boost/HPF
+        // chain, then sum near the output before the common safety ceiling.
+        float overlay_high = 0.0f;
+        if(overlay_layer_active)
+            kick_overlay_mackie_flush_samples = KICK_OVERLAY_MACKIE_FLUSH_SAMPLES;
+        else if(kick_overlay_mackie_flush_samples > 0)
+            --kick_overlay_mackie_flush_samples;
+        if(overlay_layer_active || kick_overlay_mackie_flush_samples > 0)
+        {
+            const float overlay_mackie =
+                kick_overlay_mackie.Process(overlaySample, 1.0f);
+            const float boosted_overlay = overlay_mackie * KICK_OVERLAY_EXTRA_GAIN;
+            const float filtered_overlay = boosted_overlay - kick_overlay_hpf_x1 +
+                                           KICK_OVERLAY_HPF_COEFF * kick_overlay_hpf_y1;
+            kick_overlay_hpf_x1 = boosted_overlay;
+            kick_overlay_hpf_y1 = filtered_overlay;
+            const float flush_gain = overlay_layer_active
+                ? 1.0f
+                : SmoothstepAdded(float(kick_overlay_mackie_flush_samples) /
+                                  KICK_OVERLAY_MACKIE_FLUSH_SAMPLES);
+            overlay_high = filtered_overlay * flush_gain;
+        }
+        else
+        {
+            kick_overlay_mackie.Idle(0.f);
+            kick_overlay_hpf_x1 = kick_overlay_hpf_y1 = 0.f;
+        }
+        output_sample += overlay_high;
+        // Optional end-of-kick tanh compressor. Its tracked makeup ratio
+        // keeps average level close to the clean, click-safe bypass.
+        // Keep the detector/makeup estimate warm while bypassed, so toggling
+        // K3 does not expose an uncompensated first hit.
+        const float comp_amount_target = Clamp01Added(kick_comp_amount);
+        compressor_amount_smooth +=
+            (comp_amount_target - compressor_amount_smooth) * 0.001f;
+        const float comp_target = kick_comp_enabled && comp_amount_target > 0.001f
+            ? 1.0f : 0.0f;
+        compressor_mix += (comp_target - compressor_mix) * 0.002f;
+        if(compressor_mix > 0.0001f || comp_amount_target > 0.001f)
+        {
+            const float comp_drive = 1.0f + 8.0f * compressor_amount_smooth;
+            const float compressed = tanhf(output_sample * comp_drive);
+            const float abs_input = fabsf(output_sample);
+            const float abs_output = fabsf(compressed);
+            const float in_coeff = abs_input > compressor_input_level ? 0.0069f : 0.000208f;
+            const float out_coeff = abs_output > compressor_output_level ? 0.0069f : 0.000208f;
+            compressor_input_level += (abs_input - compressor_input_level) * in_coeff;
+            compressor_output_level += (abs_output - compressor_output_level) * out_coeff;
+            float makeup_target = 1.0f;
+            if(compressor_amount_smooth > 0.001f && compressor_output_level > 0.0001f)
+                makeup_target = ClampAdded(compressor_input_level / compressor_output_level, 0.25f, 4.0f);
+            compressor_makeup += (makeup_target - compressor_makeup) * 0.005f;
+            if(compressor_mix > 0.0f)
+                output_sample += (compressed * compressor_makeup - output_sample) * compressor_mix;
+        }
+        else
+            compressor_makeup += (1.0f - compressor_makeup) * 0.001f;
+        output_sample*=ground_machine_kick_gain;
+        output_sample+=ground_scream_output;
         // EXT IN remains a live passthrough when EXT KICK is off. Its pump is
         // the same clocked sidechain, but no kick-only FX touches this lane.
-        output_sample += external_pumped * (1.0f - external_kick_mode_mix);
+        output_sample += external_pumped * (1.0f - external_kick_mode_mix) *
+                         (ground_transition?0.0f:1.0f);
         output_sample *= param_line_gain;
         output_sample = OutputCeiling(output_sample);
         if(!std::isfinite(output_sample)) output_sample = 0.0f;
@@ -7687,12 +7857,12 @@ static void AudioCallback(
     // phase of the redesign. Keep its code below for the later FX rebuild.
     held_fx_engine.BeginBlock(held_fx_control,System::GetNow(),midi_running,
         kick_trigger_pending,perf_quarter_pending,perf_quarter_note_ms,unsigned(size));
-    if(held_fx_engine.ratchetTrigger)kick_trigger_pending=true;
+    if(held_fx_engine.ratchetTrigger || held_fx_engine.retriggerTrigger)kick_trigger_pending=true;
 
     // Held pads 1/9 temporarily take over the generated kick's three BPF
     // layers. The choice is made only at a kick boundary, so no filter
-    // coefficient changes occur halfway through a hit; pad 9 re-rolls here
-    // on every kick while held.
+    // coefficient changes occur halfway through a hit; step 9 re-rolls here
+    // on every base or clocked retrigger while held.
     static bool kick_bpf_override = false;
     static uint8_t kick_bpf_saved_count = 0;
     static float kick_bpf_saved_hz[3] = {};
@@ -7792,25 +7962,6 @@ static void AudioCallback(
     added_performance_fx.ServiceImmediateSafety();
 
 
-    if(master_decay_retime_pending)
-    {
-        master_decay_retime_pending = false;
-
-
-        /*
-         * DECAY (CC40) changes the CURRENT body's decay coefficient. Because
-         * the clean and distorted paths are derived only after this envelope,
-         * the same decay law governs both. Retiming never steps amplitude.
-         */
-        kick_voice.SetDecay(
-            MacroDecaySeconds(
-                macro_decay
-            ),
-            !kick_temp_decay_active && macro_decay >= 0.99999f
-        );
-    }
-
-
     /* SHAPE=0 is legato: MIDI note-on changes pitch without resetting phase
      * or the envelope, and only a matching note-off closes that note's gate. */
 
@@ -7867,27 +8018,6 @@ static void AudioCallback(
     param_tube_gain += (param_tube_gain_target - param_tube_gain) * PARAM_GAIN_SLEW;
     param_bpf_gain     += (param_bpf_gain_target     - param_bpf_gain)     * PARAM_GAIN_SLEW;
     macro_bpf_bank.Update(static_cast<unsigned>(size));
-
-
-    /*
-     * Slew DECAY toward its CC target once per block. Stepping the decay
-     * coefficient straight from each MIDI message zippers while DECAY turns.
-     */
-    {
-        const float decay_target = kick_temp_decay_active ? 0.f : macro_decay_target;
-        float decay_error = decay_target - macro_decay;
-
-        if(fabsf(decay_error) > 0.00005f)
-        {
-            macro_decay += decay_error * 0.06f;
-            master_decay_retime_pending = true;
-        }
-        else if(macro_decay != decay_target)
-        {
-            macro_decay = decay_target;
-            master_decay_retime_pending = true;
-        }
-    }
 
 
     for(size_t i = 0;
@@ -8197,16 +8327,16 @@ static void ResetAudioDspState()
 {
     ResetEuroOutputs();
     kick_voice.Reset();
-    for(auto& tail:kick_tail_voices)tail.Reset();
-    for(auto& tail:kick_overlay_tail_voices)tail.Reset();
     kick_overlay_voice.Reset();kick_overlay_previous.Reset();
     kick_overlay_handoff_age=kick_overlay_attack_age=RAW_909_RETRIGGER_SAMPLES;
     kick_overlay_hpf_x1=kick_overlay_hpf_y1=0.f;
     kick_overlay_mode=0;kick_overlay_note=33;kick_overlay_decay=64;
     kick_overlay_shape=64;kick_overlay_sweep=64;
     kick_performance_hpf.Reset();
+    kick_overlay_mackie.Reset();
+    kick_overlay_mackie_flush_samples=0;
     kick_temp_mute_target=false;
-    kick_temp_mute_gain=1.0f;
+    kick_temp_level_target=false;kick_dub_echo_target=false;kick_temp_level_gain=1.f;
     kick_voice_previous.Reset();
     kick_voice_handoff_age = RAW_909_RETRIGGER_SAMPLES;
     mix_glue.Reset();
@@ -8312,8 +8442,6 @@ int main(void)
     stutter_quantized_command = QUANT_FX_NONE;
     external_stutter_quantized_command = QUANT_FX_NONE;
     looper_quantized_command = QUANT_FX_NONE;
-    master_decay_retime_pending = false;
-
     macro_fx_value_hpf = 0.0f;
     macro_fx_value_lpf = 0.0f;
 

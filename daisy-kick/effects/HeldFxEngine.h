@@ -1,7 +1,6 @@
 #pragma once
 #include "IndustrialFx.h"
 #include "HazardFx.h"
-#include "KickRepeatFx.h"
 
 namespace heldfx {
 // MIDI/control writer and audio reader exchange aligned scalar mailboxes only.
@@ -28,7 +27,6 @@ struct Engine {
     IndustrialFx industrial;
     MemoryFx memory;
     HazardFx hazard;
-    KickRepeatFx repeat;
     Analysis analysis;
     Macro macro;
     uint32_t lastRequest=0,pendingSamples=0,controlCounter=0;
@@ -45,8 +43,9 @@ struct Engine {
     bool kickBpfSet=false;
     uint8_t layers=0;
     uint32_t blockedLayers=~0u,blockedSelect=~0u,lastLayerRequest=0;
-    bool loopActive=false,ratchetActive=false,ratchetTrigger=false;
-    float loopGain=0,ratchetPhase=0,ratchetNext=0,ratchetError=0;
+    bool retriggerActive=false,ratchetActive=false,ratchetTrigger=false;
+    float retriggerPhase=0,ratchetPhase=0,ratchetNext=0,ratchetError=0;
+    bool retriggerTrigger=false;
     void UpdateLayers(const Control& control,bool expired,bool stop,bool running,
                       bool kick,bool edge,unsigned frames){
         if(stop || expired){blockedLayers=control.layerRequest;blockedSelect=control.request;}
@@ -56,10 +55,16 @@ struct Engine {
         }
         layers=expired || suspended || control.layerRequest==blockedLayers?0:uint8_t(control.layerRequest);
         if(suspended || control.request==blockedSelect)controlRequest=0;
-        const bool loopWanted=(layers&BPF_LOOP) || controlRequest==9;
-        if(loopWanted!=loopActive && (expired || stop || !running || kick || edge)){
-            loopActive=loopWanted && !expired && !stop;
-            if(loopActive)repeat.Start(quarter);
+        retriggerTrigger=false;
+        const bool retriggerWanted=(layers&BPF_RETRIGGER) || controlRequest==9;
+        if(retriggerWanted!=retriggerActive && (expired || stop || !running || kick || edge)){
+            retriggerActive=retriggerWanted && !expired && !stop;
+            retriggerPhase=0;
+        }
+        if(retriggerActive){
+            if(edge)retriggerPhase=0;
+            retriggerPhase+=float(frames)/(quarter*SR);
+            if(retriggerPhase>=.5f){retriggerPhase-=.5f;retriggerTrigger=true;}
         }
         const bool ratchetWanted=(layers&RATCHET)!=0;
         ratchetTrigger=false;
@@ -89,18 +94,18 @@ struct Engine {
     float emergencyOffset=0,lastDelta=0;
     bool emergencyKick=false;
     void Suspend(){
-        if((!active && !loopActive && !ratchetActive && !layers) || suspended)return;
+        if((!active && !retriggerActive && !ratchetActive && !layers) || suspended)return;
         suspended=true;emergencyOffset=lastDelta;emergencyKick=active==1 || active==9;
         pending=next=active=0;gain=0;fadingOut=false;
-        loopActive=ratchetActive=ratchetTrigger=false;layers=0;++faults;
+        retriggerActive=ratchetActive=ratchetTrigger=retriggerTrigger=false;layers=0;++faults;
     }
 
     void Reset(){
         history.Reset();industrial.Reset(0);memory.Reset();hazard.Reset();analysis.Reset();
-        repeat.Reset();suspended=false;releasePending=false;emergencyOffset=lastDelta=0;emergencyKick=false;
+        suspended=false;releasePending=false;emergencyOffset=lastDelta=0;emergencyKick=false;
         controlRequest=0;bpfRng.Reset();kickBpfSet=false;
-        layers=0;lastLayerRequest=0;blockedLayers=blockedSelect=~0u;loopActive=ratchetActive=ratchetTrigger=false;
-        loopGain=ratchetPhase=ratchetNext=ratchetError=0;
+        layers=0;lastLayerRequest=0;blockedLayers=blockedSelect=~0u;retriggerActive=ratchetActive=ratchetTrigger=retriggerTrigger=false;
+        retriggerPhase=ratchetPhase=ratchetNext=ratchetError=0;
         macro={};lastRequest=pendingSamples=controlCounter=0;pending=active=next=0;
         fadingOut=wasRunning=false;gain=beats=dcIn=dcOut=0;quarter=.5f;
         targetCharacter=targetMotion=targetSize=targetMix=0;faults=0;
@@ -147,7 +152,7 @@ struct Engine {
     }
     bool KickBpfForKick(bool kick){
         if(!kick || suspended)return false;
-        uint8_t command=(loopActive || (layers&BPF_LOOP))?9:(layers&BPF_HELD)?1:uint8_t(controlRequest);
+        uint8_t command=(retriggerActive || (layers&BPF_RETRIGGER))?9:(layers&BPF_HELD)?1:uint8_t(controlRequest);
         if(command!=1 && command!=9){kickBpfSet=false;return false;}
         if(command==9 || !kickBpfSet){
             float centre=120.f+2680.f*bpfRng.Uniform();
@@ -158,7 +163,7 @@ struct Engine {
         }
         return true;
     }
-    bool KickBpfEngaged() const { return loopActive || (layers&(BPF_HELD|BPF_LOOP)) || controlRequest==1 || controlRequest==9 || releasePending; }
+    bool KickBpfEngaged() const { return retriggerActive || (layers&(BPF_HELD|BPF_RETRIGGER)) || controlRequest==1 || controlRequest==9 || releasePending; }
     void Activate(){
         active=next;next=0;beats=0;controlCounter=0;dcIn=dcOut=0;macro.character=0;
         if(active){
@@ -178,11 +183,6 @@ struct Engine {
         }
         if(suspended)return input;
         history.Push(input);analysis.Process(input);
-        loopGain=Clamp(loopGain+(loopActive?1.f:-1.f)/384.f,0.f,1.f);
-        if(kick && (loopActive || loopGain>0.f)){
-            float looped=repeat.Process(*kick);
-            *kick+=(looped-*kick)*loopGain;
-        }
         if(fadingOut){gain=fmaxf(0.f,gain-1.f/384.f);if(gain==0.f)Activate();}
         else if(active)gain=fminf(1.f,gain+1.f/576.f);
         if(!active)return input;
@@ -220,16 +220,7 @@ struct Engine {
         if(mode==HPF_REPEAT)return external;
         return input+lastDelta;
     }
-    // The raw kick path uses only the clocked kick looper. This keeps its
-    // capture/crossfade alive without running the unrelated external-pad DSP.
-    float ProcessKick(float kick){
-        if(suspended)return kick;
-        loopGain=Clamp(loopGain+(loopActive?1.f:-1.f)/384.f,0.f,1.f);
-        if(loopActive || loopGain>0.f){
-            float looped=repeat.Process(kick);
-            kick+=(looped-kick)*loopGain;
-        }
-        return kick;
-    }
+    // Step 9 is a clocked MIDI retrigger; no kick audio is captured or replayed.
+    float ProcessKick(float kick){return kick;}
 };
 }

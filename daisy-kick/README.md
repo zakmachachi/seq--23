@@ -7,14 +7,28 @@ and D3 MIDI clock outputs (3.3 V logic).
 
 ## Held industrial performance FX
 
-Step 1 temporarily mutes the kick, step 2 holds a random 140–800 Hz kick HPF,
-step 3 raises kick pitch by one semitone, step 4 holds 40 ms decay, and step 11
-sweeps the kick HPF upward from off. These five work from every sequencer row and page; press and release
-take effect on the next MIDI-15 kick. They do not stop MIDI trigger or clock
+Step 1 suppresses new generated hits while held, step 2 holds a random
+140–800 Hz kick HPF, step 3 raises kick pitch by one semitone, step 4 holds
+40 ms decay for new hits. Step 11 ramps the kick down over about two seconds to
+a quiet held level, then restores it over about half a second. Step 12 shortens
+new kick decays and enables the clocked, high-passed dub echo/reverb; release
+stops its send immediately and lets repeats fade over three sixteenth-note
+steps. Step 13 starts with a sharp 12 ms static crackle, then 500 ms of silence,
+followed by a distorted 50 Hz ground-loop scream for four seconds on its own.
+Kicks then return at 150 ms decay and ramp from silence to full level over four
+seconds; each kick ducks the scream.
+On release the scream fades over 800 ms, starting at the next kick boundary.
+These controls work from every selected sequencer channel, row and page, and
+always target the Kick Seed. Step 12's send release
+is immediate; Step 13 transitions take effect on MIDI-15 kick boundaries. They
+do not stop MIDI trigger or clock
 outputs. The other step keys keep their held industrial FX when KICK is
-selected. The Seed smooths mute and HPF changes; the HPF sits on the kick bus,
-so live external passthrough remains clear. MIDI CC60 controls temporary mute,
-CC62 the kick HPF and CC63 the temporary decay. See [controls, MIDI and limits](../HELD_FX.md).
+selected. Existing kick tails ring through step 1; changing DECAY affects the
+next hit without shortening the current one. The HPF sits on the kick bus, so
+live external passthrough remains clear. MIDI CC60 controls temporary hit
+suppression, CC66 step 11's level ramp, CC62 the kick HPF, CC63 temporary decay,
+CC65 step 12's dub echo, and CC70 step 13's ground machine. See
+[controls, MIDI and limits](../HELD_FX.md).
 This addition is built/tested for both boards, not uploaded.
 
 ## Dedicated FX menu
@@ -47,11 +61,12 @@ character. The partials fade smoothly before Nyquist; no detuned voices are used
 Retriggers crossfade from the prior voice over 5 ms while the new oscillator
 still resets phase on every hit.
 
-EXT IN1 remains audible as a direct passthrough when EXT KICK is off. The
-external-only PUMP ducks this branch from kick/clock triggers; it never changes
-the synthesized kick. EXT KICK instead fades the input into the kick's BPF and
-character path. Function + Menu 2 knob 1 is the output trim: −15 to +15 dB,
-with 64 at unity, after the kick and external signals are summed.
+EXT IN1 is disabled in software at the input multiply, so a floating or
+unplugged input contributes no ADC noise. Function + Menu 2 on KICK maps one
+control to each knob: tail-gate start (0–200 ms, centre about 130 ms), Acid
+clock division, tanh compressor amount (K3 press toggles its clean
+level-matched bypass), kick gain (−15 to +21 dB), cutoff fade (K5 press
+enables 2–60 ms; off restores the existing 3 ms edge), and internal reverb.
 
 The three editable centres (85 Hz–3.2 kHz) feed up to three serial, broad
 two-octave Mackie-style mid boosts before the character stage. K4 edits the
@@ -60,11 +75,12 @@ all three centre frequencies, active or stored. The Mackie path restores the
 older body/presence shaping and dual-stage overload, with each nonlinear stage
 oversampled and the 48-sample wet latency matched by the clean path. The dry
 return remains in the blend, which tops out at 65% to preserve body and
-headroom. The old hard tail gate is now a tempo-derived soft pump;
-reverb follows it and can ring through. Reverse switches at a MIDI kick edge,
-and held sequencer pads 1/9 restore random BPF and the clocked eighth-note kick
-loop. There is no standalone HPF/LPF, separate sub oscillator, or master glue
-in this phase.
+headroom. The tail gate starts at the adjustable back-menu time (about 130 ms
+at default), cuts to zero over 3 ms, holds for the selected gap, then reopens
+over 3 ms. Reverb follows it and can ring through. Reverse switches at a MIDI
+kick edge, and held sequencer pads 1/9 restore random BPF and the clocked
+eighth-note kick loop. There is no standalone HPF/LPF or separate sub
+oscillator in this phase.
 The maximum tested internal output peak was 0.907 full scale; the model stays
 below clipping across the tested sweep and BPF-centre grid. See
 [the 909 and hardcore reference comparison](analysis/raw_909/README.md).
@@ -117,9 +133,14 @@ blends 0..100% crushed audio while reducing depth from 16 to 1 bit, with
 The final dirty HPF follows quantization. Quantization deliberately adds
 rough edges; the smoothing prevents abrupt parameter-switching steps.
 
-PUNCH and DIST are lane levels; SUB boosts the clean lane only. BELLY sets the earliest gate
-start; it does nothing with the gate off. TAIL DELAY is a gate with 3 ms edges,
-not an audio delay. Reverb follows it and can ring into the chopped gap.
+The output AHD envelope now follows the kick through its effects, including
+the clean SUB lane. CC42 concentrates most of its range across 90–400 ms,
+with sweep-length and whole-note endpoints. Attack is 5 ms and release is
+20 ms before internal reverb/delay; retriggers continue smoothly from the
+current envelope level, with the original 5 ms voice handoff. CC43
+toggles a separate fixed 32 ms tail
+gap, beginning at the selected gate-start time. Reverb is also cut by the
+output envelope while it is closed.
 REVERB now retains its tank across hits, ducks from the dry kick level, and
 introduces damped eighth-note repeats above 65%. Amount changes are smoothed;
 tempo changes crossfade fixed delay taps. See the auditions below.

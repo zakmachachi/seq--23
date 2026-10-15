@@ -53,7 +53,9 @@ class SimpleSequencer {
     uint8_t heldFxDisplaySelection=0;
     KickMixer kickMixer;
     bool kickMixMode = false; // Function + MENU2 selects the mix stage instead.
+    bool acidCompMode = false; // Function + MENU2 selects the Acid compressor.
     bool kickCCPage() const;
+    bool acidCompPage() const;
     bool kickFxPage() const;
     volatile uint32_t fxBarCounter=0;
     bool kickMixPage() const;
@@ -204,8 +206,13 @@ class SimpleSequencer {
     uint8_t kickOffbassPlaying=255;
     uint32_t kickOffbassOffTick=0;
     bool kickOffbassJustTriggered=false;
-    volatile bool kickHeldButtonDown[5]={}; // mute, random HPF, +1 pitch, HPF sweep, 40 ms decay
-    bool kickHeldMuteActive=false,kickHeldRandomHpfActive=false,kickHeldDecayActive=false;
+    volatile bool kickHeldButtonDown[5]={}; // mute, random HPF, +1 pitch, volume drop, 40 ms decay
+    volatile bool kickDubButtonHeld=false;
+    volatile uint8_t kickDubGestureMask=0; // step 12 and 13 can share the dub gesture
+    bool kickDubActive=false;
+    volatile bool acidTriggerBlockHeld=false;
+    volatile bool acidDubButtonHeld=false;
+    bool kickHeldMuteActive=false,kickHeldLevelActive=false,kickHeldRandomHpfActive=false,kickHeldDecayActive=false;
     bool kickHeldPitchActive=false,kickHeldSweepActive=false;
     uint8_t kickHeldRandomHpfValue=0,kickHeldSweepHpfValue=0,kickHeldLastHpfValue=255;
     uint32_t kickHeldRng=0x6d2b79f5u;
@@ -234,6 +241,10 @@ class SimpleSequencer {
     uint8_t screechParam[NUM_CHANNELS][6]={},screechLevel[NUM_CHANNELS]={},screechStyle[NUM_CHANNELS]={};
     uint8_t synthFx[NUM_CHANNELS][6]={}; // BPF, tube, HPF, delay, reverb, erosion
     bool synthMackie[NUM_CHANNELS]={};
+    uint8_t acidCompAmount[NUM_CHANNELS]={};
+    bool acidCompEnabled[NUM_CHANNELS]={};
+    uint8_t acidOutputLevel[NUM_CHANNELS];
+    uint8_t acidBpfPeriod[NUM_CHANNELS]={}; // 0=off, 1=1 bar, 2=2 bars, 3=4 bars, 4=8 bars
     uint8_t hooverPeriod[NUM_CHANNELS]={},hooverMix[NUM_CHANNELS]={},hooverLevel[NUM_CHANNELS]={};
     uint8_t acidLevel[NUM_CHANNELS]={};
     enum AudioMachine : uint8_t { AM_NONE=0, AM_ACID, AM_HOOVER, AM_SCREECH, AM_COUNT };
@@ -265,6 +276,7 @@ class SimpleSequencer {
     bool isStepActive(uint8_t ch, uint16_t absStep);
     void drawTrigMachineView();
     void drawAcidView();
+    void drawAcidCompView();
     void drawSynthFxView();
     void drawPagesView();
 
@@ -586,6 +598,19 @@ class SimpleSequencer {
       uint8_t savedKickErosion,savedKickErosionFreq; // v20, appended
       KickPerformance::FxState savedKickFx; // v21: append only
       uint8_t savedKickPitch; // v22
+      uint8_t savedAcidCompAmount[NUM_CHANNELS]; // v24
+      uint8_t savedAcidCompEnabled[NUM_CHANNELS];
+      uint8_t savedAcidOutputLevel[NUM_CHANNELS]; // v25
+      // v26: Acid Seed 3 voice, effect and performance state.
+      uint8_t savedAcidParams[NUM_CHANNELS][6];
+      uint8_t savedHooverParams[NUM_CHANNELS][6];
+      uint8_t savedScreechParams[NUM_CHANNELS][6];
+      uint8_t savedSynthFx[NUM_CHANNELS][6];
+      uint8_t savedAcidBpfPeriod[NUM_CHANNELS],savedAcidLevel[NUM_CHANNELS];
+      uint8_t savedHooverPeriod[NUM_CHANNELS],savedHooverMix[NUM_CHANNELS],savedHooverLevel[NUM_CHANNELS];
+      uint8_t savedScreechLevel[NUM_CHANNELS],savedScreechStyle[NUM_CHANNELS];
+      uint8_t savedSkitterTiming[NUM_CHANNELS];
+      uint8_t savedSynthFlags[NUM_CHANNELS]; // bit 0 Mackie, 1 skitter, 2 acid mod
       // v16: the mix page's third slot is TAIL ATTACK (was the Tube gain);
       // no new fields, only a new meaning for an old one.
     };

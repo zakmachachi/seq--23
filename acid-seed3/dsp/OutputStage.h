@@ -1,6 +1,32 @@
 #pragma once
 #include "Blocks.h"
 namespace synth {
+// Level-matched tanh compressor. This runs per voice part before the shared
+// output limiter, so enabling it cannot bypass the DAC peak safety stage.
+struct TanhCompressor {
+    float amount=0.f,amountTarget=0.f,wet=0.f,wetTarget=0.f;
+    float inputLevel=0.f,outputLevel=0.f,makeup=1.f;
+    bool enabled=false;
+    void SetAmount(uint8_t cc){amountTarget=cc/127.f;}
+    void SetEnabled(bool on){enabled=on;wetTarget=on?1.f:0.f;}
+    float Process(float x){
+        amount+=(amountTarget-amount)*.001f;
+        wet+=(wetTarget-wet)*.002f;
+        if(!enabled && wet<.001f)return x;
+        float absIn=fabsf(x);
+        inputLevel+=absIn>inputLevel?.0069f*(absIn-inputLevel):.0002083f*(absIn-inputLevel);
+        float drive=1.f+8.f*amount;
+        float shaped=tanhf(x*drive);
+        float absOut=fabsf(shaped);
+        outputLevel+=absOut>outputLevel?.0069f*(absOut-outputLevel):.0002083f*(absOut-outputLevel);
+        float targetMakeup=outputLevel>1e-5f?Clamp(inputLevel/outputLevel,.25f,4.f):1.f;
+        // Slow makeup motion avoids gain modulation when the kick pump and
+        // compressor detector react to the same transient.
+        makeup+=(targetMakeup-makeup)*.0005f;
+        return x+(shaped*makeup-x)*wet;
+    }
+};
+
 // 1.33 ms lookahead catches accidental effect/voice peaks at unity output gain.
 // Peak gain reduction only; no AGC boosting quiet tails or noise.
 struct OutputStage {

@@ -19,6 +19,10 @@ constexpr uint8_t KICK_CHANNEL=14;
 constexpr uint8_t KICK_NEXT_PITCH=110, KICK_NEXT_DECAY=111,
                   KICK_NEXT_SHAPE=112, KICK_NEXT_SWEEP=113,
                   KICK_NEXT_TAIL=114, KICK_NEXT_COMMIT=115;
+constexpr uint8_t ACID_DELAY_RATE=108;
+constexpr uint8_t ACID_BPF_PERIOD=109;
+constexpr uint8_t ACID_COMP_AMOUNT=116, ACID_COMP_ENABLE=117, ACID_OUTPUT_LEVEL=118;
+constexpr uint8_t ACID_DUB_ECHO=111;
 constexpr uint8_t KICK_PUMP_AMOUNT=35; // shared KICK FX-menu PUMP macro
 constexpr uint8_t KICK_FX_ROUTES=92;   // bit 0 enables the internal pump route
 constexpr uint8_t ENGINE=119, SLIDE=29, HOOVER_BASE=70, PERIOD=76, BAND_MIX=77, LEVEL=78;

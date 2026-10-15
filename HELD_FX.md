@@ -1,10 +1,12 @@
 # Held industrial FX — SEQ23 / Seed3
 
-Step buttons **1, 2, 3, 4 and 11** are global momentary kick controls on every
-channel and page. Their on/off edges commit on actual MIDI-15 kick events. The
-remaining industrial FX pads are available when KICK is selected; ordinary
-step editing and Function shortcuts remain available elsewhere. Function +
-Erosion still controls its frequency.
+Step buttons **1, 2, 3, 4, 9, 10, 11, 12 and 13** control the Kick Seed on
+every selected channel and page. They do not affect the selected channel's
+sound. Kick edits and retriggers remain routed to MIDI channel 15. Their
+quantized edges use actual kick events where noted below. The other industrial
+FX pads remain available when KICK is selected; ordinary step editing and
+Function shortcuts remain available elsewhere. Function + Erosion still
+controls its frequency.
 
 No new menu or knobs are required. OLED2 shows the held effect and gesture;
 the existing FX screen's idle view lists the pad pairs. Blue pads are bar
@@ -13,22 +15,24 @@ pad; amber marks earlier keys still held.
 
 | Step | Held control | Behavior |
 | ---: | --- | --- |
-| 1 | KICK MUTE | Smoothly mutes the kick bus from the next kick until the first kick after release; MIDI triggers and clock continue. |
+| 1 | KICK MUTE | Suppresses new generated hits while held. Existing kick tails keep ringing; MIDI triggers and clock continue. The first kick after release sounds normally. |
 | 2 | RANDOM KICK HPF | Chooses a held cutoff from 140–800 Hz on the first kick, then bypasses on the next kick after release. |
 | 3 | KICK +1 | Raises kick MIDI pitch by one semitone from the next kick until the first kick after release. |
-| 4 | KICK DECAY 40 ms | Temporarily selects the minimum 40 ms body decay from the next kick until the first kick after release. |
-| 5–8, 12–16 | INDUSTRIAL FX | Existing bar-build and beat gestures on external audio. Step 12 is MEMORY; 5/13 METAL, 6/14 BINARY, 7/15 DECAY, 8/16 HAZARD. |
-| 9 | BPF + LOOP | Holds the random three-layer kick BPF and eighth-note loop. |
-| 10 | RATCHET | Internal kick retriggers accelerate 1/4 → 1/8 → 1/16 → 1/32 across one bar. |
-| 11 | KICK HPF RISE | Starts from HPF off, rises by kick steps to 800 Hz while held, and returns to off at the first kick after release. |
+| 4 | KICK DECAY 40 ms | New hits use the minimum 40 ms body decay while held. A hit already ringing keeps the decay it started with. |
+| 5–8, 13–16 | INDUSTRIAL FX | Existing bar-build and beat gestures on external audio. 5/13 METAL, 6/14 BINARY, 7/15 DECAY, 8/16 HAZARD. |
+| 9 | BPF + RETRIGGER | On any selected channel, holds the random three-layer Kick BPF and retriggers the kick on clocked eighth notes. It does not record or replay audio. |
+| 10 | RATCHET | On any selected channel, internal Kick retriggers accelerate 1/4 → 1/8 → 1/16 → 1/32 across one bar. |
+| 11 | KICK LEVEL DOWN | Ramps the kick to a quiet level over about two seconds; release restores it over about half a second. Press and release take effect at the next kick. |
+| 12 | DUB ECHO | On any selected channel, shortens new kick decays and adds the clocked, high-passed echo/reverb. Above-unity feedback makes repeats grow into bounded saturation. Press takes effect at a kick; release stops the send immediately and lets the stored tail fade. |
+| 13 | GROUND SCREAM | On any selected channel, plays crackle, 500 ms silence and a four-second solo 50 Hz feedback scream. Kick hits then return at 150 ms decay and ramp up over four seconds; the scream ducks on kicks and fades after release. |
 
-The five dedicated kick controls are independent of the channel/page selection.
-Their quantization uses actual MIDI-15 kick events, so holding or releasing
-between kicks never changes the kick mid-hit.
+These kick controls are independent of the selected channel/page. Their CCs
+always target the Kick Seed; they never substitute an effect on the selected
+channel. Changing focus does not clear an active kick performance hold.
 
 The external effects retain latest-held priority: pressing another external pad
 selects it at the next boundary, and releasing returns to the preceding held pad.
-Steps 1, 9 and 10 are independent kick controls, so mute + BPF/loop + ratchet
+Steps 1, 9 and 10 are independent kick controls, so mute + BPF/retrigger + ratchet
 can be held together in any press order. Pad 9 starts/stops on a kick or quarter boundary; pad 10
 starts on that boundary and stops retriggering on release. Its bar has 15 hits
 (1 + 2 + 4 + 8); coincident ordinary kick triggers merge into one hit. Releasing the final pad fades to the ordinary external
@@ -44,8 +48,8 @@ smoothed. If no boundary arrives, the request falls back after one estimated
 quarter note. With transport stopped a new press engages immediately. Stop
 cancels an active hold; release and press again to play FX while stopped.
 
-Channel changes clear holds. Releases from pads pressed on KICK remain consumed
-when switching channels, so they cannot accidentally toggle another pattern.
+Releasing a held pad remains consumed after switching channels, so it cannot
+accidentally toggle another pattern.
 The controller sends a keepalive every 200 ms; after 900 ms without one Seed
 fades dry. A lost connection/timeout requires another press to resume.
 
@@ -59,9 +63,8 @@ Existing external pump/repeat/filter, pitch, reverb, bitcrush and Erosion
 processing → **held FX** → existing mono mixer/glue/ceiling.
 
 Pad 9 takes over the generated kick's three BPF layers temporarily and
-captures the first eighth of a fresh kick in a fixed 32768-sample buffer and
-repeats it at unity rate, using a 2 ms wrap overlap and 8 ms entrance/release
-fades. Pad 10 uses the normal internal kick trigger path, preserving the voice's
+retriggers the kick at eighth-note intervals through the normal MIDI trigger
+path. No audio capture buffer is used. Pad 10 uses the normal internal kick trigger path, preserving the voice's
 phase reset and retrigger bridge. It does not send extra MIDI or Eurorack pulses.
 Other pads affect the external lane. The shared output glue still responds to
 their combined level. HAZARD may generate clicks with silent external input.
@@ -106,7 +109,7 @@ All CCs use **channel 15**; the existing receiver and its USART3 IRQ are unchang
 | 83 | SIZE | 0–127, default 64; cavity scale, fragment length or degradation/release time, depending on effect |
 | 84 | MIX | 0–127, default 112; smoothed dry/wet blend |
 | 85 | Held-state keepalive | Any value; send at least every 200–500 ms while holding |
-| 86 | Independent kick layers | Bit 0: pad 1 BPF; bit 1: pad 9 BPF/loop; bit 2: pad 10 ratchet; 0 clears |
+| 86 | Independent kick layers | Bit 0: pad 1 BPF; bit 1: pad 9 BPF/retrigger; bit 2: pad 10 ratchet; 0 clears |
 
 The Teensy sends external pad selection, absolute kick-layer bits and keepalive; the other four CCs are optional
 external-sequencer overrides, not newly assigned knobs. They are global to this

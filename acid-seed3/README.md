@@ -106,7 +106,9 @@ ACID CC20–25 correspond to its six controls; CC26=drive, CC27=glide,
 CC28=output level. HOOVER CC70–75 correspond to its six controls;
 CC76=motion period (0/64/127), CC77=parallel mix, CC78=output trim.
 CC80–85 control BPF, distortion send, HPF, delay, reverb and erosion; CC86
-selects Tube (0) or Mackie (127). Kick channel 15 CC35/CC92 mirror the PUMP
+selects Tube (0) or Mackie (127). CC108 selects the Acid clocked-delay rate;
+the Kick back-menu K2 sends it to every active Acid part. Kick channel 15
+CC35/CC92 mirror the PUMP
 amount and internal-route bit for the post-FX Acid/Hoover output duck.
 Velocity >=96 accents ACID. MIDI clock is 24 PPQN; Start resets motion,
 Stop releases the voice and freezes phase, Continue resumes, clock dropout
