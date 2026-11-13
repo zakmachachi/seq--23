@@ -19,12 +19,20 @@ pad; amber marks earlier keys still held.
 | 2 | RANDOM KICK HPF | Chooses a held cutoff from 140–800 Hz on the first kick, then bypasses on the next kick after release. |
 | 3 | KICK +1 | Raises kick MIDI pitch by one semitone from the next kick until the first kick after release. |
 | 4 | KICK DECAY 40 ms | New hits use the minimum 40 ms body decay while held. A hit already ringing keeps the decay it started with. |
-| 5–8, 13–16 | INDUSTRIAL FX | Existing bar-build and beat gestures on external audio. 5/13 METAL, 6/14 BINARY, 7/15 DECAY, 8/16 HAZARD. |
-| 9 | BPF + RETRIGGER | On any selected channel, holds the random three-layer Kick BPF and retriggers the kick on clocked eighth notes. It does not record or replay audio. |
+| 5 | INDUSTRIAL FX | KICK channel only. Reserved: the external-audio industrial FX are not in the current kick engine's audio path. |
+| 6 | REVERSE (v1.5.0) | KICK channel only. Kicks play reversed from the next kick while held; release returns to the Menu 2 reverse setting. |
+| 7 | RANDOM CUE | KICK channel only. Rolls a new cue preset (pitch, decay, sometimes shape). Hear it with step 15, keep it with step 16. |
+| 8 | DRIVE (v1.5.0) | KICK channel only. Flips the selected Mackie/Tube amount while held: to full when it is below halfway, to clean when it is at or above halfway. Release restores the knob's value. |
+| 9 | RANDOM BPF (v1.5.0) | On any selected channel, holds a random three-layer Kick BPF, rolled once per hold. No retrigger. |
 | 10 | RATCHET | On any selected channel, internal Kick retriggers accelerate 1/4 → 1/8 → 1/16 → 1/32 across one bar. |
 | 11 | KICK LEVEL DOWN | Ramps the kick to a quiet level over about two seconds; release restores it over about half a second. Press and release take effect at the next kick. |
 | 12 | DUB ECHO | On any selected channel, shortens new kick decays and adds the clocked, high-passed echo/reverb. Above-unity feedback makes repeats grow into bounded saturation. Press takes effect at a kick; release stops the send immediately and lets the stored tail fade. |
-| 13 | GROUND SCREAM | On any selected channel, plays crackle, 500 ms silence and a four-second solo 50 Hz feedback scream. Kick hits then return at 150 ms decay and ramp up over four seconds; the scream ducks on kicks and fades after release. |
+| 13 | GROUND SCREAM (v1.5.0) | On any normal (non-synth) channel, plays crackle, 500 ms silence and a four-second solo 50 Hz feedback scream. Kick hits then return at 150 ms decay and ramp up over four seconds; the scream ducks on kicks and fades after release (at once if the transport is stopped). |
+| 14–16 | PREVIOUS / AUDITION / KEEP | KICK channel only. 14 returns to the previous kick, holding 15 plays the cue, 16 keeps the cue. |
+
+FUNCTION + steps 1–3 bypass these pads and stay the knob-loop record
+controls. While KICK is selected, screen 2 shows the held pad and its live
+value.
 
 These kick controls are independent of the selected channel/page. Their CCs
 always target the Kick Seed; they never substitute an effect on the selected

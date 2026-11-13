@@ -14,9 +14,11 @@ kick CC updates are disabled on that overridden track. NONE restores its normal
 MIDI routing and kick controls where applicable.
 
 Physical **Menu 2** shows the selected engine's controls. Up to three sequencer
-tracks can each select a synth engine. Teensy row 4 is fixed to MIDI channel
-**15** for the kick; row 5 is fixed to MIDI channel **12** for the off-acid
-voice and remains directly editable, muteable, and parameter-controlled. Other
+tracks can each select a synth engine. Teensy row 4 defaults to MIDI channel
+**15** for the kick and row 5 to MIDI channel **12** for the off-acid voice
+(since v1.5.0 any row's channel can be changed; the off-bass follower only
+plays while row 5 is on MIDI 12). Row 5 stays directly editable, muteable, and
+parameter-controlled. Other
 synth tracks are assigned MIDI channels **13 and 14** automatically; rows 6
 and 7 remain freely assignable for normal MIDI output.
 Real channel-15 kick hits on steps 1/5/9/13 can arm an automatic off-bass on

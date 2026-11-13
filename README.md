@@ -11,26 +11,108 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## What's new in v1.5.0
+
+**Bob's new kick engine and performance pads, plus a round of fixes that make them usable.** Flash both the Teensy and the Daisy: the boards talk a new protocol, and old firmware on either side gives wrong pitches and dead kick controls.
+
+**A new kick engine.** The kick is one oscillator, modelled on a 909, with a fixed 60 ms body and a DECAY from 40 ms to 2.4 s after it. Before every hit the Teensy sends the kick's pitch, decay, shape, sweep and tail tune together, so a hit never starts with half-old, half-new settings. Any track with the KICK machine on MIDI channel 15 plays it.
+
+| Page | Knob 1 | Knob 2 | Knob 3 | Knob 4 | Knob 5 | Knob 6 |
+|---|---|---|---|---|---|---|
+| Menu 1 | KEY | HARM | SPREAD (click: scale) | PUMP / REVERB (click: switch) | TMOD | TUNE |
+| Menu 2 | SWEEP | DECAY (click: reverse) | TAIL (click: 32 ms gap) | BPF 1–3 (click: how many) | MACKIE / TUBE (click: switch) | SHAPE |
+| FUNCTION + Menu 2 | Tail-gate start | Acid clock division | Tanh compressor (click: on/off) | Kick gain, −15 to +21 dB | Cut fade (click: on) | Reverb |
+
+- **HARM** adds phase-locked 2nd, 3rd and 5th harmonics to the oscillator, from a round body at zero to a harder, drum-machine kick
+- **SHAPE** is how far the pitch sweep starts above the note; at exactly zero the kick becomes a sustained sine bass that glides between notes
+- **TUNE** moves the tail's pitch up to ±12 semitones, and **TMOD** wobbles it, so TMOD only does something once TUNE is away from the middle
+- **TAIL** holds the kick open and then cuts it. Turn it fully clockwise and the screen shows **OPEN**: nothing is cut and DECAY alone sets the length. **For long kicks, turn TAIL fully up**
+- **BPF** is three broad mid boosts, 85 Hz–3.2 kHz, feeding the distortion
+- **Mackie** is a two-stage desk-style drive. **Tube** is the v1.4.0 Tube again
+- Menu 3 on a KICK channel is Euclid again; it replaces only the kick generator's rhythm
+
+**Performance pads.** The step buttons play kick effects while held. Most take effect from the next kick, so they stay on the beat.
+
+| Step | While held | Works from |
+|---|---|---|
+| 1 | Mutes new kick hits; tails keep ringing | any track |
+| 2 | Random high-pass, 140–800 Hz | any track |
+| 3 | Kick up one semitone | any track |
+| 4 | 40 ms decay | any track |
+| 6 | **REVERSE**: kicks play reversed | KICK |
+| 7 | Rolls a random variation of the kick (the cue) | KICK |
+| 8 | **DRIVE**: Mackie/Tube flips, to full if it is below halfway, to clean if it is above | KICK |
+| 9 | Random BPF, held | any track |
+| 10 | Ratchet: 1/4 → 1/8 → 1/16 → 1/32 across one bar | any track |
+| 11 | Kick fades down over 2 s, back in ½ s | any track |
+| 12 | Dub echo | KICK |
+| 13 | **GROUND SCREAM**: a crackle, half a second of silence, then a 50 Hz roar; kicks come back underneath after 4 s | any normal track |
+| 14 | Back to the previous kick | KICK |
+| 15 | Hear the cue instead of the kick | KICK |
+| 16 | Keep the cue | KICK |
+
+- **These steps no longer edit patterns.** On the KICK channel every step is a pad; on other tracks steps 1–4 and 9–13 are
+- **Screen 2 shows what a pad does** while you hold it on the KICK channel, with live values: the high-pass frequency, the note step 3 will play, the cue's settings, or the drive change, e.g. `MACKIE 30% > 100%`
+- **FUNCTION + steps 1–3** are still the knob-loop record controls: keep an edit, turn a movement into a loop, clear the loops
+- The full reference is in [HELD_FX.md](HELD_FX.md) and [KICK_MENU2.md](KICK_MENU2.md)
+
+**A second Daisy for synths (optional).** A second Seed running [acid-seed3](acid-seed3/README.md) plays ACID, HOOVER and SCREECH voices. In Menu 4, press knob 1 to switch a track's sound between them. Row 5 on MIDI 12 can also follow the kick, playing an off-beat bass on the kick's tail pitch; mute row 5 to stop it.
+
+**MIDI IN is clock and transport only.** Clock, Start, Continue and Stop are followed and passed through to MIDI OUT; incoming notes and CCs are ignored. MIDI OUT never waits on the port, so a busy bus can no longer stall the buttons and screens. Details in [MIDI_SYNC.md](MIDI_SYNC.md).
+
+**Fixed**
+- The whole unit felt laggy and slow. Every screen update sent a full frame over I²C, about 25 ms per screen, so knobs and buttons were only read about 20 times a second while a screen was changing. Screens now send only the bytes that changed, a fraction of a millisecond for a knob turn, and refresh at 25 frames a second again
+- Step LEDs froze while playing and never updated on the menu pages. They follow the playhead and your presses again
+- Menu 1 on a KICK channel was very laggy: screen 2's waveform was re-simulated in full on every frame while HARM, TUNE or TMOD moved, although none of them change the picture
+- KEY, SPREAD, TUNE, TMOD, DECAY and SHAPE did nothing unless the kick was on row 4. The kick can be on any track again, and the Daisy keeps its per-hit settings in step with the knobs
+- The kick was cut off after its sweep however long DECAY was; see TAIL above
+- The MIDI channel selector (hold **CHn** + **Pot 1**) locked rows 4 and 5 and skipped channels 12 and 15. Every track can use any channel 1–16 again, and saved channels load as you set them
+- PUMP did nothing: EXT IN had been muted. It is back, with v1.4.0's noise gate keeping an unplugged input silent
+- The ground scream's feedback locked at full scale and put out a DC offset with clicks instead of a roar. It is now a 50 Hz roar at a level near the kick's, and it stops when released even with the transport stopped
+- FUNCTION + steps 1–3 had been taken over by the kick pads
+- The boot animation is back
+- Screen 2's left edge was cut off on some screens. It is moved 2 pixels in; `OLED2_NUDGE_PX` in `include/SeqConfig.h` sets it (0 restores the old placement)
+
+**Under the hood**
+- Mackie's two oversampled stages run in one pass: about 30 % less CPU, with the output within −82 dB of before
+- If the Daisy runs short of CPU, Mackie/Tube fades out for 2 s instead of the whole machine freezing
+- Audio blocks stay at two samples, keeping v1.4.0's whine fix
+
+Saved patches from v1.4.0 load; the new controls start at their defaults. If you ran a pre-release build in between, check each track's MIDI channel once.
+
+---
+
 ## What's new in v1.4.0
 
-The kick's menus have been reassigned: **Menu 1** has KEY, HARM, SPREAD,
-PUMP/REVERB INT-only (knob 4 press switches between them), TMOD and TUNE; **Menu 2** knob 1 controls SWEEP alongside DECAY,
-TAIL, BPF, Mackie/Tube and SHAPE; **Menu 3** is Euclid. Euclid replaces only
-the kick generator's trigger rhythm, keeping its pitch, key and sound settings.
-See [KICK_MENU2.md](KICK_MENU2.md) for the control map.
+**The kick has its own FX menu.** On a KICK channel, **MENU3** (the Euclid button) now opens six effect slots. Other machines keep Euclid there.
+
+| Knob | Effect | Click |
+|---|---|---|
+| 1 | DELAY → LOOP → STUT → PITCH | Cycles between them |
+| 2 | HPF ↔ LPF | Switches between them |
+| 3 | PUMP | EXT IN only, or EXT IN + kick |
+| 4 | REVERB | EXT IN only, EXT IN + kick, or kick only |
+| 5 | BITCRUSH | EXT IN only, or EXT IN + kick |
+| 6 | EROSION (**FUNCTION + turn** sets its frequency, 80 Hz–12 kHz) | EXT IN only, or EXT IN + kick |
+
+- **Hold any knob for a second** to send that effect back to zero at the end of the bar. A `*` marks a queued reset, and turning the knob again cancels it
+- **Three new effects:** BITCRUSH, EROSION (a short delay wobbled by a sine and filtered noise, after Ableton's Erosion) and PITCH (±12 semitones, on EXT IN)
+- **Reverb** now keeps its tail between hits, ducks under the kick, and adds clocked eighth-note repeats above 65 %
+- After five seconds untouched, screen 2 shows an overview of all six slots
+- The full reference is in [KICK_MENU2.md](KICK_MENU2.md)
 
 **The kick voice was rebuilt.** On Menu 1 a KICK channel now has:
-- **HARM** (pot 2): adds phase-locked harmonics to the existing oscillator,
-  from a round sine/body at zero toward a harder, parabolic kick character
-- **SWEEP** (Menu 2 knob 1): controls the kick's sweep time. Menu 1 knob 3 is SPREAD and its push cycles scale; Menu 1 knob 4 is PUMP.
-- **TMOD** (pot 5): 0 holds pitch static; the knob introduces a gentle rate from about 0.02 Hz up to 16 Hz, resetting on every hit
+- **WAVE** (pot 2): from sine towards saw harmonics, without changing the bass
+- **SWEEP** (pot 3): how long the pitch sweep lasts, 4–240 ms. Record it under FUNCTION and it changes per step
+- **TMOD** (pot 5): 0 is a single glide; above that, a 0.125–16 Hz pitch wobble on the tail
 - **TUNE** (pot 6): where the tail's pitch moves to, ±12 semitones
 
-SHAPE keeps the reference 909 sweep at its midpoint, gives finer control near a steady bass note, and reserves the upper range for laser sweeps. At exactly zero it becomes a phase-continuous, sustained sine bass; repeated MIDI notes glide the pitch without restarting the waveform. Attack harmonics, HARM, pitch movement and DECAY fade in smoothly as SHAPE rises. DECAY is a 40–600 ms amplitude T30 after the fixed 60 ms body plateau at kick settings.
+Elsewhere on the kick:
+- **SUB** is now a clean +15 dB bass shelf rather than a second oscillator
+- **Mackie** runs four times oversampled, through up to three mid-boost stages (the BPF layers)
+- **TAIL DELAY** cuts a gap between the punch and the bass, and **BELLY** sets where that gap starts
 
-The active raw-kick path has three independent, parallel BPFs on the Mackie/Tube send. Each has its own 85 Hz–3.2 kHz center and contributes at full send when enabled; the OLEDs show all three center frequencies. Mackie and Tube are separate selectable saturators; the dry kick stays aligned and present. Function + Menu 2 knob 1 sets the summed output from −15 to +15 dB, with 64 at unity. This phase has no standalone HPF/LPF, protected bands, extra oscillators, or master compressor. [909 and hardcore-reference comparisons](daisy-kick/analysis/raw_909/README.md).
-
-**The kick Seed's two outputs carry its mono kick/EXT IN mix.** The Acid/Hoover Seed can be separately pumped from the KICK FX PUMP amount when its route is set to EXT+INT; its sidechain follows the kick MIDI notes and acts after that Seed's FX, so the two Seeds can remain separate at the mixer.
+**Both Daisy outputs now carry the kick and EXT IN as one mono mix.** An unplugged input stays silent instead of adding noise.
 
 **Eurorack outputs:** the Daisy's D2 sends a 5 ms trigger on every kick, and D3 sends MIDI clock at 24 PPQN. Both are 3.3 V logic, so use a buffer for 5 V gear. Wiring is in [daisy-kick/EURORACK_OUTPUTS.md](daisy-kick/EURORACK_OUTPUTS.md).
 
@@ -55,7 +137,7 @@ Saved patches from v1.3.0 load as before; the new effects start switched off.
 **The kick has been rebuilt from scratch.** It is one oscillator that starts the same way on every hit. Three things set its shape, the way they do on a dedicated drum machine: the **note** is the pitch the kick settles on, **DEPTH** is how far above that note the punch's pitch sweep starts, and **SHAPE** is how long the sweep lasts and how hard the front of the kick is.
 
 **Shape the kick from the Notes page.** On a KICK channel, Menu 1's knobs take on kick duties:
-- **HARM** (current design) leaves the established sine/body exactly unchanged at zero. Turning it up adds phase-locked 2nd, 3rd and 5th harmonics from the same oscillator, moving from round toward a harder, parabolic drum-machine character without detuned voices or a separate sub layer. The OLED waveform icon follows the macro. The previous supersaw implementation was removed because its detuned voices produced moving phase cancellations.
+- **WAVE** (pot 2) morphs the oscillator from a pure sine to a five-voice supersaw, drawn as a little waveform that bends from sine into saw as you turn it, the way Elektron's wave displays do. The bass stays exactly the same at every setting: WAVE only adds the saw's harmonics. The saws are locked to the sub the way the sine is, so the body never phases against it and every kick starts the same; only the top shimmers. Their buzz is kept above 250 Hz, a sine sub under a high-passed supersaw, so SHAPE's punch cuts through and the low end stays put at full WAVE
 - **SWEEP TIME** (pot 5) stretches or shortens SHAPE's sweep, from 0.65x to 1.55x, and shows the result in milliseconds. It clicks into place at 1.00x on the way past, and its button snaps it straight back there. Record it under FUNCTION like any Notes-page knob and it changes per step
 - **DEPTH** (pot 6, formerly velocity) is where the sweep starts, 0 to 127: 0 is no sweep at all, 127 starts four octaves above the note
 - **CURVE** (pot 3) is how the sweep falls: turn it down for a snappy drop that settles fast (a hard tock), up for a pitch that hangs high and then falls (laser / boing). It clicks into place at the plain curve in the middle, and **FUNCTION + pot 3** snaps it back there. Drawn as a little falling curve
@@ -83,7 +165,7 @@ Saved patches from v1.3.0 load as before; the new effects start switched off.
 **Fixed**
 - A loud click whenever the kick's HPF was engaged: at the start of every hit it switched back to the unfiltered kick in a single sample
 - A tick on every hit when the tail was still sounding, getting louder as SUB went up
-- Earlier supersaw phasing against the sub: detuned voices drifted against the fundamental and swept through deep nulls over each tail. The current HARM control uses one oscillator and phase-locked partials.
+- The supersaw phasing against the sub: its saws were detuned in Hz, so every harmonic drifted off the sub and swept through deep nulls over each tail
 
 Saved patches from v1.2.0 load as before; the new controls start at their centre settings.
 
@@ -133,7 +215,6 @@ It works on the kick page for every performance parameter except the two repeats
 **Playing it**
 - **MENU2** on a KICK channel — six endless pots for the performance controls
 - **FUNCTION + MENU2** — the mix stage: levels for each distortion, the filter bank, sub and punch
-- On that page, press the first knob button to toggle **EXT KICK**: external kick audio replaces the oscillator and enters the same clean/dirty kick chain and FX
 - Kick fills pick their own filter character and keep it until the pattern re-seeds, so builds stay varied without drifting
 - Patches now save and restore the kick settings along with everything else
 
