@@ -231,6 +231,27 @@ class SimpleSequencer {
     void applyKickProgression(uint8_t& note);
     void sendKickOverlay(uint8_t mode,const KickPreset& preset);
     bool isKickChannel(uint8_t ch) const;
+    // A row that plays the Kick Seed: KICK machine routed to MIDI 15. Any row
+    // can be the kick again (as before the "row 4 is the kick" change); the
+    // per-hit packet and kick presets follow whichever row last triggered.
+    bool kickSeedRow(uint8_t ch) const;
+    volatile uint8_t kickRow=3;
+    // Screen 2 feedback for the kick performance pads while KICK is selected.
+    uint8_t kickPadShown=0;        // 1..16; 0 = nothing pressed yet
+    uint16_t kickPadsDown=0;       // pads physically held
+    uint32_t kickPadShownMs=0;     // last press/release (overlay lingers after)
+    uint32_t kickPadFrameMs=0;
+    bool kickPadOverlayWasOn=false;
+    // Momentary kick pads on the KICK row: 6 REVERSE, 8 DRIVE; step 13
+    // GROUND SCREAM from any normal row. Sent from loop() on change.
+    bool kickPadReverseHeld=false, kickPadReverseSent=false;
+    bool kickPadDriveHeld=false;
+    uint8_t kickPadDriveSent=255, kickPadDriveCC=48, kickPadDriveUserSeen=255;
+    bool kickScreamHeld=false, kickScreamSent=false;
+    void serviceKickPadOverrides();
+    void noteKickPad(uint8_t i,bool down);
+    bool kickPadOverlayActive(uint32_t now) const;
+    void drawKickPadOverlay(uint32_t now);
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
     bool skitterEnabled[NUM_CHANNELS]={};
@@ -254,8 +275,8 @@ class SimpleSequencer {
     bool synthMachine(uint8_t ch) const { return ch<NUM_CHANNELS && audioMachine[ch]!=AM_NONE; }
     uint8_t outputMidiChannel(uint8_t ch) const {
       if(ch>=NUM_CHANNELS)return 0;
-      if(ch==3)return softsynth::KICK_CHANNEL; // Row 4 is the fixed kick lane.
-      if(ch==4)return softsynth::CHANNEL; // Row 5 is the fixed off-acid lane.
+      // Every row sends on the channel picked with Channel + pot 1. Rows 4/5
+      // default to the Kick Seed (MIDI 15) and Acid lane (MIDI 12).
       return synthMachine(ch)?(synthMidiChannel[ch]&15):(midiChannel[ch]&15);
     }
     bool synthMidiChannelInUse(uint8_t midiCh,uint8_t except) const;
@@ -381,9 +402,9 @@ class SimpleSequencer {
     Adafruit_NeoPixel ledStrip;
     void updateLEDs();
     uint32_t lastDisplayMillis;
-    // Full-frame OLED transfers are synchronous I2C writes. Keep the UI at
-    // 10 FPS so two displays cannot monopolize the foreground loop.
-    const uint32_t displayRefreshMs = 100;
+    // Full-frame OLED transfers are synchronous I2C writes. 25 FPS keeps the
+    // UI responsive while leaving the foreground loop time between frames.
+    const uint32_t displayRefreshMs = 40;
     void drawDisplay();
     void drawOverview(); // secondary OLED: global state dashboard
     void drawDebugGrid();

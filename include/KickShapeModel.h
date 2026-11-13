@@ -124,13 +124,12 @@ struct KickShapeInputs {
   int32_t elapsedMs = -1;     // since this channel's last hit; < 0 = idle
 
   // Everything that changes the picture (the cursor's elapsedMs does not).
+  // KickShape::compute() and kickViewMs() read only these four; comparing
+  // HARM/TUNE/TMOD/tempo too re-simulated the whole kick on every frame
+  // while one of those knobs was turning, for an identical picture.
   bool sameShape(const KickShapeInputs& o) const {
     return note == o.note && shape == o.shape && sweepTime == o.sweepTime &&
-           velocity == o.velocity && wave == o.wave && decay == o.decay &&
-           tailOn == o.tailOn && tailAmount == o.tailAmount && punch == o.punch && sub == o.sub &&
-           tmod == o.tmod && belly == o.belly &&
-           // Tempo only moves the picture through the tail gate.
-           (bpm == o.bpm || !(tailOn && tailAmount));
+           decay == o.decay;
   }
 };
 
@@ -247,19 +246,30 @@ void drawKickShape(D& d, const KickShapeInputs& in, uint16_t white, uint16_t inv
   if (!cached || !in.sameShape(last)){
     cached = true; last = in;
     for (int x = 0; x < 128; x++){ lo[x] = 127; hi[x] = -128; }
-    const float sr = 12000.f;
+    // At most 4096 samples (32 per column) for the min/max scope. A fixed
+    // 12 kHz made a long decay (up to ~5 s on screen) cost ~60k samples.
+    const float sr = fminf(12000.f, 4096.f / (viewMs * .001f));
     float phase = .5f;
     int prevX = 0, prevY = 0;
     const int n = (int)(viewMs * .001f * sr);
     for (int i = 0; i < n; i++){
       float ms = i * 1000.f / sr;
       float f = k.pitchHz(ms);
-      float fundamental = sinf(phase * 6.2831853f);
       float attack = expf(-ms / 6.f);
-      float body = fundamental + .037f*sinf(phase*12.5663706f)
-                   + (-.05f-.25f*attack)*sinf(phase*18.8495559f)
-                   + .22f*attack*sinf(phase*31.4159265f)
-                   - .05f*attack*sinf(phase*43.9822972f);
+      // sin(2..7 theta) from one sine/cosine pair: sin((m+1)t) =
+      // 2cos(t)sin(mt) - sin((m-1)t). Same waveform, two calls instead of five.
+      const float th = phase * 6.2831853f;
+      const float s1 = sinf(th), c2 = 2.f * cosf(th);
+      const float s2 = c2 * s1;
+      const float s3 = c2 * s2 - s1;
+      const float s4 = c2 * s3 - s2;
+      const float s5 = c2 * s4 - s3;
+      const float s6 = c2 * s5 - s4;
+      const float s7 = c2 * s6 - s5;
+      float body = s1 + .037f*s2
+                   + (-.05f-.25f*attack)*s3
+                   + .22f*attack*s5
+                   - .05f*attack*s7;
       float y = .55f * k.envelope(ms) * body;
       int yy = mid - (int)lroundf(y * half);
       int x = (int)(127.f * ms / viewMs); if (x > 127) x = 127;

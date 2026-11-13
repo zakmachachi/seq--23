@@ -7,6 +7,7 @@
 #include "midi_pulse_output.h"
 #include "erosion_fx.h"
 #include "external_pitch_fx.h"
+#include "input_gate.h"
 #include "../include/FixedDelayTap.h"
 #include "../include/KickShapeModel.h"
 #include "effects/HeldFxEngine.h"
@@ -24,6 +25,13 @@ UART_HandleTypeDef midi_uart;
 static MidiRxQueue midi_rx;
 static volatile uint32_t midi_uart_errors = 0;
 static volatile uint32_t audio_max_cycles = 0, audio_overruns = 0;
+// Overload guard: when audio blocks keep running close to their deadline the
+// main loop gets no time to parse MIDI and the whole machine feels frozen.
+// The audio callback then fades the Mackie/Tube character out for a moment
+// (a dry kick instead of a lockup). Written and read only in the audio IRQ.
+static bool character_shed_active = false;
+static uint32_t character_shed_until_ms = 0;
+static volatile uint32_t character_sheds = 0;
 
 // USB serial diagnostics (Seed micro-USB, 1 line per second). Measures what
 // the codec input and output actually carry on hardware, which the desktop
@@ -111,7 +119,11 @@ static constexpr float PI =
 
 
 /* External input. */
-static constexpr float EXTERNAL_INPUT_1_GAIN = 0.00f;
+// EXT IN back at unity (it was muted in software, which also left PUMP with
+// nothing to duck). The v1.4.0 input gate keeps an unplugged jack's pickup
+// out of the mix instead.
+static constexpr float EXTERNAL_INPUT_1_GAIN = 1.00f;
+static InputGate external_input_gate;
 // Input 2 is intentionally quarantined: leave the ADC channel disconnected
 // without allowing its floating/noisy pin to enter the external bus.
 static constexpr float EXTERNAL_INPUT_2_GAIN = 0.00f;
@@ -285,6 +297,20 @@ static constexpr float CHARACTER_AMOUNT_SMOOTH_MS = 18.0f;
  * transient arrives.
  */
 static constexpr float CHARACTER_HEAVY_PROCESS_EPSILON = 0.0005f;
+
+/* Old (v1.4.0 / a775d46) Tube return management, restored with the old Tube:
+ * the Tube is an additive dirty lane. Its return loses DC/infrasonics, then
+ * the settled kick fundamental, so the clean kick stays authoritative at f0
+ * while the Tube's 2f/3f/4f harmonics come through. */
+static constexpr float CHARACTER_RETURN_DC_POLE_A = 0.99738543f; /* ~20 Hz */
+static constexpr float CHARACTER_FUNDAMENTAL_NOTCH_Q = 1.80f;
+static constexpr float DIRTY_POST_GAIN_DRY = 0.90f;
+static constexpr float DIRTY_POST_GAIN_WET = 0.74f;
+static inline float HighPassFixedPole(float input, float pole_a, float& state)
+{
+    state = (1.0f - pole_a) * input + pole_a * state;
+    return input - state;
+}
 
 /*
  * DJ-filter coefficients follow ~30 ms control smoothing. Updating the
@@ -1504,7 +1530,8 @@ struct Biquad
 
 
     void SetBandpass(float frequency,
-                     float q)
+                     float q,
+                     float rate = SAMPLE_RATE)
     {
         if(frequency < 50.0f)
             frequency = 50.0f;
@@ -1525,7 +1552,7 @@ struct Biquad
         float w0 =
             6.2831853f *
             frequency /
-            SAMPLE_RATE;
+            rate;
 
 
         float c =
@@ -1558,6 +1585,27 @@ struct Biquad
 
         a2 =
             (1.0f - alpha) / a0;
+    }
+
+
+    // Restored from v1.4.0: the Tube return's fundamental notch.
+    void SetNotch(float frequency,
+                  float q)
+    {
+        frequency = ClampAdded(frequency, 10.0f, 10000.0f);
+        q = ClampAdded(q, 0.3f, 12.0f);
+
+        float w0 = TWO_PI * frequency / SAMPLE_RATE;
+        float c = cosf(w0);
+        float s = sinf(w0);
+        float alpha = s / (2.0f * q);
+        float a0 = 1.0f + alpha;
+
+        b0 = 1.0f / a0;
+        b1 = -2.0f * c / a0;
+        b2 = 1.0f / a0;
+        a1 = -2.0f * c / a0;
+        a2 = (1.0f - alpha) / a0;
     }
 
 
@@ -4231,6 +4279,8 @@ struct MackieOversampling
     float input_history[50] = {}, output_history[194] = {};
     int input_pos=0, output_pos=0;
     void Reset(){ *this=MackieOversampling(); }
+    // Clears only the decimator, keeping the interpolator primed.
+    void ClearOutput(){ for(float& h:output_history)h=0.f; output_pos=0; }
     void Push(float x){ if(--input_pos<0)input_pos=24; input_history[input_pos]=input_history[input_pos+25]=x; }
     float Upsample(int phase)
     {
@@ -4263,28 +4313,44 @@ static CharacterAlignment clean_alignment;
 // Mackie channel/preamp character, based on the earlier project version that
 // sounded closer to the external desk: input rolloff, asymmetrical overload,
 // broad low-mid/presence coloration, a second driven stage and output rolloff.
-// Both nonlinear stages are oversampled and FIR-decimated to keep aliasing low.
+// Both nonlinear stages, the DC block and the EQ run inside ONE 192 kHz
+// pass: upsample once, decimate once. Two separate round trips doubled the
+// FIR work; on a desktop render this pass costs ~30% less, output within
+// -82 dB of the two-pass version (48-sample total latency is unchanged).
 struct MacroMackieProcessor
 {
-    MackieOversampling os,os2;
+    static constexpr float OVERSAMPLED_RATE = SAMPLE_RATE * 4.0f;
+    // The dry path is aligned for 48 samples (the former two round trips).
+    // One round trip delays 24, so the wet is padded by the other 24.
+    static constexpr int LATENCY_PAD = 24;
+    MackieOversampling os;
     Biquad body_band,presence_band;
     float pre_lp_1=0.f,pre_lp_2=0.f,dc_x1=0.f,dc_y1=0.f,post_lp_1=0.f,post_lp_2=0.f;
+    float pad[LATENCY_PAD]={}; int pad_pos=0;
     bool idle=true;
+    void ResetDownstream()
+    {
+        os.ClearOutput();
+        body_band.Reset();presence_band.Reset();
+        body_band.SetBandpass(340.f,.78f,OVERSAMPLED_RATE);
+        presence_band.SetBandpass(1050.f,.92f,OVERSAMPLED_RATE);
+        dc_x1=dc_y1=post_lp_1=post_lp_2=0.f;
+        for(float& p:pad)p=0.f;
+        pad_pos=0;
+    }
     static float Core(float x)
     {
-        float shaped=x+.020f*x*fabsf(x);
-        const float rail=shaped>=0.f?1.f:.955f;
-        float u=fabsf(shaped)/rail;
-        return (shaped>=0.f?1.f:-1.f)*rail*(u/sqrtf(1.f+u*u));
+        // sign*rail*u/sqrt(1+u^2) with u=|s|/rail equals s/sqrt(1+(s/rail)^2):
+        // same asymmetric soft rails, one division instead of two.
+        const float shaped=x+.020f*x*fabsf(x);
+        const float v=shaped*(shaped>=0.f?1.f:1.f/.955f);
+        return shaped/sqrtf(1.f+v*v);
     }
     void Reset()
     {
         os.Reset();
-        os2.Reset();
-        body_band.Reset();presence_band.Reset();
-        body_band.SetBandpass(340.f,.78f);
-        presence_band.SetBandpass(1050.f,.92f);
-        pre_lp_1=pre_lp_2=dc_x1=dc_y1=post_lp_1=post_lp_2=0.f;
+        ResetDownstream();
+        pre_lp_1=pre_lp_2=0.f;
         idle=true;
     }
     // Prime the input interpolator while bypassed. Downstream state is cleared
@@ -4297,10 +4363,7 @@ struct MacroMackieProcessor
         pre_lp_2+=pre_a*(pre_lp_1-pre_lp_2);
         os.Push(pre_lp_2);
         if(!idle){
-            os2.Reset();body_band.Reset();presence_band.Reset();
-            dc_x1=dc_y1=post_lp_1=post_lp_2=0.f;
-            body_band.SetBandpass(340.f,.78f);
-            presence_band.SetBandpass(1050.f,.92f);
+            ResetDownstream();
             idle=true;
         }
     }
@@ -4311,28 +4374,22 @@ struct MacroMackieProcessor
         pre_lp_1+=pre_a*(input-pre_lp_1);
         pre_lp_2+=pre_a*(pre_lp_1-pre_lp_2);
         os.Push(pre_lp_2);
-        float first=0.f;
         const float drive=1.f+(MACKIE_INTERNAL_GAIN-1.f)*Clamp01Added(amount);
+        // 5 Hz DC block retuned for 192 kHz: 0.99935 at 48 kHz, to the power 1/4.
+        constexpr float dc_r=.99983747f;
+        float decimated=0.f;
         for(int phase=0;phase<4;++phase)
         {
-            float x=os.Upsample(phase);
-            x=Core(x*drive);
-            float y=os.Downsample(x,phase==0);
-            if(phase==0)first=y;
+            const float first=Core(os.Upsample(phase)*drive);
+            const float dc=first-dc_x1+dc_r*dc_y1;
+            dc_x1=first;dc_y1=dc;
+            const float eq=dc+body_band.Process(dc)*.62f+presence_band.Process(dc)*.25f;
+            const float y=os.Downsample(Core(eq*1.65f),phase==0);
+            if(phase==0)decimated=y;
         }
-        constexpr float dc_r=.99935f;
-        float dc=first-dc_x1+dc_r*dc_y1;
-        dc_x1=first;dc_y1=dc;
-        float body=body_band.Process(dc);
-        float presence=presence_band.Process(dc);
-        float eq=dc+body*.62f+presence*.25f;
-        os2.Push(eq);
-        float second=0.f;
-        for(int phase=0;phase<4;++phase)
-        {
-            float y=os2.Downsample(Core(os2.Upsample(phase)*1.65f),phase==0);
-            if(phase==0)second=y;
-        }
+        const float second=pad[pad_pos];
+        pad[pad_pos]=decimated;
+        if(++pad_pos==LATENCY_PAD)pad_pos=0;
         post_lp_1+=post_a*(second-post_lp_1);
         post_lp_2+=post_a*(post_lp_1-post_lp_2);
         float output=post_lp_2*param_mackie_gain;
@@ -4368,8 +4425,7 @@ static MacroMackieProcessor kick_overlay_mackie;
        two inverting stages    each triode inverts, and the second is
                                biased differently, so the pair does not
                                simply cancel its own asymmetry.
-       coupling caps           ~5 Hz high-pass between stages; their corner
-                               removes infrasonic content.
+       coupling caps           ~20 Hz high-pass between stages.
        roll-off                a gentle 2-pole top end at ~7.5 kHz, and a
                                low-mid bump at ~180 Hz from the plate load.
 
@@ -4380,11 +4436,10 @@ static MacroMackieProcessor kick_overlay_mackie;
 static constexpr float TUBE_STAGE1_BIAS = -0.18f;
 static constexpr float TUBE_STAGE2_BIAS = -0.32f;
 
-/* Input drive into stage 1 at full amount (the amount knob adds more). */
-// The output trim cannot undo distortion made before it, so keep the Tube
-// stages below the harsh digital-sounding overload region.
-static constexpr float TUBE_INPUT_GAIN = 1.45f;
-static constexpr float TUBE_INTERSTAGE_GAIN = 1.25f;
+/* Input drive into stage 1 at full amount (the amount knob adds more).
+ * Restored to the v1.4.0 / a775d46 Tube voicing. */
+static constexpr float TUBE_INPUT_GAIN = 3.2f;
+static constexpr float TUBE_INTERSTAGE_GAIN = 2.4f;
 
 /* Blocking: how much grid current shifts the bias, and how fast it recovers. */
 static constexpr float TUBE_BLOCKING_DEPTH = 0.45f;
@@ -4392,18 +4447,35 @@ static constexpr float TUBE_BLOCKING_CHARGE_A = 0.0052f;    /* ~1 ms at the 4x r
 static constexpr float TUBE_BLOCKING_RECOVER_A = 0.0000868f; /* ~60 ms at the 4x rate */
 
 /*
- * Two inverting triode stages give a positive-polarity return. Preserve
- * their net polarity before the common post-distortion high-pass.
+ * Output staging, and polarity. The old engine needed -1 because its dry
+ * lane had its own filtering; this engine's dry kick is a pure delay, and
+ * measured with the host harness -1 now cancels the body (peak 0.70 -> 0.59
+ * at amount 0.3) while +1 adds to it like the old Tube did (0.70 -> 0.83 ->
+ * 0.96 at 0.3/0.8, old engine 0.81 -> 0.86 -> 0.94).
  */
 static constexpr float TUBE_OUTPUT_GAIN = 1.0f;
 
 
 struct MacroTubeProcessor
 {
+    Biquad plate_bump;
+
     float previous_input = 0.0f;
+    float pre_lp_1 = 0.0f;
+    float pre_lp_2 = 0.0f;
+
+    /* Coupling caps: input, interstage, output. */
+    float couple_in = 0.0f;
+    float couple_mid = 0.0f;
+    float couple_out_x = 0.0f;
+    float couple_out_y = 0.0f;
+
     /* Blocking bias shift, per stage. */
     float block_1 = 0.0f;
     float block_2 = 0.0f;
+
+    float post_lp_1 = 0.0f;
+    float post_lp_2 = 0.0f;
 
 
     /*
@@ -4441,9 +4513,19 @@ struct MacroTubeProcessor
 
     void Reset()
     {
+        plate_bump.Reset();
+        plate_bump.SetBandpass(180.0f, 0.70f);
+
         previous_input = 0.0f;
+        pre_lp_1 = pre_lp_2 = 0.0f;
+        couple_in = couple_mid = 0.0f;
+        couple_out_x = couple_out_y = 0.0f;
         block_1 = block_2 = 0.0f;
+        post_lp_1 = post_lp_2 = 0.0f;
     }
+
+
+    void Trigger() {}
 
 
     float Process(float input, float amount)
@@ -4451,19 +4533,33 @@ struct MacroTubeProcessor
         if(amount <= CHARACTER_HEAVY_PROCESS_EPSILON)
         {
             previous_input = input;
+            pre_lp_1 = pre_lp_2 = input;
+            couple_in = input;
+            couple_mid = 0.0f;
+            couple_out_x = couple_out_y = 0.0f;
             block_1 = block_2 = 0.0f;
+            post_lp_1 = post_lp_2 = 0.0f;
+            plate_bump.Process(0.0f);
             return 0.0f;
         }
 
+        constexpr float pre_a = 0.79210000f; /* 12 kHz, as the Mackie */
+        pre_lp_1 += pre_a * (input - pre_lp_1);
+        pre_lp_2 += pre_a * (pre_lp_1 - pre_lp_2);
+
+        /* Input coupling cap, ~20 Hz. */
+        constexpr float couple_a = 0.00261f;
+        couple_in += couple_a * (pre_lp_2 - couple_in);
+        float grid = pre_lp_2 - couple_in;
+
         float stage2_sum = 0.0f;
-        const float drive_1=1.f+(TUBE_INPUT_GAIN-1.f)*Clamp01Added(amount);
-        const float drive_2=1.f+(TUBE_INTERSTAGE_GAIN-1.f)*Clamp01Added(amount);
 
         for(int os = 1; os <= 4; ++os)
         {
             float t = static_cast<float>(os) * 0.25f;
             float x =
-                (previous_input + (input - previous_input) * t) * drive_1;
+                (previous_input + (grid - previous_input) * t) *
+                TUBE_INPUT_GAIN;
 
             /* Stage 1, with its bias dragged down by grid current. */
             float bias_1 = TUBE_STAGE1_BIAS - block_1 * TUBE_BLOCKING_DEPTH;
@@ -4475,7 +4571,10 @@ struct MacroTubeProcessor
                                           : TUBE_BLOCKING_RECOVER_A) *
                 (grid_current_1 - block_1);
 
-            float x2 = s1 * drive_2;
+            /* Interstage coupling cap, ~20 Hz, at the oversampled rate. */
+            constexpr float mid_a = 0.000654f;
+            couple_mid += mid_a * (s1 - couple_mid);
+            float x2 = (s1 - couple_mid) * TUBE_INTERSTAGE_GAIN;
 
             float bias_2 = TUBE_STAGE2_BIAS - block_2 * TUBE_BLOCKING_DEPTH;
             float s2 = Triode(x2, bias_2);
@@ -4489,8 +4588,24 @@ struct MacroTubeProcessor
             stage2_sum += s2;
         }
 
-        previous_input = input;
-        return stage2_sum * 0.25f * TUBE_OUTPUT_GAIN;
+        previous_input = grid;
+
+        float stage2 = stage2_sum * 0.25f;
+
+        /* Output coupling cap / DC block. */
+        constexpr float dc_r = 0.99935f;
+        float coupled = stage2 - couple_out_x + dc_r * couple_out_y;
+        couple_out_x = stage2;
+        couple_out_y = coupled;
+
+        /* Plate-load low-mid bump. */
+        float voiced = coupled + plate_bump.Process(coupled) * 0.35f;
+
+        constexpr float post_a = 0.62500000f; /* ~7.5 kHz */
+        post_lp_1 += post_a * (voiced - post_lp_1);
+        post_lp_2 += post_a * (post_lp_1 - post_lp_2);
+
+        return post_lp_2 * TUBE_OUTPUT_GAIN * param_tube_gain;
     }
 };
 
@@ -4523,7 +4638,24 @@ struct MacroCharacterProcessor
 
     void PrepareMackie() { mackie.Reset(); }
     CharacterAlignment tube_alignment;
-    void PrepareTube() { tube.Reset(); tube_alignment.Reset(); }
+    // Old Tube return path: DC/infrasonic high-pass and fundamental notch.
+    float tube_return_dc_state = 0.0f;
+    Biquad tube_fundamental_notch;
+    float tube_notch_hz = 0.0f;
+    void PrepareTube()
+    {
+        tube.Reset(); tube_alignment.Reset();
+        tube_return_dc_state = 0.0f; tube_fundamental_notch.Reset();
+    }
+    // Track the settled kick fundamental so the Tube return leaves it to
+    // the clean kick (called on every kick trigger).
+    void SetFundamental(float hz)
+    {
+        hz = ClampAdded(hz, 24.0f, 120.0f);
+        if(fabsf(hz - tube_notch_hz) < 0.01f) return;
+        tube_notch_hz = hz;
+        tube_fundamental_notch.SetNotch(hz, CHARACTER_FUNDAMENTAL_NOTCH_Q);
+    }
 
     void Reset()
     {
@@ -4568,24 +4700,29 @@ struct MacroCharacterProcessor
     {
         if(active_tube)
         {
-            float target = Clamp01Added(macro_tube_amount);
+            float target = character_shed_active ? 0.0f : Clamp01Added(macro_tube_amount);
             tube_amount_smoothed = SmoothAmount(tube_amount_smoothed, target);
-            if(tube_amount_smoothed <= CHARACTER_HEAVY_PROCESS_EPSILON)
-            {
-                tube.Process(input, 0.0f);
-                return input;
-            }
-            float wet = tube_alignment.Process(
-                tube.Process(input, tube_amount_smoothed));
+            // Restored v1.4.0 / a775d46 Tube: an ADDITIVE dirty lane. The
+            // amount raises the drive (up to 6x) and the return level; the
+            // return then loses DC and the kick fundamental, as before.
+            const float amount = tube_amount_smoothed <= CHARACTER_HEAVY_PROCESS_EPSILON
+                ? 0.0f : tube_amount_smoothed;
+            const float drive = 1.0f + amount * CHARACTER_AMOUNT_DRIVE_RANGE;
+            float wet = tube.Process(input * drive, amount) * amount;
+            wet = HighPassFixedPole(wet, CHARACTER_RETURN_DC_POLE_A, tube_return_dc_state);
+            wet = tube_fundamental_notch.Process(wet);
+            float post = DIRTY_POST_GAIN_DRY + (DIRTY_POST_GAIN_WET - DIRTY_POST_GAIN_DRY) * amount;
+            if(post < 0.62f) post = 0.62f;
+            wet = tube_alignment.Process(wet * post);   // match the 48-sample dry delay
             if(!AudioValueSafe(wet))
             {
                 PrepareTube();
-                return input;
+                return 0.0f;
             }
             return wet;
         }
 
-        float target = Clamp01Added(macro_mackie_amount);
+        float target = character_shed_active ? 0.0f : Clamp01Added(macro_mackie_amount);
         mackie_amount_smoothed = SmoothAmount(mackie_amount_smoothed, target);
         if(mackie_amount_smoothed <= CHARACTER_HEAVY_PROCESS_EPSILON)
         {
@@ -4606,11 +4743,19 @@ struct MacroCharacterProcessor
     {
         ConsumeSwitchRequest();
         float colored = ProcessSelectedWet(character_input);
-        float amount = active_tube ? tube_amount_smoothed : mackie_amount_smoothed;
-        /* Keep at least 35% phase-aligned dry body at the extreme setting;
-         * this preserves the kick's fundamental and leaves output headroom. */
-        float blend = amount * MAX_PARALLEL_BLEND;
-        float selected = dry_input + (colored - dry_input) * blend;
+        float selected;
+        if(active_tube)
+        {
+            // Old Tube: the dirty return is added to the full dry kick.
+            selected = dry_input + colored;
+        }
+        else
+        {
+            /* Keep at least 35% phase-aligned dry body at the extreme setting;
+             * this preserves the kick's fundamental and leaves output headroom. */
+            float blend = mackie_amount_smoothed * MAX_PARALLEL_BLEND;
+            selected = dry_input + (colored - dry_input) * blend;
+        }
         constexpr float transition_step = 1.0f / (SAMPLE_RATE * 0.010f);
 
         if(switch_state == SwitchState::FADE_TO_ZERO)
@@ -5915,6 +6060,13 @@ static void HandleKickNoteOn(
     if(kick_note_holds[note]<255)++kick_note_holds[note];
     note_gate=true;
 
+    // A controller that sends real kick pitches (anything but the fixed
+    // trigger key 60) carries pitch in the note and TUNE in the velocity.
+    if(note != 60)
+    {
+        kick_preset_next[0] = kick_preset_stage[0] = note;
+        kick_preset_next[4] = kick_preset_stage[4] = velocity;
+    }
     if(kick_preset_next_valid)
     {
         for(uint8_t i=0;i<5;++i)kick_pending_preset[i]=kick_preset_next[i];
@@ -6545,6 +6697,9 @@ static bool HandleSixMacroCC(
         case CC_DECAY_ABSOLUTE:
         {
             macro_decay_target = v;
+            // Every hit replays the last next-hit preset; keep it current so
+            // a DECAY turn is heard on the next kick even without a packet.
+            kick_preset_next[1] = kick_preset_stage[1] = value;
             return true;
         }
 
@@ -6730,6 +6885,7 @@ static bool HandleSixMacroCC(
         case CC_KICK_SHAPE_ABSOLUTE:
         {
             macro_kick_shape = v;
+            kick_preset_next[2] = kick_preset_stage[2] = value;
             return true;
         }
 
@@ -6760,6 +6916,7 @@ static bool HandleSixMacroCC(
         case CC_KICK_SWEEP_TIME:
         {
             kick_sweep_time = v;
+            kick_preset_next[3] = kick_preset_stage[3] = value;
             return true;
         }
 
@@ -7357,6 +7514,9 @@ static void AudioCallback(
     static bool raw_was_external = false;
     static uint32_t raw_kick_age_samples = UINT32_MAX;
     static uint32_t amp_hold_samples_for_hit = 0;
+    // TAIL (AMP ENV HOLD) fully clockwise = no cut: DECAY alone sets the
+    // kick's length, as on the older engine.
+    static bool amp_hold_open_for_hit = false;
     static float amp_env_gain = 0.0f;
     static float amp_env_trigger_start_gain = 0.0f;
     static float tail_start_smooth = 64.0f / 127.0f;
@@ -7383,6 +7543,8 @@ static void AudioCallback(
     static uint32_t ground_machine_rng = 0x9173a5c1u;
     static float ground_feedback[32] = {};
     static uint8_t ground_feedback_pos = 0;
+    static float ground_fb_dc_x = 0.0f, ground_fb_dc_y = 0.0f;   // feedback DC blocker
+    static float ground_out_dc_x = 0.0f, ground_out_dc_y = 0.0f; // output DC blocker
     if(external_kick_mode_target && !raw_was_external)
     {
         kick_voice.Reset();
@@ -7396,8 +7558,11 @@ static void AudioCallback(
     }
     raw_was_external = external_kick_mode_target;
 
+    const uint32_t block_now_ms = System::GetNow();
+    character_shed_active = int32_t(character_shed_until_ms - block_now_ms) > 0;
+
     const bool quarter_edge = perf_quarter_pending;
-    held_fx_engine.BeginBlock(held_fx_control, System::GetNow(), midi_running,
+    held_fx_engine.BeginBlock(held_fx_control, block_now_ms, midi_running,
         kick_trigger_pending, quarter_edge, perf_quarter_note_ms,
         static_cast<unsigned>(size));
     if(held_fx_engine.ratchetTrigger || held_fx_engine.retriggerTrigger)
@@ -7498,6 +7663,8 @@ static void AudioCallback(
                                        ground_machine_stage==2 ||
                                        (ground_machine_stage==3 && !ground_machine_kick_started)) &&
                                       !external_kick_mode_target;
+        // The restored Tube return notches out this hit's fundamental.
+        macro_character_processor.SetFundamental(kick_frequency);
         if(!external_kick_mode_target && !suppress_new_hit)
             TriggerKickVoice(last_velocity);
         macro_bpf_layer_count_latched = raw_held_kick_bpf ? 3 : macro_bpf_layer_count;
@@ -7513,7 +7680,18 @@ static void AudioCallback(
                 Clamp01Added(macro_amp_hold)*127.f + 0.5f);
             const float hold_ms = kickdaisy::ampHoldMs(hold_cc,sweep_ms,whole_note_ms);
             amp_hold_samples_for_hit = static_cast<uint32_t>(hold_ms*0.001f*SAMPLE_RATE);
+            amp_hold_open_for_hit = hold_cc >= 127;
         }
+    }
+
+    // A released GROUND SCREAM normally fades from the next kick. With the
+    // transport stopped there is no next kick, so fade it straight away
+    // instead of leaving a full-level roar running.
+    if(!kick_ground_machine_target && !midi_running &&
+       ground_machine_stage>=1 && ground_machine_stage<=3)
+    {
+        ground_machine_stage = 4;
+        ground_machine_stage_samples = 0;
     }
 
     raw_bpf_gain_smooth +=
@@ -7521,6 +7699,8 @@ static void AudioCallback(
     param_bpf_gain = raw_bpf_gain_smooth;
     param_line_gain +=
         (param_line_gain_target - param_line_gain) * PARAM_GAIN_SLEW;
+    param_tube_gain +=
+        (param_tube_gain_target - param_tube_gain) * PARAM_GAIN_SLEW;
     macro_bpf_bank.Update(static_cast<unsigned>(size));
 
     for(size_t i = 0; i < size; ++i)
@@ -7531,6 +7711,8 @@ static void AudioCallback(
 
         float external = in[EXTERNAL_INPUT_CHANNEL_1][i] * EXTERNAL_INPUT_1_GAIN;
         if(!std::isfinite(external)) external = 0.0f;
+        /* An unplugged input is not silent; keep its noise out of the mix. */
+        external = external_input_gate.Process(external);
         const float external_pumped = added_performance_fx.pump.Process(
             external, perf_quarter_note_ms);
         KickVoiceOut voice, previous_voice;
@@ -7626,7 +7808,7 @@ static void AudioCallback(
                 amp_env_target = amp_env_trigger_start_gain +
                     (1.0f-amp_env_trigger_start_gain) *
                     SmoothstepAdded(float(age)/attack_samples);
-            else if(age < attack_samples+amp_hold_samples_for_hit)
+            else if(amp_hold_open_for_hit || age < attack_samples+amp_hold_samples_for_hit)
                 amp_env_target = 1.0f;
             else if(age < attack_samples+amp_hold_samples_for_hit+release_samples)
                 amp_env_target = 1.0f-SmoothstepAdded(
@@ -7700,9 +7882,15 @@ static void AudioCallback(
                 // Near-infinite compression with strong makeup, followed by
                 // a hard drive ceiling: the scream stays full and aggressive.
                 const float comp_gain=ClampAdded(.96f/(ground_machine_comp_level+.001f),.25f,8.0f);
-                const float feedback_gain=1.08f-.30f*(1.0f-decay);
-                const float drive=(mains+feedback*feedback_gain)*comp_gain*8.0f;
-                ground=ClampAdded(drive,-1.0f,1.0f);
+                // The mains tone is hard-clipped on its own; the feedback is
+                // added AFTER the clipper with no DC and a loop gain below 1.
+                // (Feeding it back into the x8 drive gave a loop gain of ~16,
+                // which latched the output at +1: a DC offset with clicks.)
+                const float driven=ClampAdded(mains*comp_gain*8.0f,-1.0f,1.0f);
+                const float fb_hp=feedback-ground_fb_dc_x+.99673f*ground_fb_dc_y; // ~25 Hz
+                ground_fb_dc_x=feedback;ground_fb_dc_y=fb_hp;
+                const float feedback_gain=(1.08f-.30f*(1.0f-decay))*.80f;     // 0.86 -> 0.62
+                ground=ClampAdded(driven*.55f+fb_hp*feedback_gain,-1.0f,1.0f);
                 ground_feedback[ground_feedback_pos]=ground;
                 ground_feedback_pos=uint8_t((ground_feedback_pos+1u)&31u);
                 ground_machine_scream_gain=ground_machine_scream_started?decay:0.0f;
@@ -7735,7 +7923,12 @@ static void AudioCallback(
         // Send the saturated SFX almost at full scale; only the kick sidechain
         // and release envelope pull it down. The final output ceiling protects
         // the converter while preserving the dense, overdriven level.
-        const float ground_scream_output=ground*ground_machine_scream_gain*scream_duck*.96f;
+        // Output DC blocker. Scream level (was .96, close to full scale on
+        // top of the kick; .60 was still too loud on hardware): .35, ~-5 dB.
+        constexpr float GROUND_SCREAM_LEVEL=.35f;
+        const float ground_ac=ground-ground_out_dc_x+.99673f*ground_out_dc_y;
+        ground_out_dc_x=ground;ground_out_dc_y=ground_ac;
+        const float ground_scream_output=ground_ac*ground_machine_scream_gain*scream_duck*GROUND_SCREAM_LEVEL;
         const float level_target=(kick_temp_level_target && !external_kick_mode_target)?.12f:1.f;
         const float level_step=(level_target<kick_temp_level_gain)
             ?(.88f/(2.0f*SAMPLE_RATE))   // two-second fade down
@@ -7839,6 +8032,21 @@ static void AudioCallback(
     if(raw_elapsed > audio_max_cycles) audio_max_cycles = raw_elapsed;
     uint32_t raw_budget = uint32_t(SystemCoreClock / 48000u * size);
     if(raw_elapsed > raw_budget) ++audio_overruns;
+    // Leaky count of near-deadline blocks: 8 net slow blocks shed the
+    // character stage for 2 s. This timing excludes libDaisy's own DMA and
+    // conversion work around the callback, hence 80% rather than 100%.
+    static unsigned near_deadline_blocks = 0;
+    if(raw_elapsed > raw_budget / 5u * 4u)
+    {
+        if(++near_deadline_blocks >= 8u)
+        {
+            near_deadline_blocks = 0;
+            character_shed_until_ms = block_now_ms + 2000u;
+            ++character_sheds;
+        }
+    }
+    else if(near_deadline_blocks)
+        --near_deadline_blocks;
     if(KICK_USB_DIAGNOSTICS)
     {
         if(raw_elapsed > diag_accum.max_cycles) diag_accum.max_cycles = raw_elapsed;
@@ -8326,6 +8534,7 @@ static void AudioCallback(
 static void ResetAudioDspState()
 {
     ResetEuroOutputs();
+    external_input_gate.Reset();
     kick_voice.Reset();
     kick_overlay_voice.Reset();kick_overlay_previous.Reset();
     kick_overlay_handoff_age=kick_overlay_attack_age=RAW_909_RETRIGGER_SAMPLES;
@@ -8521,12 +8730,12 @@ int main(void)
             uint32_t budget = SystemCoreClock / 48000u * AUDIO_BLOCK_SIZE;
             hw.PrintLine("diag t=%ds blk2 in1 dc=%d rms=%d pk=%d | in2 dc=%d rms=%d pk=%d"
                          " | out_pk=%d | cpu_max=%d/1000 overruns=%d"
-                         " uart_err=%d",
+                         " uart_err=%d sheds=%d",
                          int(System::GetNow() / 1000u),
                          dc[0], ac[0], micro(d.peak[0]), dc[1], ac[1], micro(d.peak[1]),
                          micro(d.out_peak),
                          int(d.max_cycles * 1000ull / budget), int(audio_overruns),
-                         int(midi_uart_errors));
+                         int(midi_uart_errors), int(character_sheds));
         }
 #endif
 

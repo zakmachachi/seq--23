@@ -45,7 +45,7 @@ private:
         for(uint8_t i=0;i<count_;++i){
             const uint8_t key=stack_[i];
             if(key==0)layers|=heldfx::BPF_HELD;
-            if(key==8)layers|=heldfx::BPF_RETRIGGER;
+            if(key==8)layers|=heldfx::BPF_HELD; // step 9: random BPF held, no retrigger
             if(key==9)layers|=heldfx::RATCHET;
             if(key!=0 && key!=8 && key!=9)wire=key+1;
         }

@@ -1,4 +1,5 @@
 #include "KickMixer.h"
+#include "OledFlush.h"
 #include <stdio.h>
 
 namespace {
@@ -155,11 +156,12 @@ void KickMixer::draw(Adafruit_SH1106G& d,bool focus){
   d.setCursor(0,57);
   if(focus){d.print(compressorEnabled_?"3 CMP:ON":"3 CMP:OFF");d.print(" 5 CUT:");d.print(cutoffEnabled_?"ON":"OFF");}
   else d.print("K3 COMP / K5 CUTOFF");
-  d.setTextWrap(true);d.display();
+  d.setTextWrap(true);oledFlush(d);
 }
 
 void KickMixer::render(Adafruit_SH1106G& overview,Adafruit_SH1106G* focus,uint32_t now){
-  if(!active_ || (!dirty_ && rendered_ && uint32_t(now-lastFrameMs_)<100))return;
+  // Static page: redraw only after a change, at most 25 FPS (blocking I2C).
+  if(!active_ || !dirty_ || (rendered_ && uint32_t(now-lastFrameMs_)<40))return;
   draw(overview,false);if(focus)draw(*focus,true);
   dirty_=false;rendered_=true;lastFrameMs_=now;
 }

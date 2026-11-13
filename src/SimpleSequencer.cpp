@@ -1,6 +1,7 @@
 #include "SoftSynthProtocol.h"
 #include "MidiWirePolicy.h"
 #include "SimpleSequencer.h"
+#include "OledFlush.h"
 static uint8_t getScale(uint8_t mode, const uint8_t** outScale);
 #include "KickShapeModel.h"
 #include <IntervalTimer.h>
@@ -201,16 +202,24 @@ void SimpleSequencer::begin(){
   // init display
   Wire.begin();
   Wire.setClock(400000); // speed up I2C to 400kHz to reduce OLED blocking time
-  // Probe only the expected OLED address. A full 1..126 scan made a failed
-  // or held I2C bus look like a startup lock and delayed MIDI initialization.
-  Wire.beginTransmission(0x3C);
-  displayPresent = (Wire.endTransmission() == 0);
-  if(displayPresent){
-    displayPresent = display.begin(0x3C);
-    display.setRotation(SCREEN_ROTATION);
-  }else{
-    Serial.println("OLED1 not found; continuing without it");
+  // quick I2C scan to help debug wiring/address
+  Serial.println("Scanning I2C bus...");
+  bool any = false;
+  // simple I2C scan
+  for (uint8_t addr = 1; addr < 127; addr++){
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0){
+      Serial.print("I2C device found at 0x"); Serial.println(addr, HEX);
+      any = true;
+    }
   }
+  if (!any) Serial.println("No I2C devices found");
+
+  // initialize display
+  displayPresent = display.begin(0x3C);
+  display.setRotation(SCREEN_ROTATION); // 0 = normal (release); override to 2 for upside-down PCB
+  oledAttach(display, Wire, 0x3C);      // partial updates: only changed bytes go over I2C
+  if (!displayPresent) Serial.println("OLED1 not found; continuing without it");
 
   // second I2C bus + second OLED (overview screen)
   Wire1.begin();
@@ -220,6 +229,12 @@ void SimpleSequencer::begin(){
   if (Wire1.endTransmission() == 0){
     display2.begin(0x3C);
     display2.setRotation(SCREEN_ROTATION); // matches the primary screen
+    // Screen 2's picture can sit a couple of columns off the glass on some
+    // SH1106 modules. With the panel turned 180 degrees, moving the picture
+    // away from its left edge means a lower controller column.
+    const int nudge = OLED2_NUDGE_PX;
+    const int ramColumn = (SCREEN_ROTATION == 2) ? 2 - nudge : 2 + nudge;
+    oledAttach(display2, Wire1, 0x3C, (uint8_t)constrain(ramColumn, 0, 4));
     display2Present = true;
     Serial.println("OLED2 detected on Wire1");
   } else {
@@ -230,7 +245,7 @@ void SimpleSequencer::begin(){
   ledStrip.setBrightness(LED_BRIGHTNESS);
   ledStrip.clear();
   ledStrip.show();
-  // Keep startup deterministic: no blocking animation or multi-second splash.
+  bootAnimation();
 
   // Initialize hardware MIDI_SERIAL for MIDI at 31250 baud
   MIDI_SERIAL.begin(31250);
@@ -327,7 +342,7 @@ void SimpleSequencer::sendAcidCC(uint8_t ch,uint8_t cc,uint8_t value){
 }
 
 void SimpleSequencer::syncKickHeldControls(uint8_t ch){
-  if(ch!=3)return;
+  if(!kickSeedRow(ch))return;
   const bool mute=kickHeldButtonDown[0];
   kickHeldMuteActive=mute;
   midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_TEMP_MUTE,mute?127:0,true);
@@ -370,11 +385,12 @@ void SimpleSequencer::syncKickHeldControls(uint8_t ch){
 }
 
 void SimpleSequencer::randomizeKickCue(){
+  const uint8_t kr=kickRow;
   if(!kickPresetInitialized){
-    kickCurrentPreset.note=channelPitch[3];
+    kickCurrentPreset.note=channelPitch[kr];
     kickCurrentPreset.decay=kickPerformance.parameterValue(KickPerformance::DECAY);
     kickCurrentPreset.shape=kickPerformance.parameterValue(KickPerformance::SHAPE);
-    kickCurrentPreset.sweep=kickSweepTime[3];
+    kickCurrentPreset.sweep=kickSweepTime[kr];
     kickPreviousPreset=kickCuePreset=kickCurrentPreset;
     kickPresetInitialized=true;
   }
@@ -386,9 +402,9 @@ void SimpleSequencer::randomizeKickCue(){
   auto nextRandom=[this](){
     uint32_t& x=kickPresetRng;x^=x<<13;x^=x>>17;x^=x<<5;return x;
   };
-  const uint8_t mode=euclidScaleMode[3] ? euclidScaleMode[3] : 5; // diminished auxiliary when scale is OFF
+  const uint8_t mode=euclidScaleMode[kr] ? euclidScaleMode[kr] : 5; // diminished auxiliary when scale is OFF
   const uint8_t* scale=nullptr;const uint8_t size=getScale(mode,&scale);
-  const int root=channelPitch[3];
+  const int root=channelPitch[kr];
   uint8_t candidates[7];uint8_t count=0;
   for(int delta=-3;delta<=3;++delta){
     if(!delta)continue;
@@ -432,9 +448,10 @@ static bool kickLastHitSwap=false;
 
 void SimpleSequencer::applyKickProgression(uint8_t& note){
   // Preset pitch is the root; preserve each step's relative pitch offset.
-  kickStepOffset=(int)note-(int)channelPitch[3];
-  KickPreset live{channelPitch[3],kickPerformance.parameterValue(KickPerformance::DECAY),
-                  kickPerformance.parameterValue(KickPerformance::SHAPE),kickSweepTime[3]};
+  const uint8_t kr=kickRow;
+  kickStepOffset=(int)note-(int)channelPitch[kr];
+  KickPreset live{channelPitch[kr],kickPerformance.parameterValue(KickPerformance::DECAY),
+                  kickPerformance.parameterValue(KickPerformance::SHAPE),kickSweepTime[kr]};
   if(!kickPresetInitialized){
     kickCurrentPreset=kickPreviousPreset=kickCuePreset=live;
     kickPresetInitialized=true;
@@ -637,14 +654,15 @@ void SimpleSequencer::loop(){
     selected=kickCurrentPreset;
     kickUiSyncPending=false;
     __asm__ volatile ("msr primask, %0" :: "r" (irqState) : "memory");
-    const int rootShift=(int)selected.note-(int)channelPitch[3];
+    const uint8_t kr=kickRow;
+    const int rootShift=(int)selected.note-(int)channelPitch[kr];
     __asm__ volatile ("mrs %0, primask" : "=r" (irqState) :: "memory");
     __disable_irq();
-    channelPitch[3]=selected.note;
-    kickSweepTime[3]=selected.sweep;
+    channelPitch[kr]=selected.note;
+    kickSweepTime[kr]=selected.sweep;
     for(uint16_t s=0;s<TOTAL_STEPS;++s)
-      if(pitch[3][s]!=255)
-        pitch[3][s]=(uint8_t)constrain((int)pitch[3][s]+rootShift,0,127);
+      if(pitch[kr][s]!=255)
+        pitch[kr][s]=(uint8_t)constrain((int)pitch[kr][s]+rootShift,0,127);
     __asm__ volatile ("msr primask, %0" :: "r" (irqState) : "memory");
     kickPerformance.setParameterValue(KickPerformance::DECAY,selected.decay);
     kickPerformance.setParameterValue(KickPerformance::SHAPE,selected.shape);
@@ -660,6 +678,7 @@ void SimpleSequencer::loop(){
   if(heldFxTransportWasRunning && !isRunning)heldFxButtons.Clear();
   heldFxTransportWasRunning=isRunning;
   heldFxButtons.Service(now);
+  serviceKickPadOverrides();
   kickPerformance.setHeldFx(heldFxButtons.Selected(),heldFxButtons.Held(),now);
   if(heldFxDisplaySelection!=heldFxButtons.Selected()){
     heldFxDisplaySelection=heldFxButtons.Selected();kickMixer.invalidate();lastDisplayMillis=0;
@@ -942,18 +961,29 @@ void SimpleSequencer::loop(){
   // Update display + LEDs together at the configured refresh interval.
   // Pushing WS2812 too often disables interrupts during the bit-bang and starves
   // the matrix scan; the original 60Hz-ish cadence was correct.
+  // Kick pad feedback takes screen 2 while a pad is held (plus a linger);
+  // the page underneath redraws in full once it ends.
+  const bool padOverlay=display2Present && kickPadOverlayActive(now);
+  if(kickPadOverlayWasOn && !padOverlay){
+    kickPerformance.invalidate();kickMixer.invalidate();lastDisplayMillis=0;
+  }
+  kickPadOverlayWasOn=padOverlay;
+  const bool screen2Free=display2Present && !heldFxButtons.Selected() && !padOverlay;
   if(displayPresent && (kickCCPage() || kickFxPage() || kickMixPage())){
     // OLED1 stays a permanent grid; OLED2 keeps intentional focus.
     // The component renders dirty frames at no more than 25 FPS.
-    if (kickMixPage()) kickMixer.render(display, display2Present && !heldFxButtons.Selected() ? &display2 : nullptr, millis());
-    else kickPerformance.render(display, display2Present && !heldFxButtons.Selected() ? &display2 : nullptr, bpm, millis());
+    if (kickMixPage()) kickMixer.render(display, screen2Free ? &display2 : nullptr, millis());
+    else kickPerformance.render(display, screen2Free ? &display2 : nullptr, bpm, millis());
     if (millis() - lastDisplayMillis > displayRefreshMs){
       updateLEDs();
       lastDisplayMillis = millis();
     }
   } else if (displayPresent && millis() - lastDisplayMillis > displayRefreshMs){
+    // drawDisplay() returns early for every menu view before its own LED
+    // refresh, so the LEDs must be pushed here (as in v1.4.0).
+    updateLEDs();
     drawDisplay();
-    if (display2Present && !heldFxButtons.Selected()) drawOverview();
+    if (screen2Free) drawOverview();
     lastDisplayMillis = millis();
   }
   if(!displayPresent && millis()-lastDisplayMillis>displayRefreshMs){
@@ -961,6 +991,10 @@ void SimpleSequencer::loop(){
     lastDisplayMillis=millis();
   }
   if(display2Present && heldFxButtons.Selected())kickPerformance.renderHeldFx(display2,bpm,millis());
+  if(padOverlay && (uint32_t)(millis()-kickPadFrameMs)>=40u){
+    kickPadFrameMs=millis();
+    drawKickPadOverlay(kickPadFrameMs);
+  }
 }
 
 // Map row/col to linear button index (0..29)
@@ -1160,6 +1194,14 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     return;
   }
 
+  // FUNCTION + step 1/2/3 are the knob-loop record controls (commit edit /
+  // make loop / clear loops, v1.2.0+). They skip the kick pads below and
+  // reach the Function handlers further down, as in v1.4.0.
+  const bool recordKey = isFunctionHeld() && i <= 2;
+
+  // Show what a kick pad does on screen 2 while KICK is selected.
+  if(i<NUM_STEPS && isKickChannel(selectedChannel) && !recordKey)noteKickPad(i,true);
+
   // Dedicated kick controls are global: they work from every row
   // and menu, and their state changes only at an actual MIDI-15 kick.
   int8_t kickGesture=-1;
@@ -1167,6 +1209,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   else if(i==1)kickGesture=1;  // step 2: random 140..800 Hz HPF
   else if(i==2)kickGesture=2;  // step 3: temporary +1 semitone
   else if(i==3)kickGesture=4;  // step 4: temporary 40 ms decay
+  if(recordKey)kickGesture=-1;
   if(kickGesture>=0){
     kickHeldButtonDown[(uint8_t)kickGesture]=true;
     pendingToggle[i]=false;heldStep=-1;
@@ -1179,7 +1222,8 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
     pendingToggle[i]=false;heldStep=-1;return;
   }
   if(i==12){
-    if(!synthMachine(selectedChannel)){kickDubGestureMask|=2u;kickDubButtonHeld=true;}
+    // Step 13: GROUND SCREAM on the Kick Seed while held (from any normal row).
+    if(!synthMachine(selectedChannel))kickScreamHeld=true;
     pendingToggle[i]=false;heldStep=-1;return;
   }
   if(i==4&&synthMachine(selectedChannel)){
@@ -1191,9 +1235,9 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   // remain usable from any sequencer page. State changes are consumed only
   // at a real MIDI-15 trigger in triggerChannel().
   if(isKickChannel(selectedChannel)){
-    if(i==5){kickPreviousLayerHeld=true;kickProgressionOwnedMask|=1u<<i;pendingToggle[i]=false;heldStep=-1;return;} // step 6: current + previous
+    if(i==5){kickPadReverseHeld=true;kickProgressionOwnedMask|=1u<<i;pendingToggle[i]=false;heldStep=-1;return;} // step 6: REVERSE while held
     if(i==6){randomizeKickCue();pendingToggle[i]=false;heldStep=-1;return;} // step 7 (up): randomize cue
-    if(i==7){kickCueLayerHeld=true;kickProgressionOwnedMask|=1u<<i;pendingToggle[i]=false;heldStep=-1;return;} // step 8: current + cue
+    if(i==7){kickPadDriveHeld=true;kickProgressionOwnedMask|=1u<<i;pendingToggle[i]=false;heldStep=-1;return;} // step 8: DRIVE flip while held
     if(i==13){kickPresetPending=1;pendingToggle[i]=false;heldStep=-1;return;} // step 14: restore previous
     if(i==14){kickCueSwapHeld=true;kickProgressionOwnedMask|=1u<<i;pendingToggle[i]=false;heldStep=-1;return;} // hold step 15: audition cue
     if(i==15){kickPresetPending=2;pendingToggle[i]=false;heldStep=-1;return;} // step 16: commit cue
@@ -1203,7 +1247,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
   // Kick Seed. The remaining industrial pads stay available on the KICK row.
   // Claim before Function shortcuts/pattern editing, so FX cannot alter steps.
   heldFxButtons.Scope(1);
-  if(i<NUM_STEPS && (isKickChannel(selectedChannel)||i==8||i==9) && heldFxButtons.Press(i)){
+  if(i<NUM_STEPS && !recordKey && (isKickChannel(selectedChannel)||i==8||i==9) && heldFxButtons.Press(i)){
     pendingToggle[i]=false;heldStep=-1;return;
   }
 
@@ -1287,6 +1331,7 @@ void SimpleSequencer::onKeyPress(uint8_t row, uint8_t col){
 // Called when a debounced release is detected
 void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
   uint8_t i = matrixIndex(row,col);
+  if(i<NUM_STEPS)noteKickPad(i,false);
   int8_t kickGesture=-1;
   if(i==0)kickGesture=0;
   else if(i==1)kickGesture=1;
@@ -1306,15 +1351,14 @@ void SimpleSequencer::onKeyRelease(uint8_t row, uint8_t col){
     return;
   }
   if(i==11&&isKickChannel(selectedChannel)){pendingToggle[i]=false;return;}
-  if(i==12&&(kickDubGestureMask&2u)){
-    kickDubGestureMask&=(uint8_t)~2u;kickDubButtonHeld=kickDubGestureMask!=0;pendingToggle[i]=false;
-    if(!kickDubButtonHeld&&midiSendMessage(0xB0|softsynth::KICK_CHANNEL,heldfx::KICK_DUB_ECHO,0,true))kickDubActive=false;
+  if(i==12&&kickScreamHeld){
+    kickScreamHeld=false;pendingToggle[i]=false; // serviceKickPadOverrides() sends the release
     return;
   }
   if(i<16&&(kickProgressionOwnedMask&(1u<<i))){
     kickProgressionOwnedMask&=~(1u<<i);
-    if(i==5)kickPreviousLayerHeld=false;
-    if(i==7)kickCueLayerHeld=false;
+    if(i==5)kickPadReverseHeld=false;
+    if(i==7)kickPadDriveHeld=false;
     if(i==14)kickCueSwapHeld=false;
     pendingToggle[i]=false;return;
   }
@@ -1833,31 +1877,37 @@ void SimpleSequencer::handlePotRotation(uint8_t pot, int ticks){
   // --- GLOBAL MODIFIER: Channel-held + Pot 1 = per-channel MIDI Out channel ---
   if (pot == 0 && heldChannel >= 0 && heldChannel < (int)NUM_CHANNELS){
     const uint8_t ch=(uint8_t)heldChannel;
-    if(ch==3||ch==4){
-      Serial.print("CH");Serial.print(ch+1);Serial.print(" MIDI_OUT locked to MIDI ");Serial.println(outputMidiChannel(ch)+1);
+    // Row 5's synth voice is fixed to the Acid Seed's MIDI 12 lane.
+    if(ch==4&&synthMachine(ch)){
+      Serial.print("CH5 synth voice locked to MIDI ");Serial.println(outputMidiChannel(ch)+1);
       return;
     }
+    // Release the sounding note on the old channel before moving.
     if(lastNotePlaying[ch]<128){midiSendNoteOff(outputMidiChannel(ch),lastNotePlaying[ch],0);lastNotePlaying[ch]=255;noteOffTick[ch]=0;}
-    int direction=ticks>0?1:-1,remaining=abs(ticks);
-    uint8_t candidate=synthMachine(ch)?synthMidiChannel[ch]:midiChannel[ch];
-    while(remaining--){
-      for(uint8_t tries=0;tries<16;++tries){
-        int next=(int)candidate+direction;
-        if(synthMachine(ch)){
+    if(synthMachine(ch)){
+      // Acid Seed synth voices only listen on MIDI 13/14; skip a lane that
+      // another synth row already owns.
+      int direction=ticks>0?1:-1,remaining=abs(ticks);
+      uint8_t candidate=synthMidiChannel[ch];
+      while(remaining--){
+        for(uint8_t tries=0;tries<16;++tries){
+          int next=(int)candidate+direction;
           if(next<softsynth::USER_CHANNEL_FIRST)next=softsynth::USER_CHANNEL_LAST;
           if(next>softsynth::USER_CHANNEL_LAST)next=softsynth::USER_CHANNEL_FIRST;
-        }else{
-          if(next<0)next=15;
-          if(next>15)next=0;
+          candidate=(uint8_t)next;
+          if(!synthMidiChannelInUse(candidate,ch))break;
         }
-        candidate=(uint8_t)next;
-        if((synthMachine(ch)||candidate!=softsynth::CHANNEL) &&
-           !synthMidiChannelInUse(candidate,ch))break;
       }
+      synthMidiChannel[ch]=candidate;
+      syncAudioMachine(ch);
+    }else{
+      // Any MIDI channel 1-16 on any row, as in v1.4.0. Row 4 must be on
+      // MIDI 15 to play the Kick Seed (the default).
+      int v=(int)midiChannel[ch]+ticks;
+      if(v<0)v=0;
+      if(v>15)v=15;
+      midiChannel[ch]=(uint8_t)v;
     }
-    if(synthMachine(ch))synthMidiChannel[ch]=candidate;
-    else midiChannel[ch]=candidate;
-    if(synthMachine(ch))syncAudioMachine(ch);
     Serial.print("CH"); Serial.print(heldChannel+1);
     Serial.print(" MIDI_OUT="); Serial.println(outputMidiChannel(ch)+1);
     return;
@@ -2410,7 +2460,7 @@ void SimpleSequencer::saveState() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(24, 24);
   display.print("SAVED!");
-  display.display();
+  oledFlush(display);
   delay(600);
 }
 
@@ -2494,17 +2544,13 @@ void SimpleSequencer::loadState() {
       const bool enabled=acidCompEnabled[sharedSource];
       for(uint8_t c=0;c<NUM_CHANNELS;++c){acidCompAmount[c]=amount;acidCompEnabled[c]=enabled;acidOutputLevel[c]=level;}
     }
-    // Lock kick/off-acid lanes before assigning the remaining synth voices.
-    midiChannel[3]=softsynth::KICK_CHANNEL;
+    // Synth-voice lanes only: row 5's synth stays on MIDI 12. The saved
+    // MIDI channel of every ordinary row is restored exactly as chosen.
     synthMidiChannel[3]=softsynth::KICK_CHANNEL;
-    midiChannel[4]=softsynth::CHANNEL;
     synthMidiChannel[4]=softsynth::CHANNEL;
     // Restore user synths onto MIDI 13/14, with row 4/5 reserved.
     for(uint8_t c=0;c<NUM_CHANNELS;++c)
       if(synthMachine(c)&&!assignSynthMidiChannel(c))audioMachine[c]=AM_NONE;
-    // Resolve older track assignments that collide with either fixed row.
-    for(uint8_t c=0;c<NUM_CHANNELS;++c)
-      if(c!=3&&c!=4&&(midiChannel[c]==softsynth::CHANNEL || midiChannel[c]==softsynth::KICK_CHANNEL))midiChannel[c]=c;
     if (hasKickMixState) {
       // Restoring re-sends both pages; the Daisy boots to its own defaults.
       KickMixer::SavedState mix = data.savedKickMixer;
@@ -3482,6 +3528,9 @@ void SimpleSequencer::triggerKickOffbass(uint8_t step){
   // pitch and offbeat timing. Muting row 5 silences the MIDI-12 voice.
   constexpr uint8_t midi12Row=4;
   if(muted[midi12Row])return;
+  // Only while row 5 is still routed to MIDI 12: once its channel is moved,
+  // MIDI 12 may belong to another row's gear and must not get stray notes.
+  if(outputMidiChannel(midi12Row)!=softsynth::CHANNEL)return;
   const uint8_t rowLength=numSteps[midi12Row]?numSteps[midi12Row]:1;
   const uint8_t rowStep=step%rowLength;
   const uint16_t rowIndex=playIdx(midi12Row,rowStep);
@@ -3769,12 +3818,14 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   uint8_t fstate = fillState[ch][pIdx];
   if (fstate == 1 && !fillModeActive) return;
   if (fstate == 2 && fillModeActive) return;
-  if(ch==3)syncKickHeldControls(ch);
+  // Any KICK row on MIDI 15 plays the Kick Seed (not only row 4).
+  const bool kickSeed=kickSeedRow(ch);
+  if(kickSeed){kickRow=ch;syncKickHeldControls(ch);}
   chTrigMs[ch] = millis(); // CV TRIG mode + screen-2 flash follow real triggers
   uint8_t p = pitch[ch][pIdx];
   if (p == 255) p = channelPitch[ch];
   uint8_t note = (uint8_t)constrain((int)p + notesLaneOffset(ch, NL_PITCH), 0, 127);
-  if(ch==3){
+  if(kickSeed){
     applyKickProgression(note);
     if(kickPresetInitialized){
       uint8_t layerMode=kickCueLayerHeld?2:kickPreviousLayerHeld?1:0;
@@ -3783,7 +3834,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
       sendKickOverlay(layerMode,layer);
     }
   }
-  if(ch==3&&kickHeldPitchActive)note=(uint8_t)constrain((int)note+1,0,127);
+  if(kickSeed&&kickHeldPitchActive)note=(uint8_t)constrain((int)note+1,0,127);
 
   uint8_t vel = stepVelocity[ch][pIdx];
   if (vel == 255){
@@ -3812,7 +3863,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
                   (slideAllHold && ch == selectedChannel);
   uint8_t mch = outputMidiChannel(ch);
 
-  if(ch==3 && mch==softsynth::KICK_CHANNEL){
+  if(kickSeed){
     const uint8_t cc[5]={softsynth::KICK_NEXT_PITCH,softsynth::KICK_NEXT_DECAY,
                          softsynth::KICK_NEXT_SHAPE,softsynth::KICK_NEXT_SWEEP,
                          softsynth::KICK_NEXT_TAIL};
@@ -3849,8 +3900,8 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
   // A fixed-key kick trigger must always send note-off before note-on. The
   // synth slide ordering (note-on then old-note-off) would silence the new
   // kick now that every hit uses the same MIDI key.
-  bool isSlidingIntoThis = ch!=3 && prevSlide[ch] && lastNotePlaying[ch]<128;
-  const uint8_t midiNote=(ch==3 && mch==softsynth::KICK_CHANNEL)?60:note;
+  bool isSlidingIntoThis = !kickSeed && prevSlide[ch] && lastNotePlaying[ch]<128;
+  const uint8_t midiNote=kickSeed?60:note;
 
   if (synthMachine(ch)){
     sendAcidCC(ch,softsynth::ENGINE,audioMachine[ch]==AM_SCREECH?64:audioMachine[ch]==AM_HOOVER?127:0);
@@ -3926,7 +3977,7 @@ void SimpleSequencer::triggerChannel(uint8_t ch){
     ratchetEndTick[ch] = absoluteTickCounter + 6; 
     // Kick ratchets reuse the Seed's committed preset and fixed trigger key;
     // sending the pattern pitch here would bypass the CC preset protocol.
-    ratchetPitch[ch] = (ch==3 && mch==softsynth::KICK_CHANNEL) ? midiNote : note;
+    ratchetPitch[ch] = kickSeed ? midiNote : note;
     uint32_t offOffset = ticksPerHit / 2;
     if (offOffset == 0) offOffset = 1;
     noteOffTick[ch] = absoluteTickCounter + offOffset;
@@ -3973,7 +4024,7 @@ void SimpleSequencer::drawDisplay(){
       display.setCursor(54, 22);
       display.print("STOP");
     }
-    display.display();
+    oledFlush(display);
     return;
   } else if (transportAnimEndMs && nowMs >= transportAnimEndMs){
     transportAnimEndMs = 0;
@@ -3997,7 +4048,7 @@ void SimpleSequencer::drawDisplay(){
       display.setCursor(80, 48);
       display.print("only");
     }
-    display.display();
+    oledFlush(display);
     return;
   } else if (fillAnimEndMs && nowMs >= fillAnimEndMs){
     fillAnimEndMs = 0;
@@ -4018,7 +4069,7 @@ void SimpleSequencer::drawDisplay(){
       // Strikethrough decorate
       display.drawLine(8, 44, 80, 44, SH110X_WHITE);
     }
-    display.display();
+    oledFlush(display);
     return;
   } else if (muteAnimEndMs && nowMs >= muteAnimEndMs){
     muteAnimEndMs = 0;
@@ -4035,7 +4086,7 @@ void SimpleSequencer::drawDisplay(){
     display.setTextSize(2);
     display.setCursor(8, 40);
     display.print("CH "); display.print(clearAnimCh + 1);
-    display.display();
+    oledFlush(display);
     return;
   } else if (clearAnimEndMs && nowMs >= clearAnimEndMs){
     clearAnimEndMs = 0;
@@ -4052,7 +4103,7 @@ void SimpleSequencer::drawDisplay(){
     display.setTextSize(4);
     display.setCursor(8, 28);
     display.print(bpm);
-    display.display();
+    oledFlush(display);
     return;
   } else if (bpmFocusEndMs && nowMs >= bpmFocusEndMs){
     bpmFocusEndMs = 0;
@@ -4078,7 +4129,7 @@ void SimpleSequencer::drawDisplay(){
     display.setTextSize(1);
     display.setCursor(78, 56);
     display.print("(Pot1)");
-    display.display();
+    oledFlush(display);
     return;
   }
 
@@ -4103,7 +4154,7 @@ void SimpleSequencer::drawDisplay(){
     display.setTextColor(SH110X_WHITE);
     display.setCursor(16, 24);
     display.print("SLIDE ALL");
-    display.display();
+    oledFlush(display);
     updateLEDs();
     return;
   }
@@ -4125,7 +4176,7 @@ void SimpleSequencer::drawDisplay(){
     display.print("DEBUG  CH"); display.print(selectedChannel + 1);
     display.setCursor(80, 1);
     display.print("BPM "); display.print(bpm);
-    display.display();
+    oledFlush(display);
     updateLEDs();
     return;
   }
@@ -4165,7 +4216,7 @@ void SimpleSequencer::drawDisplay(){
         display.setCursor(4, 26);
         display.print(bpm);
       }
-      display.display();
+      oledFlush(display);
       updateLEDs();
       return;
     }
@@ -4221,7 +4272,7 @@ void SimpleSequencer::drawDisplay(){
         display.print(noteNames[cp % 12]);
         display.print((cp / 12) - 1);
       }
-      display.display();
+      oledFlush(display);
       updateLEDs();
       return;
     }
@@ -4259,7 +4310,7 @@ void SimpleSequencer::drawDisplay(){
         display.setCursor(4, 26);
         display.print(noteLenNames[noteLenIdx[selectedChannel]]);
       }
-      display.display();
+      oledFlush(display);
       updateLEDs();
       return;
     }
@@ -4288,7 +4339,7 @@ void SimpleSequencer::drawDisplay(){
         display.setCursor(4, 28);
         display.print("OFF");
       }
-      display.display();
+      oledFlush(display);
       updateLEDs();
       return;
     }
@@ -4356,16 +4407,14 @@ void SimpleSequencer::drawDisplay(){
     display.print("SLD:"); display.print(stepSlide[selectedChannel][heldStep] ? "ON" : "OFF");
   }
 
-  display.display();
+  oledFlush(display);
   updateLEDs();
 }
 
 // LEDs disabled: no-op implementation so calls are safe during bring-up
 void SimpleSequencer::updateLEDs(){
-  // WS2812 data is bit-banged with interrupts disabled on Teensy 4.1. A
-  // 30-pixel frame masks the MIDI clock and 1 ms engine timers for ~0.9 ms;
-  // freeze the last LED frame during transport so MIDI timing stays intact.
-  if(isRunning)return;
+  // LEDs keep following the playhead and edits while the transport runs,
+  // as in v1.4.0 (the brief NeoPixel interrupt pause was fine there).
 
   // One LED per step. Show the active channel's pattern + playhead.
   // Per-channel hue distinguishes which channel is selected.
@@ -4736,8 +4785,8 @@ void SimpleSequencer::bootAnimation() {
 
     // Push frames every other tick to avoid choking the I2C buses.
     if (frame % 2 == 0){
-      display.display();
-      if (display2Present) display2.display();
+      oledFlush(display);
+      if (display2Present) oledFlush(display2);
     }
     delay(12);
   }
@@ -4756,11 +4805,11 @@ void SimpleSequencer::bootAnimation() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(46, 20); display.print("seq-23");
   display.setCursor(7,  34); display.print("made by Bob and Zak");
-  // Size-2 (12px per char): "v1.4.0" is 72px, so x=28 centres it on the card.
+  // Size-2 (12px per char): "v1.5.0" is 72px, so x=28 centres it on the card.
   display.setTextSize(2);
-  display.setCursor(28, 48); display.print("v1.4.0");
+  display.setCursor(28, 48); display.print("v1.5.0");
   display.setTextSize(1);
-  display.display();
+  oledFlush(display);
 
   if (display2Present){
     display2.fillRect(0, 0, 128, 64, SH110X_WHITE);
@@ -4769,9 +4818,9 @@ void SimpleSequencer::bootAnimation() {
     display2.setCursor(46, 20); display2.print("seq-23");
     display2.setCursor(7,  34); display2.print("made by Bob and Zak");
     display2.setTextSize(2);
-    display2.setCursor(28, 48); display2.print("v1.4.0");
+    display2.setCursor(28, 48); display2.print("v1.5.0");
     display2.setTextSize(1);
-    display2.display();
+    oledFlush(display2);
   }
   delay(3000); // hold the boot card up for 3 seconds
 
@@ -4780,10 +4829,10 @@ void SimpleSequencer::bootAnimation() {
   ledStrip.clear();
   ledStrip.show();
   display.clearDisplay();
-  display.display();
+  oledFlush(display);
   if (display2Present){
     display2.clearDisplay();
-    display2.display();
+    oledFlush(display2);
   }
 }
 
@@ -5142,7 +5191,7 @@ void SimpleSequencer::drawAnalogView(){
     display.print("FN+ROT MODE FN+PSH CH");
   }
 
-  display.display();
+  oledFlush(display);
 }
 
 // FN-held submenu: mode selector for the focused out + the pot assignments for
@@ -5200,7 +5249,7 @@ void SimpleSequencer::drawAnalogSubmenu(){
   display.setCursor(2, 56);
   display.print("RELEASE FN TO EXIT");
 
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::clearTrack(uint8_t ch) {
@@ -5333,7 +5382,7 @@ void SimpleSequencer::drawNotesView(){
   else display.print(channelVelocity[ch]);
   if (randomVelEnabled[ch]) display.print("R"); // random-velocity indicator
 
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawEuclidView(){
@@ -5400,7 +5449,7 @@ void SimpleSequencer::drawEuclidView(){
   display.setCursor(colX[1], valY2); display.print(noteLenNames[noteLenIdx[ch]]);
   display.setCursor(colX[2], valY2); display.print(randomSlideProb[ch]); display.print("%");
 
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawAcidView(){
@@ -5424,7 +5473,7 @@ void SimpleSequencer::drawAcidView(){
     display.drawRect(x,y+18,36,4,SH110X_WHITE);
     display.fillRect(x+1,y+19,(params[i]*34)/127,2,SH110X_WHITE);
   }
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawSynthFxView(){
@@ -5442,7 +5491,7 @@ void SimpleSequencer::drawSynthFxView(){
     display.drawRect(x,y+18,36,4,SH110X_WHITE);
     display.fillRect(x+1,y+19,(synthFx[selectedChannel][i]*34)/127,2,SH110X_WHITE);
   }
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawAcidCompView(){
@@ -5457,7 +5506,7 @@ void SimpleSequencer::drawAcidCompView(){
   display.drawRect(72,43,52,5,SH110X_WHITE);display.fillRect(73,44,(acidOutputLevel[ch]*50)/127,3,SH110X_WHITE);
   display.setCursor(3,50);display.print("K1 AMT / PUSH: COMP");
   display.setCursor(3,59);display.print("K2 LEVEL: ALL VOICES");
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawStepVisualiser(){
@@ -5537,7 +5586,7 @@ void SimpleSequencer::drawStepVisualiser(){
     display.print(NUM_STEPS);
   }
 
-  display.display();
+  oledFlush(display);
 }
 
 void SimpleSequencer::drawTrigMachineView(){
@@ -5618,7 +5667,7 @@ void SimpleSequencer::drawTrigMachineView(){
   display.setCursor(2,55);display.print("A:");
   display.print(audioMachine[ch]==AM_SCREECH?"SCREECH":audioMachine[ch]==AM_ACID?"ACID":audioMachine[ch]==AM_HOOVER?"HOOVER":"NONE");
   display.setCursor(63,55);display.print("K1:PRESS");
-  display.display();
+  oledFlush(display);
 }
 
 // ── Menu 5: Pages mode — screen 1 view ─────────────────────────────────
@@ -5697,7 +5746,7 @@ void SimpleSequencer::drawPagesView(){
     display.print("P1 pages P2 steps  P3 rate");
   }
 
-  display.display();
+  oledFlush(display);
 }
 
 // --- Secondary OLED: global overview dashboard ------------------------------
@@ -5777,7 +5826,155 @@ void SimpleSequencer::drawKickShapeView(){
   uint32_t since = millis() - chTrigMs[ch];
   in.elapsedMs = (isRunning && chTrigMs[ch] != 0 && since < 1000) ? (int32_t)since : -1;
   drawKickShape(display2, in, SH110X_WHITE, SH110X_INVERSE);
-  display2.display();
+  oledFlush(display2);
+}
+
+// ── Momentary kick pads (6 REVERSE, 8 DRIVE, 13 GROUND SCREAM) ────────────
+// Sent from the foreground on change; the Seed applies reverse and the scream
+// at its next kick, drive immediately (smoothed). Unsent changes retry on the
+// next loop pass when the MIDI queue has room.
+void SimpleSequencer::serviceKickPadOverrides(){
+  const uint8_t status=0xB0|softsynth::KICK_CHANNEL;
+  const KickPerformance::ControllerState& ks=kickPerformance.state();
+
+  // Step 6: reverse while held, otherwise the Menu 2 reverse setting.
+  const bool reverse=kickPadReverseHeld||ks.reverseEnabled;
+  if(reverse!=kickPadReverseSent && midiSendMessage(status,41,reverse?127:0,true))
+    kickPadReverseSent=reverse;
+
+  // Step 8: the selected Mackie/Tube amount flips while held: up to maximum
+  // when it is below halfway, down to clean when it is at halfway or above.
+  const bool tube=ks.selectedCharacterModel;
+  const uint8_t cc=tube?49:48;
+  const uint8_t user=kickPerformance.parameterValue(tube?KickPerformance::TUBE:KickPerformance::MACKIE);
+  if(kickPadDriveHeld){
+    // A knob turn (sent by KickPerformance) or a model switch while held
+    // overrides the flip, so re-apply it.
+    if(user!=kickPadDriveUserSeen || cc!=kickPadDriveCC){kickPadDriveSent=255;kickPadDriveUserSeen=user;}
+    kickPadDriveCC=cc;
+    const uint8_t flipped=user>=64?0:127;
+    if(kickPadDriveSent!=flipped && midiSendMessage(status,cc,flipped,true))kickPadDriveSent=flipped;
+  }else if(kickPadDriveSent!=255){
+    // Released: restore the knob's own value once.
+    if(midiSendMessage(status,kickPadDriveCC,user,true)){kickPadDriveSent=255;kickPadDriveUserSeen=255;}
+  }
+
+  // Step 13: ground scream while held.
+  if(kickScreamHeld!=kickScreamSent &&
+     midiSendMessage(status,heldfx::KICK_GROUND_MACHINE,kickScreamHeld?127:0,true))
+    kickScreamSent=kickScreamHeld;
+}
+
+// ── Kick pad feedback on screen 2 ─────────────────────────────────────────
+// While KICK is selected, pressing a step pad shows what it does (and live
+// values where there are any) for as long as it is held plus a short linger.
+// Pads 5, 9 and 10 keep their own held-FX screen (renderHeldFx).
+void SimpleSequencer::noteKickPad(uint8_t i,bool down){
+  if(i>=NUM_STEPS || i==4 || i==8 || i==9)return;
+  const uint16_t bit=(uint16_t)(1u<<i);
+  if(down){kickPadsDown|=bit;kickPadShown=(uint8_t)(i+1);}
+  else{
+    if(!(kickPadsDown&bit))return;
+    kickPadsDown&=(uint16_t)~bit;
+  }
+  kickPadShownMs=millis();
+  kickPadFrameMs=0; // draw on the next pass
+}
+
+bool SimpleSequencer::kickPadOverlayActive(uint32_t now) const{
+  if(!kickPadShown || !isKickChannel(selectedChannel) || heldFxButtons.Selected())return false;
+  return kickPadsDown!=0 || (uint32_t)(now-kickPadShownMs)<900u;
+}
+
+void SimpleSequencer::drawKickPadOverlay(uint32_t now){
+  static const char* const NOTE[12]={"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+  struct PadText{const char* name; const char* what;};
+  static const PadText PADS[16]={
+    {"MUTE","new hits muted"},        {"RANDOM HPF","140-800 Hz per hold"},
+    {"PITCH +1","up one semitone"},   {"DECAY 40MS","short decay, new hits"},
+    {"",""},                          {"REVERSE","kicks play reversed"},
+    {"RANDOM CUE","new cue rolled"},  {"DRIVE","distortion flips"},
+    {"",""},                          {"",""},
+    {"LEVEL DOWN","fades out over 2 s"},{"DUB ECHO","echo builds while held"},
+    {"SCREAM","crackle, then 50Hz roar"},{"PREVIOUS","back to previous kick"},
+    {"AUDITION","hear the cue while held"},{"KEEP CUE","cue becomes the kick"}};
+  const uint8_t pad=kickPadShown;            // 1..16
+  if(!pad)return;
+  const PadText& t=PADS[pad-1];
+  const bool held=(kickPadsDown>>(pad-1))&1u;
+  auto preset=[&](const KickPreset& k,char* out,size_t n){
+    snprintf(out,n,"%s%d D%u S%u",NOTE[k.note%12],(int)(k.note/12)-1,
+             (unsigned)(k.decay*100u/127u),(unsigned)(k.shape*100u/127u));
+  };
+
+  display2.clearDisplay();
+  display2.setTextColor(SH110X_WHITE);
+  display2.setTextSize(1);
+  char line[32];
+  snprintf(line,sizeof(line),"KICK PAD %u",(unsigned)pad);
+  display2.setCursor(2,0);display2.print(line);
+  const char* state=held?"HELD":"OFF";
+  display2.setCursor(126-6*(int)strlen(state),0);display2.print(state);
+
+  display2.setTextSize(2);
+  display2.setCursor(2,11);display2.print(t.name);
+  display2.setTextSize(1);
+  display2.setCursor(2,30);display2.print(t.what);
+
+  // Live value / consequence line.
+  line[0]=0;
+  switch(pad){
+    case 2:
+      if(held && kickHeldRandomHpfValue){
+        const float hz=140.f*powf(800.f/140.f,float(kickHeldRandomHpfValue-1)/126.f);
+        snprintf(line,sizeof(line),"HPF %.0f Hz",hz);
+      } else snprintf(line,sizeof(line),"%s",held?"rolls on next kick":"");
+      break;
+    case 3:{
+      const uint8_t n=(uint8_t)constrain((int)kickCurrentPreset.note+1,0,127);
+      snprintf(line,sizeof(line),"plays %s%d",NOTE[n%12],(int)(n/12)-1);
+      break;}
+    case 7: case 15:{
+      char p[20];preset(kickCuePreset,p,sizeof(p));
+      snprintf(line,sizeof(line),"CUE %s",p);
+      break;}
+    case 14:{
+      char p[20];preset(kickPreviousPreset,p,sizeof(p));
+      snprintf(line,sizeof(line),"PREV %s",p);
+      break;}
+    case 16:{
+      char p[20];preset(kickCuePreset,p,sizeof(p));
+      snprintf(line,sizeof(line),"NEW %s",p);
+      break;}
+    case 6:
+      snprintf(line,sizeof(line),"%s",held?"from the next kick":"back to your setting");
+      break;
+    case 8:{
+      const bool tube=kickPerformance.state().selectedCharacterModel;
+      const uint8_t user=kickPerformance.parameterValue(tube?KickPerformance::TUBE:KickPerformance::MACKIE);
+      const unsigned from=(unsigned)(user*100u/127u), to=user>=64?0u:100u;
+      if(held)snprintf(line,sizeof(line),"%s %u%% > %u%%",tube?"TUBE":"MACKIE",from,to);
+      else snprintf(line,sizeof(line),"%s back to %u%%",tube?"TUBE":"MACKIE",from);
+      break;}
+    case 13:
+      snprintf(line,sizeof(line),"%s",held?"starts on next kick":"fades on next kick");
+      break;
+    case 1: case 4: case 11: case 12:
+      snprintf(line,sizeof(line),"%s",held?"from the next kick":"released");
+      break;
+    default: break;
+  }
+  display2.setCursor(2,41);display2.print(line);
+
+  // All 16 pads: held pads filled, the shown pad underlined.
+  for(uint8_t k=0;k<16;++k){
+    const int x=1+k*8;
+    if((kickPadsDown>>k)&1u)display2.fillRect(x,52,6,6,SH110X_WHITE);
+    else display2.drawRect(x,52,6,6,SH110X_WHITE);
+    if(k==pad-1)display2.drawFastHLine(x,60,6,SH110X_WHITE);
+  }
+  (void)now;
+  oledFlush(display2);
 }
 
 void SimpleSequencer::drawNotesKeyboard(){
@@ -5866,7 +6063,7 @@ void SimpleSequencer::drawNotesKeyboard(){
   if (!any){
     display2.setCursor(16, 34);
     display2.print("(no active notes)");
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -5905,7 +6102,7 @@ void SimpleSequencer::drawNotesKeyboard(){
     display2.fillRect(x, y, w, bh, SH110X_WHITE);
   }
 
-  display2.display();
+  oledFlush(display2);
 }
 
 void SimpleSequencer::drawOverview(){
@@ -5935,7 +6132,7 @@ void SimpleSequencer::drawOverview(){
         focus==2?t*t:focus==4?(1-t)*sinf(t*30.f)*.7f:sinf(t*6.283185f*(1+value/24.f))*(1-t*.35f);
       display2.drawPixel(x,38-int(shape*9),SH110X_WHITE);
     }
-    display2.display();return;
+    oledFlush(display2);return;
   }
 
   if(activeMenu==4 && synthMachine(ch)){
@@ -5944,7 +6141,7 @@ void SimpleSequencer::drawOverview(){
     display2.setTextSize(2);display2.setCursor(2,12);display2.print(audioMachine[ch]==AM_SCREECH?"SCREECH":audioMachine[ch]==AM_ACID?"ACID":"HOOVER");
     display2.setTextSize(1);display2.setCursor(2,31);display2.print("PAT:");display2.print(patterns[trigMachine[ch]]);
     display2.setCursor(2,43);display2.print("K1 TURN: PATTERN");
-    display2.setCursor(2,55);display2.print("K1 PRESS: AUDIO");display2.display();return;
+    display2.setCursor(2,55);display2.print("K1 PRESS: AUDIO");oledFlush(display2);return;
   }
   if(activeMenu==6 && synthMachine(ch) && acidCompMode){
     display2.setTextSize(1);display2.setCursor(2,1);display2.print("COMP ");display2.print(acidCompEnabled[ch]?"ON":"BYPASS");
@@ -5953,7 +6150,7 @@ void SimpleSequencer::drawOverview(){
     display2.drawRect(2,30,124,6,SH110X_WHITE);display2.fillRect(3,31,(acidOutputLevel[ch]*122)/127,4,SH110X_WHITE);
     display2.setCursor(2,46);display2.print("K1 AMOUNT / PRESS=ON-OFF");
     display2.setCursor(2,57);display2.print("K2 LEVEL (ALL VOICES)");
-    display2.display();return;
+    oledFlush(display2);return;
   }
   if(activeMenu==6 && synthMachine(ch)){
     bool h=audioMachine[ch]==AM_HOOVER;
@@ -5987,7 +6184,7 @@ void SimpleSequencer::drawOverview(){
       float shape=sc?sin(t*6.283185f*(2+value/12.f))*sin(t*3.141593f):h?sin(t*6.283185f*(1+value/32.f))*(1-t*.4f):exp(-t*(1+value/20.f));
       int y=39-int(shape*9);display2.drawPixel(x,y,SH110X_WHITE);
     }
-    display2.display();return;
+    oledFlush(display2);return;
   }
 
   // ── Menu 2: Analog CV outputs — focused out's mode view ─────────
@@ -6077,7 +6274,7 @@ void SimpleSequencer::drawOverview(){
       }
       default: break;
     }
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6211,7 +6408,7 @@ void SimpleSequencer::drawOverview(){
       }
     }
 
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6306,7 +6503,7 @@ void SimpleSequencer::drawOverview(){
       }
     }
 
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6414,7 +6611,7 @@ void SimpleSequencer::drawOverview(){
         }
       }
     }
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6471,7 +6668,7 @@ void SimpleSequencer::drawOverview(){
       display2.print("> P"); display2.print((int)(playPg + 1));
     }
     display2.setTextColor(SH110X_WHITE);
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6548,7 +6745,7 @@ void SimpleSequencer::drawOverview(){
         }
       }
     }
-    display2.display();
+    oledFlush(display2);
     return;
   }
 
@@ -6557,7 +6754,7 @@ void SimpleSequencer::drawOverview(){
   display2.setCursor(2, 2);
   display2.print("MENU ");
   display2.print((int)activeMenu);
-  display2.display();
+  oledFlush(display2);
 }
 
 bool SimpleSequencer::kickFxPage() const {
@@ -6601,11 +6798,15 @@ bool SimpleSequencer::isKickChannel(uint8_t ch) const {
   return ch < NUM_CHANNELS && trigMachine[ch] == TM_KICK && !synthMachine(ch);
 }
 
+bool SimpleSequencer::kickSeedRow(uint8_t ch) const {
+  return isKickChannel(ch) && outputMidiChannel(ch) == softsynth::KICK_CHANNEL;
+}
+
 // CC78 SWEEP TIME, CC79 TMOD and CC64 WAVE for the hit about to fire. SWEEP TIME follows
 // its notes lane (pot 3 recorded under Function), so it can move per step.
 // ISR-safe for the same reason updateKickFillCC is.
 void SimpleSequencer::updateKickShapeCC(uint8_t ch){
-  int sweepBase = (ch == 3 && kickSweepSel < 128) ? (int)kickSweepSel : (int)kickSweepTime[ch];
+  int sweepBase = (ch == kickRow && kickSweepSel < 128) ? (int)kickSweepSel : (int)kickSweepTime[ch];
   uint8_t knob = (uint8_t)constrain(sweepBase + notesLaneOffset(ch, NL_GATE), 0, 127);
   uint8_t sweep = kickdaisy::sweepTimeCC(knob);
   if (sweep != fillCCLastSent[1]){ fillCCLastSent[1] = sweep; queueFillCC(1, sweep); }

@@ -1,4 +1,5 @@
 #include "KickPerformance.h"
+#include "OledFlush.h"
 #include "KickShapeModel.h"
 #include <math.h>
 #include <stdio.h>
@@ -426,6 +427,8 @@ void KickPerformance::valueText(Parameter p, char* out, size_t size, bool compac
     float ms = releaseMs(v);
     if (ms < 1000) snprintf(out,size,compact ? "%.0fM" : "%.0f ms",ms);
     else snprintf(out,size,compact ? "%.1fS" : "%.1f s",ms/1000.f);
+  } else if (p == TAIL && v >= 127){
+    snprintf(out,size,"OPEN"); // fully up: no amp cut, DECAY sets the length
   } else if (p == TAIL){
     const uint8_t sweep = sweepTime_ ? *sweepTime_ : 64;
     const float sweep_ms = kickdaisy::sweepMs(state_.kickShape,sweep);
@@ -473,7 +476,7 @@ void KickPerformance::drawOverview(Adafruit_SH1106G& d){
     if (focus_.knob == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
     label(d,x+3,y+3,title); label(d,x+3,y+13,value); label(d,x+3,y+23,secondary);
   }
-  d.setTextWrap(true); d.display();
+  d.setTextWrap(true); oledFlush(d);
 }
 
 void KickPerformance::drawVisualization(Adafruit_SH1106G& d, Parameter p){
@@ -619,10 +622,10 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   if(fxMenu_){drawFxFocus(d,idleOverview(now_));return;}
   if (focus_.resetOverlay){
     label(d,16,19,"FX RESET",2); label(d,7,45,"FX OFF / PUMP KEPT");
-    d.setTextWrap(true); d.display(); return;
+    d.setTextWrap(true); oledFlush(d); return;
   }
   Parameter p = assignment(focus_.knob);
-  if(p==PARAM_COUNT){label(d,10,12,"NO CONTROL");d.display();return;}
+  if(p==PARAM_COUNT){label(d,10,12,"NO CONTROL");oledFlush(d);return;}
   uint8_t v = position(p); float x = v/127.f;
   char title[22], value[22], footer[22] = {}, extra[22] = {};
   if(p==EROSION)snprintf(title,sizeof(title),"EROSION");
@@ -677,7 +680,7 @@ void KickPerformance::drawFocus(Adafruit_SH1106G& d, uint32_t bpm){
   if (extra[0]) label(d,2,28,extra);
   drawVisualization(d,p);
   label(d,2,56,footer);
-  d.setTextWrap(true); d.display();
+  d.setTextWrap(true); oledFlush(d);
 }
 
 void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus,
@@ -691,9 +694,8 @@ void KickPerformance::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus
   if (idle != idleShown_) dirty_ = true;
   // TAIL shows milliseconds at the current tempo; nothing on the FX page does.
   if (!fxMenu_ && focus_.knob == 2 && bpm != renderedBpm_) dirty_ = true;
-  // Both OLED frames are blocking I2C transfers. Ten frames per second keeps
-  // enough foreground time for matrix scanning and control handling.
-  if (rendered_ && (uint32_t)(now-lastFrameMs_) < 100) return;
+  // Both OLED frames are blocking I2C transfers; cap redraws at 25 FPS.
+  if (rendered_ && (uint32_t)(now-lastFrameMs_) < 40) return;
   if (dirty_) {
     renderedBpm_ = bpm;
     drawOverview(overview);
@@ -787,7 +789,7 @@ void KickPerformance::drawFxOverview(Adafruit_SH1106G& d){
     d.fillRect(x+4,y+25,32*position(p)/127,2,SH110X_WHITE);
     if(resetPending(p))label(d,x+30,y+3,"*");
   }
-  d.setTextWrap(true);d.display();
+  d.setTextWrap(true);oledFlush(d);
 }
 void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
   d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
@@ -836,7 +838,7 @@ void KickPerformance::drawFxFocus(Adafruit_SH1106G& d,bool idle){
     }
     if(resetPending(fxAssignment(focus_.knob)))label(d,118,24,"*");
   }
-  d.setTextWrap(true);d.display();
+  d.setTextWrap(true);oledFlush(d);
 }
 
 void KickPerformance::setHeldFx(uint8_t selection,uint16_t held,uint32_t now){
@@ -857,6 +859,6 @@ void KickPerformance::renderHeldFx(Adafruit_SH1106G& d,uint32_t bpm,uint32_t now
     int x=2+int(i)*8;d.drawRect(x,47,5,4,SH110X_WHITE);
     if(heldFxMask_&(1u<<i))d.fillRect(x,47,5,4,SH110X_WHITE);
   }
-  label(d,0,56,heldFx_==10?"1/4 > 1/32 / BAR":mode==heldfx::HPF_REPEAT?(fast?"BPF + 1/8 RETRIG":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
-  d.setTextWrap(true);d.display();
+  label(d,0,56,heldFx_==10?"1/4 > 1/32 / BAR":heldFx_==9?"RANDOM BPF / HELD":mode==heldfx::HPF_REPEAT?(fast?"BPF + 1/8 RETRIG":"RANDOM BPF / HELD"):(fast?"BEAT GESTURE / HELD":"BAR BUILD / HELD"));
+  d.setTextWrap(true);oledFlush(d);
 }

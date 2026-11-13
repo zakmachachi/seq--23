@@ -39,6 +39,7 @@ public:
   void bindSweepTime(uint8_t* value) { sweepTime_ = value; }
   void setHeldFx(uint8_t selection,uint16_t held,uint32_t now);
   void renderHeldFx(Adafruit_SH1106G& display,uint32_t bpm,uint32_t now);
+  void invalidate(){ dirty_ = true; } // force the next render (e.g. after an overlay)
   struct FxState { uint8_t repeat=0, filter=0, routes=14; }; // DLY, HPF; pump EXT, others E+I. Routes bit4: reverb INT only.
   void setFxMenu(bool enabled);
   void setFunctionHeld(bool held);
