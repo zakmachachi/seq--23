@@ -28,4 +28,7 @@ trap 'rm -rf "$work"' EXIT
   -I "$root/daisy-kick/host/stubs" "$here/fx_menu.cpp" -o "$work/fx_menu"
 "$work/fx_menu"
 python3 "$here/fx_routes.py" "$work/render" "$work"
-python3 "$here/check.py" "$work/render" "$work"
+# check.py asserts the retired multi-lane/sub-shelf/hard-gate topology. Keep it
+# as a historical comparison only; raw-909 voice, retrigger, external routing,
+# and gain behavior are covered by locked_core.cpp, reliability,
+# and fx_routes.py above.

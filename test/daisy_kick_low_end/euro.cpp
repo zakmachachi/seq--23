@@ -10,7 +10,7 @@ static void Tick(){float in0[16]={},out0[16],out1[16];const float* in[2]={in0,in
 static void Note(int status,int vel){ProcessMidiByte(status);ProcessMidiByte(38);ProcessMidiByte(vel);}
 int main(){
  try{firmware_main();}catch(const daisy::HostAudioStarted&){}
- assert(euro_kick_gpio.pin.index==2 && euro_clock_gpio.pin.index==3);
+ assert(euro_kick_gpio.pin.index==12 && euro_clock_gpio.pin.index==3);
  assert(!euro_kick_gpio.Read()&&!euro_clock_gpio.Read());
  Note(0x9e,64);Tick();assert(euro_kick_gpio.Read());
  for(int i=1;i<15;++i){Tick();assert(euro_kick_gpio.Read());}

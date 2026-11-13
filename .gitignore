@@ -6,3 +6,6 @@ platformio_override.ini
 .vscode/ipch
 lib
 Sequencer_project.code-workspace
+
+# Local Finder metadata
+.DS_Store

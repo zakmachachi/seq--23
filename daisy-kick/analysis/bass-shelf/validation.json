@@ -1,0 +1,28 @@
+{
+  "uploaded": false,
+  "files": {
+    "daisy-kick/midi_oled_monitor.cpp": {
+      "bytes": 226552,
+      "sha256": "aaf3f0662aa69eadc6db9cfde005765a6798273bd5c38b776b3b7fa4a1e0297f"
+    },
+    "daisy-kick/build/midi_oled_monitor.bin": {
+      "bytes": 108688,
+      "sha256": "75b580ad1fce1dd35fc85b008832a4646f9a8724e7bb1f6c6fb27d7e5be76bce"
+    },
+    ".pio/build/teensy41/firmware.hex": {
+      "bytes": 417737,
+      "sha256": "59aee9cb5e646466ecf7d94e912a9c3f57d58f7eb750a3a04fc6786843d64546"
+    }
+  },
+  "checks": {
+    "low_end": "passed; sanitizer core/reliability, final rendered low-end checks",
+    "controller_host": "passed",
+    "seed_vector": "passed",
+    "seed_build": "passed",
+    "teensy_build": "passed"
+  },
+  "unresolved": [
+    "Audible tick needs exact settings/recording",
+    "Idle whine needs hardware frequency/input isolation"
+  ]
+}

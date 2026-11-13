@@ -11,6 +11,77 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## What's new in v1.5.0
+
+**Bob's new kick engine and performance pads, plus a round of fixes that make them usable.** Flash both the Teensy and the Daisy: the boards talk a new protocol, and old firmware on either side gives wrong pitches and dead kick controls.
+
+**A new kick engine.** The kick is one oscillator, modelled on a 909, with a fixed 60 ms body and a DECAY from 40 ms to 2.4 s after it. Before every hit the Teensy sends the kick's pitch, decay, shape, sweep and tail tune together, so a hit never starts with half-old, half-new settings. Any track with the KICK machine on MIDI channel 15 plays it.
+
+| Page | Knob 1 | Knob 2 | Knob 3 | Knob 4 | Knob 5 | Knob 6 |
+|---|---|---|---|---|---|---|
+| Menu 1 | KEY | HARM | SPREAD (click: scale) | PUMP / REVERB (click: switch) | TMOD | TUNE |
+| Menu 2 | SWEEP | DECAY (click: reverse) | TAIL (click: 32 ms gap) | BPF 1–3 (click: how many) | MACKIE / TUBE (click: switch) | SHAPE |
+| FUNCTION + Menu 2 | Tail-gate start | Acid clock division | Tanh compressor (click: on/off) | Kick gain, −15 to +21 dB | Cut fade (click: on) | Reverb |
+
+- **HARM** adds phase-locked 2nd, 3rd and 5th harmonics to the oscillator, from a round body at zero to a harder, drum-machine kick
+- **SHAPE** is how far the pitch sweep starts above the note; at exactly zero the kick becomes a sustained sine bass that glides between notes
+- **TUNE** moves the tail's pitch up to ±12 semitones, and **TMOD** wobbles it, so TMOD only does something once TUNE is away from the middle
+- **TAIL** holds the kick open and then cuts it. Turn it fully clockwise and the screen shows **OPEN**: nothing is cut and DECAY alone sets the length. **For long kicks, turn TAIL fully up**
+- **BPF** is three broad mid boosts, 85 Hz–3.2 kHz, feeding the distortion
+- **Mackie** is a two-stage desk-style drive. **Tube** is the v1.4.0 Tube again
+- Menu 3 on a KICK channel is Euclid again; it replaces only the kick generator's rhythm
+
+**Performance pads.** The step buttons play kick effects while held. Most take effect from the next kick, so they stay on the beat.
+
+| Step | While held | Works from |
+|---|---|---|
+| 1 | Mutes new kick hits; tails keep ringing | any track |
+| 2 | Random high-pass, 140–800 Hz | any track |
+| 3 | Kick up one semitone | any track |
+| 4 | 40 ms decay | any track |
+| 6 | **REVERSE**: kicks play reversed | KICK |
+| 7 | Rolls a random variation of the kick (the cue) | KICK |
+| 8 | **DRIVE**: Mackie/Tube flips, to full if it is below halfway, to clean if it is above | KICK |
+| 9 | Random BPF, held | any track |
+| 10 | Ratchet: 1/4 → 1/8 → 1/16 → 1/32 across one bar | any track |
+| 11 | Kick fades down over 2 s, back in ½ s | any track |
+| 12 | Dub echo | KICK |
+| 13 | **GROUND SCREAM**: a crackle, half a second of silence, then a 50 Hz roar; kicks come back underneath after 4 s | any normal track |
+| 14 | Back to the previous kick | KICK |
+| 15 | Hear the cue instead of the kick | KICK |
+| 16 | Keep the cue | KICK |
+
+- **These steps no longer edit patterns.** On the KICK channel every step is a pad; on other tracks steps 1–4 and 9–13 are
+- **Screen 2 shows what a pad does** while you hold it on the KICK channel, with live values: the high-pass frequency, the note step 3 will play, the cue's settings, or the drive change, e.g. `MACKIE 30% > 100%`
+- **FUNCTION + steps 1–3** are still the knob-loop record controls: keep an edit, turn a movement into a loop, clear the loops
+- The full reference is in [HELD_FX.md](HELD_FX.md) and [KICK_MENU2.md](KICK_MENU2.md)
+
+**A second Daisy for synths (optional).** A second Seed running [acid-seed3](acid-seed3/README.md) plays ACID, HOOVER and SCREECH voices. In Menu 4, press knob 1 to switch a track's sound between them. Row 5 on MIDI 12 can also follow the kick, playing an off-beat bass on the kick's tail pitch; mute row 5 to stop it.
+
+**MIDI IN is clock and transport only.** Clock, Start, Continue and Stop are followed and passed through to MIDI OUT; incoming notes and CCs are ignored. MIDI OUT never waits on the port, so a busy bus can no longer stall the buttons and screens. Details in [MIDI_SYNC.md](MIDI_SYNC.md).
+
+**Fixed**
+- The whole unit felt laggy and slow. Every screen update sent a full frame over I²C, about 25 ms per screen, so knobs and buttons were only read about 20 times a second while a screen was changing. Screens now send only the bytes that changed, a fraction of a millisecond for a knob turn, and refresh at 25 frames a second again
+- Step LEDs froze while playing and never updated on the menu pages. They follow the playhead and your presses again
+- Menu 1 on a KICK channel was very laggy: screen 2's waveform was re-simulated in full on every frame while HARM, TUNE or TMOD moved, although none of them change the picture
+- KEY, SPREAD, TUNE, TMOD, DECAY and SHAPE did nothing unless the kick was on row 4. The kick can be on any track again, and the Daisy keeps its per-hit settings in step with the knobs
+- The kick was cut off after its sweep however long DECAY was; see TAIL above
+- The MIDI channel selector (hold **CHn** + **Pot 1**) locked rows 4 and 5 and skipped channels 12 and 15. Every track can use any channel 1–16 again, and saved channels load as you set them
+- PUMP did nothing: EXT IN had been muted. It is back, with v1.4.0's noise gate keeping an unplugged input silent
+- The ground scream's feedback locked at full scale and put out a DC offset with clicks instead of a roar. It is now a 50 Hz roar at a level near the kick's, and it stops when released even with the transport stopped
+- FUNCTION + steps 1–3 had been taken over by the kick pads
+- The boot animation is back
+- Screen 2's left edge was cut off on some screens. It is moved 2 pixels in; `OLED2_NUDGE_PX` in `include/SeqConfig.h` sets it (0 restores the old placement)
+
+**Under the hood**
+- Mackie's two oversampled stages run in one pass: about 30 % less CPU, with the output within −82 dB of before
+- If the Daisy runs short of CPU, Mackie/Tube fades out for 2 s instead of the whole machine freezing
+- Audio blocks stay at two samples, keeping v1.4.0's whine fix
+
+Saved patches from v1.4.0 load; the new controls start at their defaults. If you ran a pre-release build in between, check each track's MIDI channel once.
+
+---
+
 ## What's new in v1.4.0
 
 **The kick has its own FX menu.** On a KICK channel, **MENU3** (the Euclid button) now opens six effect slots. Other machines keep Euclid there.
@@ -312,7 +383,7 @@ Per-channel generative note engine. The six pots are laid out in two rows of thr
 Analog CV outputs via the MAX11300 (PIXI) over SPI. `NUM_CV_OUTS` assignable ports (default 4 → PIXI ports 0–3) are configured as 0–10V DACs. First version is a manual control surface — pots 1..N set each output's voltage (0–10V), which also serves as a no-serial bring-up test. **Screen 2** shows level bars per output. Assignment modes (follow channel pitch / gate / velocity / etc.) are TBD. Pins: MOSI 11 / MISO 12 / SCK 13 / CS 37 / CNVTB 32 / INTB 28. Serial `v` runs a voltage self-test. (The old Step Visualizer view still exists in firmware but is no longer bound to a menu button.)
 
 ### Menu 3 — Euclid
-On a KICK channel, MENU3 opens the kick FX menu instead (see [What's new in v1.4.0](#whats-new-in-v140) and [KICK_MENU2.md](KICK_MENU2.md)).
+On a KICK channel, Euclid can replace the kick generator's trigger positions without changing its note, key, or timbre controls.
 
 Euclidean rhythm generator, laid out like the Notes page (pattern grid + ON/OFF header over a pot-aligned 2×3 grid):
 

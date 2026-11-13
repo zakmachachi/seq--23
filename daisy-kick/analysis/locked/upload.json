@@ -1,0 +1,12 @@
+{
+  "serial": "200364500000",
+  "address": "0x08000000",
+  "bytes": 107000,
+  "source_sha256": "4b676988dbeea3eb4e661013a04c74f44e057f00a08652bd8a1c7c6e0bef0027",
+  "binary_sha256": "bf32bcfcde9b27aa0142e3f91fb4c8ee9e7b9f355c9862e1516b26911c8f91aa",
+  "readback_sha256": "bf32bcfcde9b27aa0142e3f91fb4c8ee9e7b9f355c9862e1516b26911c8f91aa",
+  "download_exit_code": 0,
+  "readback_exit_code": 0,
+  "leave_exit_code": 74,
+  "hardware_audio_verified": false
+}

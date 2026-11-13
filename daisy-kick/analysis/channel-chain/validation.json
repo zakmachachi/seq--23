@@ -1,0 +1,80 @@
+{
+  "status": "Seed3 flashed and byte-for-byte readback verified; Teensy upload confirmed by user",
+  "files": {
+    "daisy-kick/midi_oled_monitor.cpp": {
+      "sha256": "f12f8d024c81758b0c26ba049d8e726521cdf469383516d85d6fd1cf6928e513",
+      "bytes": 227770
+    },
+    "daisy-kick/midi_rx_queue.h": {
+      "sha256": "3aea83795d3b524c19cd6cfc87e407492dd1b3b188d0a935574a5c49f5d8f64d",
+      "bytes": 1027
+    },
+    "daisy-kick/mackie_fir.h": {
+      "sha256": "deccd5ac698b9c8257da0ad42c60addbd7e1d51a128913f116d3a0caa42aeec0",
+      "bytes": 2305
+    },
+    "daisy-kick/Makefile": {
+      "sha256": "38ed1c2b456900865f0b7167cff163319646b5c8bef634db881f0c943ffc0312",
+      "bytes": 629
+    },
+    "daisy-kick/build/midi_oled_monitor.bin": {
+      "sha256": "eaec364960148703e6d9561733d739f8646560f37727a31a281a57a3796f728e",
+      "bytes": 109900
+    },
+    ".pio/build/teensy41/firmware.hex": {
+      "sha256": "4f881452b249c6c9c2b90c77b768578119c48a28b06fd0b578bf0f4012d2df6a",
+      "bytes": 417737
+    },
+    "src/KickPerformance.cpp": {
+      "sha256": "f25dda4048a17bc03f82373ce9453ceb0f24e18310af7c4a31d5cf33f7f52122",
+      "bytes": 24352
+    },
+    "src/SimpleSequencer.cpp": {
+      "sha256": "2242c3ce895cd0a48a211c325e7ce3b6a162d4948fb3248e2ce78f019e1090fc",
+      "bytes": 227279
+    },
+    "include/KickPerformance.h": {
+      "sha256": "8270a46ff4b376534a5c8376f9e7ed8aee57beb6e1a9ceff561673cedc8ff7f4",
+      "bytes": 4554
+    },
+    "include/SimpleSequencer.h": {
+      "sha256": "70ee8fd87f9a79fa3723141a4d2a7cc60d4c7d149f3e9ea08b3aba427647e819",
+      "bytes": 25776
+    },
+    "include/KickShapeModel.h": {
+      "sha256": "eb33d222ebeac96a9e0abd2299ea5ed823d5a801262c56aee4f3fc577b41610c",
+      "bytes": 13231
+    }
+  },
+  "hardware_runtime_verified": false,
+  "phase_cases": 1080,
+  "enabled_phase_worst_db": -1.415,
+  "audio_block_samples": 16,
+  "checks": {
+    "asan_ubsan_voice_midi_stress_output": "passed",
+    "controller_acceptance": "passed",
+    "seed_arm_build": "passed",
+    "teensy41_build": "passed",
+    "linked_usart3_vector": "verified 0x08006271 -> KickMidiRxIrq",
+    "phase_survey": "1080 settings; 16-sample callback",
+    "channel_probes": "passed; 16-sample host renderer"
+  },
+  "limitations": [
+    "Hardware MIDI soak, MCU deadline headroom and DAC audio capture remain unverified.",
+    "Phase survey is finite; nonlinear harmonic phase is not guaranteed for every setting."
+  ],
+  "uploads": {
+    "seed3": {
+      "time_utc": "2026-10-03T21:54:50.996499+00:00",
+      "serial": "200364500000",
+      "bytes": 109900,
+      "sha256": "eaec364960148703e6d9561733d739f8646560f37727a31a281a57a3796f728e",
+      "readback_verified": true,
+      "leave_requested": true
+    },
+    "teensy": {
+      "confirmed_by": "user",
+      "note": "PlatformIO graphical upload reported success; separate CLI attempt failed. User confirmed successful upload."
+    }
+  }
+}

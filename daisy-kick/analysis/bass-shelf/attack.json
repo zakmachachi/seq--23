@@ -1,0 +1,245 @@
+{
+  "attack_comparisons": [
+    {
+      "shape": 0.1, 
+      "dirty": 0, 
+      "hf_change_db": 0.0318992240917557, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 1, 
+      "hf_change_db": -0.004362763957871013, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 0, 
+      "hf_change_db": 0.036212901057782, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 1, 
+      "hf_change_db": 0.07600537430591062, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 0, 
+      "hf_change_db": 0.05519627992209046, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 1, 
+      "hf_change_db": -0.025406531064854212, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 0, 
+      "hf_change_db": -0.06752496855514409, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.1, 
+      "dirty": 1, 
+      "hf_change_db": -0.05145226750528669, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 0, 
+      "hf_change_db": 0.07166669123835226, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 1, 
+      "hf_change_db": 0.2580566568522664, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 0, 
+      "hf_change_db": 0.48001076430329614, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 1, 
+      "hf_change_db": 0.16570603992945354, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 0, 
+      "hf_change_db": -0.060564161673622705, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 1, 
+      "hf_change_db": -0.01013392475872078, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 0, 
+      "hf_change_db": -0.18137552536338808, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.25, 
+      "dirty": 1, 
+      "hf_change_db": -0.04999381292847857, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 0, 
+      "hf_change_db": -0.27511215647398013, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 1, 
+      "hf_change_db": 0.17367098108841902, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 0, 
+      "hf_change_db": -0.0467014801690226, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 1, 
+      "hf_change_db": 0.21235329488773136, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 0, 
+      "hf_change_db": -0.07844579329092825, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 1, 
+      "hf_change_db": -0.030908082925873145, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 0, 
+      "hf_change_db": 0.1544914460140805, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.5, 
+      "dirty": 1, 
+      "hf_change_db": 0.4395497433448702, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 0, 
+      "hf_change_db": -0.034988219915055074, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 1, 
+      "hf_change_db": 0.10325397010654726, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 0, 
+      "hf_change_db": 0.041825481782543764, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 1, 
+      "hf_change_db": -0.09107733898284677, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 0, 
+      "hf_change_db": -0.03844273688525869, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 1, 
+      "hf_change_db": -0.09940280617566875, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 0, 
+      "hf_change_db": 0.4153964311713114, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 0.75, 
+      "dirty": 1, 
+      "hf_change_db": 0.04601869772672928, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 0, 
+      "hf_change_db": -0.05730578754326198, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 1, 
+      "hf_change_db": 0.09974553453402576, 
+      "sweep": 0
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 0, 
+      "hf_change_db": -0.01011029296169108, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 1, 
+      "hf_change_db": 0.10423613399079366, 
+      "sweep": 0.25
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 0, 
+      "hf_change_db": -0.00611298999961615, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 1, 
+      "hf_change_db": -0.010405892938649696, 
+      "sweep": 0.5
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 0, 
+      "hf_change_db": 0.005425330742053242, 
+      "sweep": 1
+    }, 
+    {
+      "shape": 1, 
+      "dirty": 1, 
+      "hf_change_db": -0.002722755672861039, 
+      "sweep": 1
+    }
+  ], 
+  "normalization": "After multiplied by 2 to remove -6.02 dB trim difference; first20ms Hann FFT energy above5kHz"
+}

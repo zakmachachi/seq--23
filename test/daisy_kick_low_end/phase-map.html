@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Kick body phase survey</title>
+<style>
+body{font:16px system-ui;max-width:1080px;margin:32px auto;padding:0 20px;color:#dde6ed;background:#131a21}h1{font-size:28px}p{line-height:1.5;max-width:900px}select{font:inherit;margin:8px;padding:6px;background:#25323e;color:inherit;border:1px solid #536578}canvas{width:100%;background:#19232d;border:1px solid #536578}pre{white-space:pre-wrap;padding:16px;background:#25323e;min-height:110px}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:8px;border-bottom:1px solid #536578;text-align:left}tr{cursor:pointer}a{color:#6ce4c6}
+</style>
+<h1>Kick body: phase and summation</h1>
+<p>Each point is one rendered parameter combination. Phase compares the clean and character returns immediately before they combine. Colour shows the sum relative to the stronger individual path: red means more than 1 dB lost through cancellation. Hover a point or select a table row to inspect its settings.</p>
+<label>Time <select id="window"><option value="1">50–150 ms · body</option><option value="0">12–50 ms · onset</option><option value="2">150–350 ms · tail</option></select></label>
+<label>Component <select id="harmonic"><option value="1">Body fundamental</option><option value="2">Second harmonic</option><option value="3">Third harmonic</option></select></label>
+<label>Frequency <select id="band"><option value="body">30–90 Hz</option><option value="all">All measured frequencies</option></select></label>
+<p id="count"></p>
+<canvas id="plot" width="1040" height="540"></canvas>
+<pre id="details">Choose a point for settings and measurements.</pre>
+<h2>Lowest sums in this view</h2><table><thead><tr><th>Case</th><th>Hz</th><th>Phase</th><th>Wet / dry</th><th>Sum / stronger path</th></tr></thead><tbody id="rows"></tbody></table>
+<p>Only windows with at least two oscillator cycles and a contributing path above −60 dB are shown. Components are projected onto the single body oscillator phase and its harmonics. A clean sine has no second or third harmonic; these projections can show window leakage and are excluded from the fundamental summary. The swept body is not stationary in the onset window; short-window leakage may affect the projection. The dirty high-pass protects the bass by keeping its return small there, regardless of phase. Gate-off windows are measured before the deliberate output gate. A phase angle alone does not establish cancellation: relative level matters too. These are sampled combinations, not an exhaustive proof or a prediction of a soundsystem's acoustic response.</p>
+<p><a href="phase-data.csv">Download every measurement as CSV</a> · <a href="phase-data.json">JSON</a></p>
+<script>
+const data=/* AUDIT_DATA */[];
+const canvas=document.querySelector('#plot'),ctx=canvas.getContext('2d');let points=[];
+const x=p=>75+(p+180)/360*925,y=g=>465-(Math.max(-40,Math.min(40,g))+40)/80*425;
+function detail(p){document.querySelector('#details').textContent=`Case ${p.c.id}: ${JSON.stringify(p.c.settings,null,2)}\nTracked component: ${(p.m.tracked_hz*p.m.harmonic).toFixed(1)} Hz; phase: ${p.m.phase_deg.toFixed(1)}°; sum vs stronger path: ${p.m.sum_vs_stronger_db.toFixed(2)} dB\nDry: ${p.m.dry_db.toFixed(1)} dB; wet: ${p.m.wet_db.toFixed(1)} dB; output RMS: ${p.m.output_rms_db.toFixed(1)} dBFS`}
+function draw(){const win=+document.querySelector('#window').value,h=+document.querySelector('#harmonic').value,band=document.querySelector('#band').value;points=[];ctx.clearRect(0,0,1040,540);ctx.font='14px system-ui';ctx.strokeStyle='#41505e';ctx.fillStyle='#ccd9e3';
+for(let p=-180;p<=180;p+=45){ctx.beginPath();ctx.moveTo(x(p),40);ctx.lineTo(x(p),465);ctx.stroke();ctx.fillText(p+'°',x(p)-16,490)}
+for(let g=-40;g<=40;g+=10){ctx.beginPath();ctx.moveTo(75,y(g));ctx.lineTo(1000,y(g));ctx.stroke();ctx.fillText(g+' dB',12,y(g)+4)}
+ctx.fillText('Character phase relative to clean body',380,525);ctx.fillText('Wet / dry level (clamped to ±40 dB)',75,24);
+for(const c of data)for(const m of c.metrics){const hz=m.tracked_hz*m.harmonic;if(m.window!==win||m.harmonic!==h||m.cycles<2||Math.max(m.dry_db,m.wet_db)<-60||(band==='body'&&(hz<30||hz>90)))continue;const p={c,m,x:x(m.phase_deg),y:y(m.wet_db-m.dry_db)};points.push(p);ctx.fillStyle=m.sum_vs_stronger_db< -1?'#ff7373':m.sum_vs_stronger_db<0?'#ffd071':'#6ce4c6';ctx.globalAlpha=.55;ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fill()}ctx.globalAlpha=1;
+document.querySelector('#count').textContent=`${points.length} windows · ${points.filter(p=>p.m.sum_vs_stronger_db< -1).length} lose more than 1 dB · green: addition; amber: 0–1 dB loss; red: >1 dB loss.`;
+const rows=document.querySelector('#rows');rows.replaceChildren();for(const p of [...points].sort((a,b)=>a.m.sum_vs_stronger_db-b.m.sum_vs_stronger_db).slice(0,15)){const tr=document.createElement('tr');for(const val of [p.c.id,(p.m.tracked_hz*h).toFixed(1),p.m.phase_deg.toFixed(1)+'°',(p.m.wet_db-p.m.dry_db).toFixed(2)+' dB',p.m.sum_vs_stronger_db.toFixed(2)+' dB']){const td=document.createElement('td');td.textContent=val;tr.append(td)}tr.onclick=()=>detail(p);rows.append(tr)}}
+canvas.onmousemove=e=>{const b=canvas.getBoundingClientRect(),px=(e.clientX-b.left)*1040/b.width,py=(e.clientY-b.top)*540/b.height;let best=null,d=100;for(const p of points){const n=(p.x-px)**2+(p.y-py)**2;if(n<d){best=p;d=n}}if(best)detail(best)};
+document.querySelectorAll('select').forEach(s=>s.onchange=draw);draw();
+</script>

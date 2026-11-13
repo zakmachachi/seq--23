@@ -1,0 +1,86 @@
+{
+  "duration": 451.0240589569161,
+  "rate": 44100,
+  "snapshots": [
+    {
+      "seconds": 0.0,
+      "strongest_mid_hz": 5297,
+      "mid_db": -55.2
+    },
+    {
+      "seconds": 1.0,
+      "strongest_mid_hz": 1270,
+      "mid_db": -43.1
+    },
+    {
+      "seconds": 2.0,
+      "strongest_mid_hz": 5276,
+      "mid_db": -37.8
+    },
+    {
+      "seconds": 3.0,
+      "strongest_mid_hz": 5319,
+      "mid_db": -53.1
+    },
+    {
+      "seconds": 4.0,
+      "strongest_mid_hz": 5340,
+      "mid_db": -60.8
+    },
+    {
+      "seconds": 5.0,
+      "strongest_mid_hz": 5276,
+      "mid_db": -55.4
+    },
+    {
+      "seconds": 6.0,
+      "strongest_mid_hz": 646,
+      "mid_db": -46.4
+    },
+    {
+      "seconds": 7.0,
+      "strongest_mid_hz": 5233,
+      "mid_db": -41.5
+    },
+    {
+      "seconds": 8.0,
+      "strongest_mid_hz": 5297,
+      "mid_db": -35.2
+    },
+    {
+      "seconds": 9.0,
+      "strongest_mid_hz": 5276,
+      "mid_db": -55.3
+    },
+    {
+      "seconds": 10.0,
+      "strongest_mid_hz": 5276,
+      "mid_db": -44.2
+    },
+    {
+      "seconds": 11.0,
+      "strongest_mid_hz": 5254,
+      "mid_db": -46.5
+    },
+    {
+      "seconds": 12.0,
+      "strongest_mid_hz": 603,
+      "mid_db": -45.7
+    },
+    {
+      "seconds": 13.0,
+      "strongest_mid_hz": 5297,
+      "mid_db": -47.9
+    },
+    {
+      "seconds": 14.0,
+      "strongest_mid_hz": 5276,
+      "mid_db": -36.1
+    },
+    {
+      "seconds": 15.0,
+      "strongest_mid_hz": 5254,
+      "mid_db": -50.7
+    }
+  ]
+}

@@ -1,0 +1,344 @@
+{
+  "firmware_sha256": "aaf3f0662aa69eadc6db9cfde005765a6798273bd5c38b776b3b7fa4a1e0297f",
+  "combinations": 1080,
+  "body_windows": 2259,
+  "enabled_component_windows": 2124,
+  "enabled_component_worst_db": -0.862,
+  "enabled_component_windows_below_minus_1_db": 0,
+  "component_scope": "Body-clock fundamental projections, 30-90 Hz. Higher harmonics remain in raw data but are excluded from this summary because a clean sine has no second harmonic. Enabled components exclude PUNCH=0; finite windows and swept tones can still bias projections.",
+  "windows_below_minus_1_db": 0,
+  "worst": [
+    {
+      "loss_db": -0.862,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0.15,
+        "bpf3": 0.15
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.065,
+        "phase_deg": 156.864,
+        "sum_vs_stronger_db": -0.862,
+        "output_harmonic_db": -61.129,
+        "output_rms_db": -59.15,
+        "peak": 0.002835
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0.15,
+        "bpf3": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.699,
+        "phase_deg": 158.658,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006892
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0.5,
+        "bpf3": 0.15
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.7,
+        "phase_deg": 158.67,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006893
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.15,
+        "bpf2": 0,
+        "bpf3": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.7,
+        "phase_deg": 158.702,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006892
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.15,
+        "bpf2": 0.5,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.701,
+        "phase_deg": 158.744,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006893
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.5,
+        "bpf2": 0,
+        "bpf3": 0.15
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.7,
+        "phase_deg": 158.713,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006893
+      }
+    },
+    {
+      "loss_db": -0.811,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.5,
+        "bpf2": 0.15,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.701,
+        "phase_deg": 158.747,
+        "sum_vs_stronger_db": -0.811,
+        "output_harmonic_db": -61.078,
+        "output_rms_db": -55.811,
+        "peak": 0.006892
+      }
+    },
+    {
+      "loss_db": -0.796,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.15,
+        "bpf2": 0.15,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -35.361,
+        "phase_deg": 152.299,
+        "sum_vs_stronger_db": -0.796,
+        "output_harmonic_db": -61.063,
+        "output_rms_db": -55.182,
+        "peak": 0.006728
+      }
+    },
+    {
+      "loss_db": -0.715,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0.15,
+        "bpf3": 0.15
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -36.893,
+        "phase_deg": 160.819,
+        "sum_vs_stronger_db": -0.715,
+        "output_harmonic_db": -60.982,
+        "output_rms_db": -55.733,
+        "peak": 0.006927
+      }
+    },
+    {
+      "loss_db": -0.715,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.15,
+        "bpf2": 0,
+        "bpf3": 0.15
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -36.894,
+        "phase_deg": 160.843,
+        "sum_vs_stronger_db": -0.715,
+        "output_harmonic_db": -60.982,
+        "output_rms_db": -55.733,
+        "peak": 0.006934
+      }
+    },
+    {
+      "loss_db": -0.715,
+      "settings": {
+        "note": 41,
+        "model": 1,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.15,
+        "bpf2": 0.15,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 87.307,
+        "cycles": 17.461,
+        "dry_db": -15.384,
+        "wet_db": -36.893,
+        "phase_deg": 160.853,
+        "sum_vs_stronger_db": -0.715,
+        "output_harmonic_db": -60.982,
+        "output_rms_db": -55.733,
+        "peak": 0.006935
+      }
+    },
+    {
+      "loss_db": -0.687,
+      "settings": {
+        "note": 38,
+        "model": 0,
+        "shape": 1,
+        "wave": 0,
+        "amount": 0.8,
+        "decay": 0.35,
+        "punch": 1,
+        "tmod": 0,
+        "belly": 0.5,
+        "vel": 64,
+        "layers": 1,
+        "bpf1": 0.7835706888158807,
+        "bpf2": 0.9857839428197018,
+        "bpf3": 0.09370071720693696,
+        "taildelay": 0.7,
+        "hits": 4,
+        "line": 0.7
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 1.0,
+        "tracked_hz": 73.417,
+        "cycles": 14.683,
+        "dry_db": -23.054,
+        "wet_db": -39.795,
+        "phase_deg": 125.141,
+        "sum_vs_stronger_db": -0.687,
+        "output_harmonic_db": -53.087,
+        "output_rms_db": -45.449,
+        "peak": 0.022529
+      }
+    }
+  ]
+}

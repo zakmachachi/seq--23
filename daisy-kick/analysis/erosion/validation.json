@@ -1,0 +1,39 @@
+{
+  "uploaded": true,
+  "files": {
+    "daisy-kick/midi_oled_monitor.cpp": "f16f76f10653ee46acb0ebb0eefe308ab85e75af648f3ab45e86b8b56b5787f5",
+    "daisy-kick/erosion_fx.h": "1af3d80d2bf3291157ec16844ada090156a2d4ac659eb463e354ef60848c45ae",
+    "daisy-kick/build/midi_oled_monitor.bin": "2ec71351f13c2de6a0d5737d83e389a0a8ffa25e70b27df1e5b627be382543dd",
+    ".pio/build/teensy41/firmware.hex": "0ef31e0cdffd34892bd1ef3ae533e4735e93ed437d46541fc66a1a3dd754e252",
+    "src/KickPerformance.cpp": "0954dab5c27e228709eb44f349fd69b5ed22b132393423d3fe1ffc7a51aea6ac",
+    "src/SimpleSequencer.cpp": "907b2e004b57abbbd75055b34b9445ee591e98ed713f04eba875d33c8d04b7e4"
+  },
+  "checks": {
+    "seed_build": "passed",
+    "teensy_build": "passed",
+    "controller_host": "passed",
+    "sanitized_dsp_gpio_reverb_low_end": "passed",
+    "internal_external_routing": "passed",
+    "full_mix_peak": 0.6496233344078064,
+    "USART3_vector": "0x08006b09 verified"
+  },
+  "hardware_validation": "Not performed",
+  "upload_status": {
+    "seed3": {
+      "date": "2026-10-06",
+      "serial": "200364500000",
+      "bytes": 112896,
+      "sha256": "2ec71351f13c2de6a0d5737d83e389a0a8ffa25e70b27df1e5b627be382543dd",
+      "readback": "byte-for-byte match",
+      "restart": "DFU leave submitted; tool returned disconnect/status error 74; subsequent USB check was declined"
+    },
+    "teensy": {
+      "status": "PlatformIO teensy-gui upload SUCCESS, exit 0",
+      "sha256": "0ef31e0cdffd34892bd1ef3ae533e4735e93ed437d46541fc66a1a3dd754e252",
+      "date": "2026-10-06",
+      "verification": "uploader-reported success; no independent flash readback",
+      "serial_observed": "20250870",
+      "earlier_attempts": "Initial board not detected; CLI soft reboot found bootloader but write failed; subsequent GUI upload succeeded"
+    }
+  }
+}

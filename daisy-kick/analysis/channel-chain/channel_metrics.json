@@ -1,0 +1,91 @@
+{
+  "glue_kick_trains": [
+    {
+      "external_level": 0, 
+      "max_first_5ms_reduction_db": -0.0, 
+      "bpm": 185, 
+      "peak": 0.33517611026763916, 
+      "max_reduction_db": -0.0
+    }, 
+    {
+      "external_level": 0, 
+      "max_first_5ms_reduction_db": -0.0, 
+      "bpm": 250, 
+      "peak": 0.33517611026763916, 
+      "max_reduction_db": -0.0
+    }, 
+    {
+      "external_level": 0.8, 
+      "max_first_5ms_reduction_db": 0.5904030477353801, 
+      "bpm": 250, 
+      "peak": 0.6841924786567688, 
+      "max_reduction_db": 0.6890038116641939
+    }
+  ], 
+  "eq_max_center_gain_error_db": 0.002000000000000668, 
+  "alias_probes": [
+    {
+      "layers": 0, 
+      "hz": 997, 
+      "version": "before", 
+      "peak": 0.9925268888473511, 
+      "nonharmonic_to_harmonic_db": -24.60965176474117
+    }, 
+    {
+      "layers": 0, 
+      "hz": 997, 
+      "version": "after", 
+      "peak": 1.0405958890914917, 
+      "nonharmonic_to_harmonic_db": -96.17719437123468
+    }, 
+    {
+      "layers": 3, 
+      "hz": 997, 
+      "version": "before", 
+      "peak": 0.9924695491790771, 
+      "nonharmonic_to_harmonic_db": -24.960846847657795
+    }, 
+    {
+      "layers": 3, 
+      "hz": 997, 
+      "version": "after", 
+      "peak": 0.9828351140022278, 
+      "nonharmonic_to_harmonic_db": -77.47901755371201
+    }, 
+    {
+      "layers": 0, 
+      "hz": 3001, 
+      "version": "before", 
+      "peak": 0.987575888633728, 
+      "nonharmonic_to_harmonic_db": -19.140485354431632
+    }, 
+    {
+      "layers": 0, 
+      "hz": 3001, 
+      "version": "after", 
+      "peak": 1.071437120437622, 
+      "nonharmonic_to_harmonic_db": -47.170066666098364
+    }, 
+    {
+      "layers": 3, 
+      "hz": 3001, 
+      "version": "before", 
+      "peak": 0.9875626564025879, 
+      "nonharmonic_to_harmonic_db": -19.739704360655157
+    }, 
+    {
+      "layers": 3, 
+      "hz": 3001, 
+      "version": "after", 
+      "peak": 1.0303618907928467, 
+      "nonharmonic_to_harmonic_db": -56.52292748065339
+    }
+  ], 
+  "after_source_sha256": "f12f8d024c81758b0c26ba049d8e726521cdf469383516d85d6fd1cf6928e513", 
+  "glue_hot_sub": {
+    "maximum_reduction_db": 1.6988815379499358, 
+    "gain_ripple_last_500ms_db": 0.04421410224398725, 
+    "first_5ms_reduction_db": -0.0
+  }, 
+  "before_source_sha256": "4b676988dbeea3eb4e661013a04c74f44e057f00a08652bd8a1c7c6e0bef0027"
+}

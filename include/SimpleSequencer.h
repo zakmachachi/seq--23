@@ -6,7 +6,9 @@
 #include "SeqConfig.h"
 #include "Max11300.h"
 #include "KickPerformance.h"
+#include "HeldFxButtons.h"
 #include "KickMixer.h"
+#include "SoftSynthProtocol.h"
 #include <EEPROM.h>
 // OLED
 #include <Wire.h>
@@ -30,20 +32,30 @@ class SimpleSequencer {
     // MIDI input handlers (moved into `runEngine()` to avoid concurrent Serial reads)
     // MIDI output
     void midiSendByte(uint8_t b);
+    bool midiSendMessage(uint8_t status,uint8_t a,uint8_t b,bool control=false);
+    void retryMidiNoteOffs();
+    uint32_t pendingMidiOff[16][4]={};
+    volatile uint32_t midiRealtimeOverflows=0,midiNoteOverflows=0;
+    volatile uint32_t midiEngineMaxCycles=0,midiEngineOverruns=0;
     void midiSendNoteOn(uint8_t channel, uint8_t note, uint8_t vel);
     void midiSendNoteOff(uint8_t channel, uint8_t note, uint8_t vel);
     // ISR access
     static SimpleSequencer* instancePtr;
     void handleButtonIRQ(uint8_t idx);
-    // Engine moved to a 1ms hardware timer: runs MIDI processing and step advancement
+    // Engine runs on a 250 us hardware timer for bounded MIDI RX/step latency.
     void runEngine();
     void internalClockTick();
 
   private:
     KickPerformance kickPerformance;
+    HeldFxButtons heldFxButtons;
+    bool heldFxTransportWasRunning=false;
+    uint8_t heldFxDisplaySelection=0;
     KickMixer kickMixer;
     bool kickMixMode = false; // Function + MENU2 selects the mix stage instead.
+    bool acidCompMode = false; // Function + MENU2 selects the Acid compressor.
     bool kickCCPage() const;
+    bool acidCompPage() const;
     bool kickFxPage() const;
     volatile uint32_t fxBarCounter=0;
     bool kickMixPage() const;
@@ -51,7 +63,7 @@ class SimpleSequencer {
     // Kick fill steps emit CC47 from triggerChannel(), which runs in the 1 ms
     // engine ISR. A latest-value slot drained in the foreground like
     // KickPerformance's pending array, so a full UART is never spun on.
-    // Slot 0 is CC47 (BPF layers); 1..3 are the per-hit kick shape CCs,
+    // Slot 0 is CC47 (one BPF send amount); 1..3 are the per-hit kick shape CCs,
     // CC78 SWEEP TIME, CC79 TMOD and CC64 WAVE, sent just before each
     // note-on.
     static const uint8_t FILL_CC_COUNT = 5;
@@ -169,8 +181,8 @@ class SimpleSequencer {
     // Per-KICK-fill-step sound, rolled once with the extras and then held so a
     // repeated fill step keeps its own character instead of shimmering.
     // 255 = not a kick fill step, so no CC is sent when it fires.
-    uint8_t machineKickBpf[NUM_CHANNELS][NUM_STEPS];   // 0..3 BPF layer count
-    // Random BPF per kick channel. 0 off, 1 fills +/-1 layer, 2 fills across
+    uint8_t machineKickBpf[NUM_CHANNELS][NUM_STEPS];   // 0..3 single BPF send level
+    // Random BPF per kick channel. 0 off, 1 fills +/-1 send level, 2 fills across
     // the full range, 3 every triggered step across the full range. A live
     // performance toggle, so deliberately not persisted.
     uint8_t kickBpfRandom[NUM_CHANNELS] = {};
@@ -182,11 +194,99 @@ class SimpleSequencer {
     // sweep curve and sweep time instead of scale, spread and gate, and its
     // velocity is TUNE, a bipolar tail excursion with neutral 64.
     uint8_t kickWave[NUM_CHANNELS];           // CC64: 0 sine .. 127 supersaw
+    bool kickMenu1ReverbSelected[NUM_CHANNELS]; // Menu 1 knob 4 selects Pump or Reverb
     uint8_t kickSweepTime[NUM_CHANNELS];      // CC78 via sweepTimeCC: 64 = 1.00x, 0.65x..1.55x
     uint8_t kickTailMod[NUM_CHANNELS];          // CC79: 0 off; 1..127 resettable .125..16 Hz LFO
+    // Cache actual MIDI-15 kick hits on steps 1/5/9/13, then play one octave
+    // above the settled tail key on steps 3/7/11/15. Fill suppresses playback.
+    uint8_t kickOffbassNote[4]={};
+    float kickOffbassDepth[4]={};
+    uint8_t kickOffbassTmod[4]={};
+    bool kickOffbassValid[4]={};
+    uint8_t kickOffbassPlaying=255;
+    uint32_t kickOffbassOffTick=0;
+    bool kickOffbassJustTriggered=false;
+    volatile bool kickHeldButtonDown[5]={}; // mute, random HPF, +1 pitch, volume drop, 40 ms decay
+    volatile bool kickDubButtonHeld=false;
+    volatile uint8_t kickDubGestureMask=0; // step 12 and 13 can share the dub gesture
+    bool kickDubActive=false;
+    volatile bool acidTriggerBlockHeld=false;
+    volatile bool acidDubButtonHeld=false;
+    bool kickHeldMuteActive=false,kickHeldLevelActive=false,kickHeldRandomHpfActive=false,kickHeldDecayActive=false;
+    bool kickHeldPitchActive=false,kickHeldSweepActive=false;
+    uint8_t kickHeldRandomHpfValue=0,kickHeldSweepHpfValue=0,kickHeldLastHpfValue=255;
+    uint32_t kickHeldRng=0x6d2b79f5u;
+    struct KickPreset { uint8_t note=33, decay=64, shape=64, sweep=64; };
+    KickPreset kickCurrentPreset{}, kickPreviousPreset{}, kickCuePreset{};
+    bool kickPresetInitialized=false, kickPresetCommitted=false;
+    bool kickCueSwapHeld=false, kickPreviousLayerHeld=false, kickCueLayerHeld=false;
+    uint16_t kickProgressionOwnedMask=0;
+    uint8_t kickPresetPending=0; // 0 none, 1 restore previous, 2 commit cue
+    uint32_t kickPresetRng=0x91e10da5u;
+    uint8_t kickOverlaySentMode=255, kickOverlaySentNote=255;
+    uint8_t kickOverlaySentDecay=255, kickOverlaySentShape=255, kickOverlaySentSweep=255;
+    void clearKickOffbassSlot(uint8_t step);
+    void triggerKickOffbass(uint8_t step);
+    void randomizeKickCue();
+    void applyKickProgression(uint8_t& note);
+    void sendKickOverlay(uint8_t mode,const KickPreset& preset);
     bool isKickChannel(uint8_t ch) const;
+    // A row that plays the Kick Seed: KICK machine routed to MIDI 15. Any row
+    // can be the kick again (as before the "row 4 is the kick" change); the
+    // per-hit packet and kick presets follow whichever row last triggered.
+    bool kickSeedRow(uint8_t ch) const;
+    volatile uint8_t kickRow=3;
+    // Screen 2 feedback for the kick performance pads while KICK is selected.
+    uint8_t kickPadShown=0;        // 1..16; 0 = nothing pressed yet
+    uint16_t kickPadsDown=0;       // pads physically held
+    uint32_t kickPadShownMs=0;     // last press/release (overlay lingers after)
+    uint32_t kickPadFrameMs=0;
+    bool kickPadOverlayWasOn=false;
+    // Momentary kick pads on the KICK row: 6 REVERSE, 8 DRIVE; step 13
+    // GROUND SCREAM from any normal row. Sent from loop() on change.
+    bool kickPadReverseHeld=false, kickPadReverseSent=false;
+    bool kickPadDriveHeld=false;
+    uint8_t kickPadDriveSent=255, kickPadDriveCC=48, kickPadDriveUserSeen=255;
+    bool kickScreamHeld=false, kickScreamSent=false;
+    void serviceKickPadOverrides();
+    void noteKickPad(uint8_t i,bool down);
+    bool kickPadOverlayActive(uint32_t now) const;
+    void drawKickPadOverlay(uint32_t now);
     uint8_t kickRatchetProb[NUM_CHANNELS];    // 0..100 % chance an extra step is a ratchet
     uint8_t kickExtrasAreFills[NUM_CHANNELS]; // 0=always play, 1=non-base kicks fire only when Fill held
+    bool skitterEnabled[NUM_CHANNELS]={};
+    uint8_t skitterTiming[NUM_CHANNELS]={};
+    bool acidModded[NUM_CHANNELS]={};
+    uint8_t acidParam[NUM_CHANNELS][6]; // cutoff, resonance, env mod, decay, accent, waveform
+    uint8_t hooverParam[NUM_CHANNELS][6];
+    uint8_t screechParam[NUM_CHANNELS][6]={},screechLevel[NUM_CHANNELS]={},screechStyle[NUM_CHANNELS]={};
+    uint8_t synthFx[NUM_CHANNELS][6]={}; // BPF, tube, HPF, delay, reverb, erosion
+    bool synthMackie[NUM_CHANNELS]={};
+    uint8_t acidCompAmount[NUM_CHANNELS]={};
+    bool acidCompEnabled[NUM_CHANNELS]={};
+    uint8_t acidOutputLevel[NUM_CHANNELS];
+    uint8_t acidBpfPeriod[NUM_CHANNELS]={}; // 0=off, 1=1 bar, 2=2 bars, 3=4 bars, 4=8 bars
+    uint8_t hooverPeriod[NUM_CHANNELS]={},hooverMix[NUM_CHANNELS]={},hooverLevel[NUM_CHANNELS]={};
+    uint8_t acidLevel[NUM_CHANNELS]={};
+    enum AudioMachine : uint8_t { AM_NONE=0, AM_ACID, AM_HOOVER, AM_SCREECH, AM_COUNT };
+    uint8_t audioMachine[NUM_CHANNELS]={};
+    uint8_t synthMidiChannel[NUM_CHANNELS]; // synth routing; Teensy row 5 is fixed to MIDI 12
+    bool audioCyclePending[NUM_CHANNELS]={};
+    bool synthMachine(uint8_t ch) const { return ch<NUM_CHANNELS && audioMachine[ch]!=AM_NONE; }
+    uint8_t outputMidiChannel(uint8_t ch) const {
+      if(ch>=NUM_CHANNELS)return 0;
+      // Every row sends on the channel picked with Channel + pot 1. Rows 4/5
+      // default to the Kick Seed (MIDI 15) and Acid lane (MIDI 12).
+      return synthMachine(ch)?(synthMidiChannel[ch]&15):(midiChannel[ch]&15);
+    }
+    bool synthMidiChannelInUse(uint8_t midiCh,uint8_t except) const;
+    bool assignSynthMidiChannel(uint8_t ch);
+    void cycleAudioMachine(uint8_t ch);
+    void syncKickHeldControls(uint8_t ch);
+    void syncAudioMachine(uint8_t ch);
+    volatile uint8_t synthCCValue[NUM_CHANNELS][128]={};
+    volatile bool synthCCPending[NUM_CHANNELS][128]={};
+    void sendAcidCC(uint8_t ch,uint8_t cc,uint8_t value);
     // Accumulating ordered list of extra (non-skeleton) source positions per
     // channel. Density adds one new weighted-random spot at a time and the
     // previously-placed ones stay put; dropping density to 0 clears the list so
@@ -196,6 +296,9 @@ class SimpleSequencer {
     void regenerateMachinePattern(uint8_t ch);
     bool isStepActive(uint8_t ch, uint16_t absStep);
     void drawTrigMachineView();
+    void drawAcidView();
+    void drawAcidCompView();
+    void drawSynthFxView();
     void drawPagesView();
 
     // runtime
@@ -253,6 +356,7 @@ class SimpleSequencer {
     Adafruit_SH1106G display{128, 64, &Wire};
     // secondary OLED on Wire1 (Teensy 4.1: SDA1=17, SCL1=16) — global overview screen
     Adafruit_SH1106G display2{128, 64, &Wire1};
+    bool displayPresent = false;
     bool display2Present = false;
     // --- ANALOG CV OUTPUTS (MAX11300 PIXI over SPI) ---
     Max11300 pixi{MAX_CS, MAX11300_SPI_HZ};
@@ -298,7 +402,9 @@ class SimpleSequencer {
     Adafruit_NeoPixel ledStrip;
     void updateLEDs();
     uint32_t lastDisplayMillis;
-    const uint32_t displayRefreshMs = 20; // display refresh interval in ms (~50Hz)
+    // Full-frame OLED transfers are synchronous I2C writes. 25 FPS keeps the
+    // UI responsive while leaving the foreground loop time between frames.
+    const uint32_t displayRefreshMs = 40;
     void drawDisplay();
     void drawOverview(); // secondary OLED: global state dashboard
     void drawDebugGrid();
@@ -513,6 +619,19 @@ class SimpleSequencer {
       uint8_t savedKickErosion,savedKickErosionFreq; // v20, appended
       KickPerformance::FxState savedKickFx; // v21: append only
       uint8_t savedKickPitch; // v22
+      uint8_t savedAcidCompAmount[NUM_CHANNELS]; // v24
+      uint8_t savedAcidCompEnabled[NUM_CHANNELS];
+      uint8_t savedAcidOutputLevel[NUM_CHANNELS]; // v25
+      // v26: Acid Seed 3 voice, effect and performance state.
+      uint8_t savedAcidParams[NUM_CHANNELS][6];
+      uint8_t savedHooverParams[NUM_CHANNELS][6];
+      uint8_t savedScreechParams[NUM_CHANNELS][6];
+      uint8_t savedSynthFx[NUM_CHANNELS][6];
+      uint8_t savedAcidBpfPeriod[NUM_CHANNELS],savedAcidLevel[NUM_CHANNELS];
+      uint8_t savedHooverPeriod[NUM_CHANNELS],savedHooverMix[NUM_CHANNELS],savedHooverLevel[NUM_CHANNELS];
+      uint8_t savedScreechLevel[NUM_CHANNELS],savedScreechStyle[NUM_CHANNELS];
+      uint8_t savedSkitterTiming[NUM_CHANNELS];
+      uint8_t savedSynthFlags[NUM_CHANNELS]; // bit 0 Mackie, 1 skitter, 2 acid mod
       // v16: the mix page's third slot is TAIL ATTACK (was the Tube gain);
       // no new fields, only a new meaning for an old one.
     };

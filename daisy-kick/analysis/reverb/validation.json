@@ -1,0 +1,31 @@
+{
+  "uploaded": false,
+  "files": {
+    "daisy-kick/midi_oled_monitor.cpp": {
+      "bytes": 226732,
+      "sha256": "e8d5e65a611221df726d264f92cb24fbe7b63858b97e187666655a7eef7d3c0f"
+    },
+    "daisy-kick/build/midi_oled_monitor.bin": {
+      "bytes": 111008,
+      "sha256": "e3ee7350823692ac536c9a5e4729038fdbfdfd0e656c042e57494a94460843e8"
+    },
+    ".pio/build/teensy41/firmware.hex": {
+      "bytes": 417737,
+      "sha256": "a0eb44bde0b9f88b30300575873c427b05917b3e715ced2fe3a89506cdc7d094"
+    }
+  },
+  "checks": {
+    "low_end_and_reverb_sanitizers": "passed",
+    "controller_host": "passed",
+    "seed_build": "passed",
+    "teensy_build": "passed",
+    "USART3_vector": "verified 0x0800669d",
+    "headroom_cases": 72,
+    "max_combined_peak": 0.755868,
+    "restored_attack_cases": 8,
+    "max_trim_compensated_attack_error": 8.337199687957764e-06
+  },
+  "limitations": [
+    "No device upload or hardware listening/CPU measurement performed."
+  ]
+}

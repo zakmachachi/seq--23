@@ -9,7 +9,7 @@ were no better on the bench; rendering the waveform settled it in one pass.
 ```sh
 cd daisy-kick
 c++ -std=c++17 -O2 -I host/stubs -o /tmp/kick_host host/kick_host.cpp
-/tmp/kick_host /tmp/out.f32 bpm=185 hits=6 sub=0.75 punch=1 decay=0.75 line=1
+/tmp/kick_host /tmp/out.f32 bpm=185 hits=6 decay=0.5 shape=0.5 sweeptime=0.5
 ```
 
 Read it back with `numpy.fromfile(path, dtype=numpy.float32)` at 48 kHz mono.
@@ -21,34 +21,33 @@ last step) and `spacing_ms` (time between hits; defaults to a sixteenth at
 `bpm`). The drum continues its decay after note-off. Every file begins with
 250 ms of silent control-settling time.
 
-The MIDI CC controls use normalized values 0..1: `line`, `mackie`, `tube`,
-`bpf`, `sub`, `punch`, `decay`, `mackamt`, `tubeamt`, `taildelay`, `shape`,
-`wave`, `tmod`, `belly`, `sweeptime`, `hpf`, `lpf`, `reverb`, `bitcrush`,
-`layers`, and `bpf1`/`bpf2`/`bpf3` (band centers). `bpm` also sets the
+The MIDI CC controls use normalized values 0..1: `mackie` / `mackamt`,
+`tube` / `tubeamt`, `bpf` (four send positions), `bpfhz` (one band centre),
+`decay`, `shape`, `sweeptime`, `model`, and `extkick`. The host accepts old
+arguments such as `line`, `sub`, `punch`, `hpf` and `lpf` for script
+compatibility, but those controls are bypassed in this raw phase. `bpm` sets the
 firmware tempo used for the tail gate.
 `model=0` selects Mackie; `model=1` selects Tube. `reverse=1` enables reverse.
-`note` is a MIDI note number and `vel` is 0..127 bipolar tail pitch (64 neutral). Supplying
-`taildelay` also enables the tail gate; zero still means no gap. `sweeptime`
-is the direct CC78 value: 0..1 maps to 4..240 ms. TMOD rate is independent
-of amplitude DECAY. BITCRUSH affects only the dirty return.
+`note` is a MIDI note number. `sweeptime` maps to 4..100 ms, with the measured
+909 sweep at the midpoint (31 ms). SHAPE reaches the measured 909 start ratio
+at its midpoint, has finer travel near a steady bass note, and extends to a
+four-octave pitch start at maximum. DECAY maps to a 40..600 ms T30 after the
+fixed 60 ms body plateau. BPF is one variable-centre band on the Mackie/Tube
+send, not a stack; the dry kick remains present.
 
 `externalhz` and `externallevel` generate a sine on the external input.
 `externalout=/tmp/external.f32` saves physical output 2 separately. The
 primary file and output 2 now both contain the combined mono mix, including any external input.
 
 **Only CCs named on the command line are sent**; anything omitted keeps the
-firmware's power-on default. `line` is the linear kick-bus level;
-setting `line=0` mutes the generated kick. `sub=0` removes only the octave
-sine. The firmware now reserves output headroom internally, so `line=1` is
-appropriate for measuring normal output. Check peak level when adding
-performance effects or comparing unusual combinations.
+firmware's power-on default. The raw generator has a fixed calibrated level;
+there is no output-gain control in this path.
 
-For a clean body comparison, explicitly disable both character amounts and
-the octave sub, for example:
+For a clean body comparison, explicitly disable the BPF and character send:
 
 ```sh
 /tmp/kick_host /tmp/clean-body.f32 hits=1 spacing_ms=1000 tail=1000 note=38 \
-  sub=0 wave=0 shape=0.5 vel=64 punch=1 decay=0.5 line=1 mackamt=0 tubeamt=0
+  bpf=0 shape=0.5 sweeptime=0.5 decay=0.5 mackamt=0 tubeamt=0
 ```
 
 ## How it works
@@ -76,3 +75,43 @@ analog-output, amplifier or loudspeaker behavior. Identical fresh runs should
 produce identical files; test retriggers separately because their continuity
 bridge intentionally depends on the preceding output. The controller's OLED
 scope is a simplified clean-generator preview, not a measurement of this bus.
+
+`heldfx=1..16` selects a held industrial gesture; the harness renews its MIDI
+lease every 200 ms. `heldfx=0` (default) leaves the new subsystem bypassed.
+
+## External delay transition check
+
+The external dotted-quarter delay now crossfades stationary taps on tempo
+changes, fades its input send on engagement and filters both send and feedback.
+The feedback path no longer applies the old soft clip on every repeat.
+
+```
+c++ -std=c++17 -O2 -I host/stubs host/delay_test.cpp -o /tmp/kick-delay-check
+/tmp/kick-delay-check
+```
+
+This checks finite output and continuity on a sine through a tempo jump and
+on/off transitions. It does not establish hardware callback CPU headroom.
+
+## External-path integrity audit
+
+The automatic external input noise gate has been removed from the normal path.
+It was introduced during the grounding investigation and attenuated quiet input
+and tails without an explicit FX setting. Input 2 remains excluded. Held FX
+now separate the command generation counter from the pad number; pad-9 release
+can finish on a quarter edge without another kick, and lease expiry clears the
+kick BPF override as well as the effect return.
+
+```
+c++ -std=c++17 -O2 -fsanitize=address,undefined -I host/stubs host/external_integrity_test.cpp -o /tmp/external-integrity
+/tmp/external-integrity
+```
+
+Checks: production callback at input amplitudes 0.00001, 0.005, 0.1 and 0.5,
+with/without kick triggers (generated lane muted); expected linear return gain
+and output filters; synth-channel CC isolation; each external effect's release
+to exact bypass; all ten external effects layered then released; held command
+sequence flags and lease/quarter release. Address/undefined-behavior sanitizer
+checks pass. All 16 held gesture tests also pass. These tests found no extra
+input distortion with settled FX bypass, but cannot establish hardware callback
+deadlines or diagnose the reported audible recovery when kicks are added.

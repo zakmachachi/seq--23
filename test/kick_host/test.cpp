@@ -41,6 +41,21 @@ struct Harness {
 };
 
 int main(int argc,char**){
+ // The playable 909 macros hold a calibrated centre and expose useful,
+ // monotonic bass-to-laser and short-to-long ranges at both ends.
+ {using namespace kickdaisy;
+  assert(fabsf(shapeStartRatio(0.f)-1.f)<.0001f);
+  assert(fabsf(shapeStartRatio(.5f)-4.362f)<.02f);
+  assert(fabsf(shapeStartRatio(1.f)-16.f)<.001f);
+  assert(shapeStartRatio(.25f)>1.f&&shapeStartRatio(.25f)<shapeStartRatio(.5f));
+  assert(fabsf(shapeSweepMs(0.f)-4.f)<.001f);
+  assert(fabsf(shapeSweepMs(.5f)-31.f)<.001f);
+  assert(fabsf(shapeSweepMs(1.f)-100.f)<.01f);
+  assert(shapeSweepMs(.25f)>shapeSweepMs(0.f)&&shapeSweepMs(.25f)<31.f);
+  assert(fabsf(decaySeconds(0)-.040f)<.0001f);
+  assert(fabsf(decaySeconds(64)-.155f)<.002f);
+  assert(fabsf(decaySeconds(127)-.600f)<.001f);
+  assert(decaySeconds(32)>decaySeconds(0)&&decaySeconds(32)<decaySeconds(64));}
  // Retry a full startup snapshot, including routing and reset-mask CCs.
  {Harness h;h.k=K{};h.ready=false;h.k.begin(Harness::send,&h);assert(h.midi.empty());
  h.ready=true;h.k.service(1);assert(h.midi.size()==27);assert(h.sent(92,14)&&h.sent(90,0)&&h.sent(91,0));
@@ -111,8 +126,8 @@ int main(int argc,char**){
  for(int v=126;v>=4;--v)h.k.updateRepeat(r,loop,v);assert(r.division==start);h.k.updateRepeat(r,loop,3);assert(!r.on);}}
  // Sound controls remain independent, and K1 is now a navigation hint.
  {Harness h;h.set(4,102);h.click(4);h.set(4,32);h.click(4);assert(h.k.state_.mackieAmount==102&&h.k.state_.tubeAmount==32);
- h.set(3,37);h.click(3);h.click(3);h.set(3,71);h.click(3);h.set(3,99);for(int i=0;i<12;++i)h.click(3);
- assert(h.k.state_.bpfFrequencyValue[0]==37&&h.k.state_.bpfFrequencyValue[1]==71&&h.k.state_.bpfFrequencyValue[2]==99);
+ h.set(3,37);h.click(3);h.set(3,71);h.click(3);h.set(3,99);for(int i=0;i<12;++i)h.click(3);
+ assert(h.k.state_.bpfFrequencyValue[0]==71&&h.k.state_.bpfFrequencyValue[1]==99&&h.k.state_.bpfFrequencyValue[2]==95&&h.k.state_.bpfLayerCount==2);
  h.click(1);assert(h.k.state_.reverseEnabled);h.click(2);assert(h.k.state_.tailDelayEnabled);assert(h.k.assignment(0)==K::PARAM_COUNT);}
  // Save/restore routing, validate corrupted state, retain inactive effect amounts.
  {Harness h;h.k.setFxMenu(true);h.click(0);h.click(1);h.click(3);auto saved=h.k.fxState();h.k.restoreFx({255,255,255});assert(h.k.fxState().repeat==0&&h.k.fxState().filter==0&&h.k.fxState().routes==31);
@@ -120,7 +135,7 @@ int main(int argc,char**){
  // Every value fits both OLEDs; five-second idle transition and physical focus.
  {Harness h;Adafruit_SH1106G a,b;for(int n=0;n<K::PARAM_COUNT;++n)for(int v=0;v<128;++v){auto p=(K::Parameter)n;int k=h.knob(p);h.k.position(p)=v;h.k.focus_.knob=k;h.k.drawOverview(a);h.k.drawFocus(b,300);}
  h.k.setFxMenu(true);h.k.service(10000);h.k.adjust(5,-3);h.k.render(a,&b,200,10000);
- assert(!h.k.idleOverview(14999)&&h.k.idleOverview(15000));h.k.render(a,&b,200,15000);assert(b.has("E:EXT I:INT +:BOTH"));
+ assert(!h.k.idleOverview(14999)&&h.k.idleOverview(15000));h.k.render(a,&b,200,15000);assert(b.has("KICK: 1 / 9 / 10"));
  if(argc>1){
    h.k.restoreFx({0,0,14});const int amounts[]={89,32,70,92,50,84};
    for(int i=0;i<6;++i)h.k.position(h.k.fxAssignment(i))=amounts[i];
@@ -129,6 +144,7 @@ int main(int argc,char**){
    h.k.setFunctionHeld(true);h.k.drawFxFocus(b,false);b.save("fx-erosion-frequency.svg");
  }
  h.k.setActive(false);int frames=a.frames;h.k.render(a,&b,200,16000);assert(a.frames==frames);}
+ {Harness h;Adafruit_SH1106G d;for(uint8_t pad=1;pad<=16;++pad){h.k.setHeldFx(pad,uint16_t(1u<<(pad-1)),0);h.k.renderHeldFx(d,200,1000);if(pad==10)assert(d.has("RATCHET"));else assert(d.has(heldfx::Name((pad-1)%8)));}}
  for(int cc=0;cc<128;++cc)assert(fabsf(K::frequency(K::BPF1,cc)-kickdaisy::bpfHz(cc))<.001f);
  puts("PASS: six-slot FX, routing, bar resets/cancel/stop, FN frequency, recall, repeat rates, relative ADC, all OLED values and five-second overview");
 }

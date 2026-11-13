@@ -1,179 +1,167 @@
 #include "KickMixer.h"
-#include <math.h>
+#include "OledFlush.h"
 #include <stdio.h>
 
 namespace {
-// One CC per control, plus CC55: DIST sends Mackie (54) and Tube (55) together.
-constexpr uint8_t CC[] = {53,54,61,56,57,58,55};
-constexpr uint8_t CC_SLOTS = sizeof(CC);
-const char* const SHORT_NAMES[] = {"LINE","DIST","BELLY","BPF","SUB","PUNCH"};
-const char* const LONG_NAMES[] = {"LINE OUT","DISTORTION","BELLY","BPF MIX","SUB","PUNCH"};
-// DIST keeps the Mackie/Tube balance their separate defaults had (65 / 80).
-constexpr float TUBE_PER_DIST = 80.f / 65.f;
-constexpr float PI_F = 3.14159265358979323846f;
-constexpr int LEFT = 4, RIGHT = 123;
-void label(Adafruit_SH1106G& d, int x, int y, const char* text, uint8_t size = 1){
-  d.setTextSize(size); d.setCursor(x,y); d.print(text);
+constexpr uint8_t CC_KICK_GAIN = 53;
+constexpr uint8_t CC_REVERB = 36;
+constexpr uint8_t CC_TAIL_START = 67;
+constexpr uint8_t CC_COMP_AMOUNT = 68;
+constexpr uint8_t CC_COMP_ENABLE = 69;
+constexpr uint8_t CC_ACID_DELAY_RATE = 108;
+constexpr uint8_t CC_CUTOFF_TIME = 71;
+constexpr uint8_t CC_CUTOFF_ENABLE = 72;
+
+int rateIndex(uint8_t value){
+  static const uint8_t points[7]={0,21,42,64,85,106,127};
+  int best=0, distance=128;
+  for(int i=0;i<7;++i){
+    int d=abs((int)value-(int)points[i]);
+    if(d<distance){distance=d;best=i;}
+  }
+  return best;
 }
+const char* delayRateName(uint8_t value){
+  static const char* names[7]={"1/16","1/8","1/4","DOTTED","1/2","3/4","1 BAR"};
+  return names[rateIndex(value)];
+}
+}
+
+uint8_t KickMixer::ccFor(Control control){
+  static const uint8_t cc[CONTROL_COUNT]={CC_TAIL_START,CC_ACID_DELAY_RATE,
+      CC_COMP_AMOUNT,CC_KICK_GAIN,CC_CUTOFF_TIME,CC_REVERB};
+  return cc[control];
 }
 
 void KickMixer::begin(SendCC send, void* context){
-  midi_.send = send; midi_.context = context;
-  if (midi_.initialized) return;
-  midi_.initialized = true;
-  snapshot();
-  flushMidi();
+  send_=send; context_=context;
+  if(!send_)return;
+  for(uint8_t i=0;i<CONTROL_COUNT;++i) send_(context_,ccFor((Control)i),value_[i]);
+  send_(context_,CC_COMP_ENABLE,compressorEnabled_?127:0);
+  send_(context_,CC_CUTOFF_ENABLE,cutoffEnabled_?127:0);
 }
-void KickMixer::queue(uint8_t cc, uint8_t value){
-  for (uint8_t i = 0; i < CC_SLOTS; ++i){
-    if (CC[i] != cc) continue;
-    midi_.value[i] = value;
-    midi_.pending[i] = true;
-    return;
-  }
+
+void KickMixer::send(Control control){
+  pending_[control]=true;
+  if(send_ && send_(context_,ccFor(control),value_[control])) pending_[control]=false;
 }
-void KickMixer::flushMidi(){
-  if (!midi_.send) return;
-  for (uint8_t i = 0; i < CC_SLOTS; ++i){
-    if (!midi_.pending[i]) continue;
-    if (!midi_.send(midi_.context, CC[i], midi_.value[i])) return;
-    midi_.pending[i] = false;
-  }
-}
-void KickMixer::queueControl(uint8_t c){
-  queue(CC[c], value_[c]);
-  if (c == DIST){
-    int tube = (int)lroundf(value_[c] * TUBE_PER_DIST);
-    queue(55, (uint8_t)(tube > 127 ? 127 : tube));
-  }
-}
-void KickMixer::snapshot(){
-  for (uint8_t c = 0; c < CONTROL_COUNT; ++c) queueControl(c);
-}
-void KickMixer::saveTo(SavedState& out) const {
-  for (uint8_t c = 0; c < CONTROL_COUNT; ++c) out.value[c] = value_[c];
-}
-void KickMixer::restoreFrom(const SavedState& in){
-  for (uint8_t c = 0; c < CONTROL_COUNT; ++c)
-    value_[c] = in.value[c] <= 127 ? in.value[c] : value_[c];
-  // The Daisy keeps no state of its own, so a restore re-sends the whole page
-  // through the pending array; service() retries whatever the UART refused.
-  snapshot();
-  flushMidi();
-  dirty_ = true;
-}
+
 void KickMixer::setActive(bool active){
-  if (active_ == active) return;
-  active_ = active;
-  for (auto& down : buttonDown_) down = false;
-  if (active){
-    // Values are session state; only the angle reference is re-seeded.
-    for (auto& pot : physical_) pot.initialized = false;
-    dirty_ = true;
-    rendered_ = false;
+  if(active_==active)return;
+  active_=active;dirty_=true;rendered_=false;
+  for(uint8_t i=0;i<CONTROL_COUNT;++i){
+    potInitialized_[i]=false;potAccumulated_[i]=0.f;
+    if(active_)send((Control)i);
+  }
+  if(active_){
+    enablePending_=true;
+    if(send_&&send_(context_,CC_COMP_ENABLE,compressorEnabled_?127:0))enablePending_=false;
+    cutoffEnablePending_=true;
+    if(send_&&send_(context_,CC_CUTOFF_ENABLE,cutoffEnabled_?127:0))cutoffEnablePending_=false;
   }
 }
-void KickMixer::focusControl(uint8_t knob){
-  focusKnob_ = knob;
-  dirty_ = true;
+
+void KickMixer::sampleAngle(uint8_t knob,float angle){
+  if(!active_ || knob>=CONTROL_COUNT)return;
+  if(!potInitialized_[knob]){
+    potInitialized_[knob]=true;potAngle_[knob]=angle;potAccumulated_[knob]=0.f;return;
+  }
+  float delta=angle-potAngle_[knob];potAngle_[knob]=angle;
+  if(delta>3.14159265f)delta-=6.2831853f;
+  if(delta< -3.14159265f)delta+=6.2831853f;
+  if(buttonDown_[knob]){potAccumulated_[knob]=0.f;return;}
+  potAccumulated_[knob]+=-delta*(128.f/6.2831853f);
+  if(fabsf(potAccumulated_[knob])<2.f)return;
+  int ticks=(int)potAccumulated_[knob];potAccumulated_[knob]-=ticks;
+  int next=(int)value_[knob]+ticks;
+  if(next<0)next=0;
+  if(next>127)next=127;
+  if(next==value_[knob])return;
+  value_[knob]=(uint8_t)next;send((Control)knob);dirty_=true;
 }
-void KickMixer::buttonEdge(uint8_t button, bool pressed, uint32_t now){
+
+void KickMixer::buttonEdge(uint8_t button,bool pressed,uint32_t now){
   (void)now;
-  if (!active_ || button >= 6) return;
-  if (pressed == buttonDown_[button]) return;
-  buttonDown_[button] = pressed;
-  if (!pressed) return;
-  // No pot button carries a mix function; they only move the sticky focus.
-  focusControl(button);
+  if(button>=CONTROL_COUNT)return;
+  buttonDown_[button]=pressed;
+  if(!active_ || !pressed)return;
+  if(button==COMP_AMOUNT){
+    compressorEnabled_=!compressorEnabled_;
+    enablePending_=true;
+    if(send_ && send_(context_,CC_COMP_ENABLE,compressorEnabled_?127:0))
+      enablePending_=false;
+    dirty_=true;
+  } else if(button==TAIL_HOLD){
+    cutoffEnabled_=!cutoffEnabled_;
+    cutoffEnablePending_=true;
+    if(send_&&send_(context_,CC_CUTOFF_ENABLE,cutoffEnabled_?127:0))cutoffEnablePending_=false;
+    dirty_=true;
+  }
 }
+
 void KickMixer::service(uint32_t now){
   (void)now;
-  flushMidi();
+  for(uint8_t i=0;i<CONTROL_COUNT;++i)
+    if(pending_[i] && send_ && send_(context_,ccFor((Control)i),value_[i]))
+      pending_[i]=false;
+  if(enablePending_&&send_&&send_(context_,CC_COMP_ENABLE,compressorEnabled_?127:0))
+    enablePending_=false;
+  if(cutoffEnablePending_&&send_&&send_(context_,CC_CUTOFF_ENABLE,cutoffEnabled_?127:0))
+    cutoffEnablePending_=false;
 }
-void KickMixer::sampleAngle(uint8_t knob, float angle){
-  if (!active_ || knob >= 6) return;
-  PhysicalPot& pot = physical_[knob];
-  if (!pot.initialized){
-    pot.initialized = true;
-    pot.angle = angle;
-    pot.accumulated = 0;
-    return; // The current physical angle is only a movement reference.
+
+void KickMixer::saveTo(SavedState& out)const{
+  for(uint8_t i=0;i<CONTROL_COUNT;++i)out.value[i]=value_[i];
+  if(compressorEnabled_)out.value[KICK_GAIN]|=0x80;
+  if(cutoffEnabled_)out.value[TAIL_HOLD]|=0x80;
+}
+
+void KickMixer::restoreFrom(const SavedState& in){
+  compressorEnabled_=(in.value[KICK_GAIN]&0x80)!=0;
+  cutoffEnabled_=(in.value[TAIL_HOLD]&0x80)!=0;
+  for(uint8_t i=0;i<CONTROL_COUNT;++i){
+    uint8_t value=in.value[i];
+    if(i==KICK_GAIN||i==TAIL_HOLD)value&=0x7f;
+    if(value<=127)value_[i]=value;
   }
-  float delta = angle - pot.angle;
-  pot.angle = angle;
-  if (delta > PI_F) delta -= 2.f * PI_F;
-  if (delta < -PI_F) delta += 2.f * PI_F;
-  // Clockwise increases; a full revolution spans 128 value units. Unwrap
-  // angle differences so crossing the atan2 seam continues in the same direction.
-  float movement = -delta * (128.f / (2.f * PI_F));
-  uint8_t value = value_[knob];
-  // At a limit discard any outward fractional remainder on reversal, so
-  // reversing responds without unwinding overshoot.
-  if ((value == 127 && movement < 0 && pot.accumulated > 0) ||
-      (value == 0 && movement > 0 && pot.accumulated < 0))
-    pot.accumulated = 0;
-  pot.accumulated += movement;
-  // Net movement deadband rejects ADC jitter without a low-pass filter's
-  // delayed direction reversal. Small deliberate movements accumulate.
-  if (fabsf(pot.accumulated) < 2.f) return;
-  int ticks = (int)pot.accumulated;
-  pot.accumulated -= ticks;
-  adjust(knob,ticks);
-  value = value_[knob];
-  if (value == 0 || value == 127) pot.accumulated = 0;
-}
-void KickMixer::adjust(uint8_t knob, int delta){
-  if (!active_ || knob >= 6 || delta == 0) return;
-  focusControl(knob);
-  uint8_t current = value_[knob];
-  uint8_t next = (uint8_t)constrain((int)current + delta,0,127);
-  if (next == current) return; // No wrap and no repeated MIDI at the limits.
-  value_[knob] = next;
-  queueControl(knob);
-  flushMidi();
+  for(uint8_t i=0;i<CONTROL_COUNT;++i)send((Control)i);
+  enablePending_=true;
+  if(send_&&send_(context_,CC_COMP_ENABLE,compressorEnabled_?127:0))enablePending_=false;
+  cutoffEnablePending_=true;
+  if(send_&&send_(context_,CC_CUTOFF_ENABLE,cutoffEnabled_?127:0))cutoffEnablePending_=false;
+  dirty_=true;
 }
 
-uint8_t KickMixer::percent(uint8_t v){ return ((unsigned)v * 100 + 63) / 127; }
-void KickMixer::valueText(uint8_t c, char* out, size_t size) const {
-  // BELLY as the punch window's scale, the Daisy's KickBellyScale.
-  if (c == BELLY){
-    uint8_t v = value_[c];
-    float scale = v <= 64 ? .35f + .65f * v / 64.f : 1.f + (v - 64) / 63.f;
-    snprintf(out,size,"%.2fx",scale);
+void KickMixer::draw(Adafruit_SH1106G& d,bool focus){
+  static const char* names[CONTROL_COUNT]={"GATE START","ACID RATE","TANH AMT","KICK GAIN","CUT RAMP","REVERB"};
+  d.clearDisplay();d.setTextWrap(false);d.setTextColor(SH110X_WHITE);
+  d.setTextSize(1);d.setCursor(0,0);d.print(focus?"KICK BACK MENU 2":"KICK END STAGE");
+  for(uint8_t i=0;i<CONTROL_COUNT;++i){
+    uint8_t y=8+i*8;
+    d.setCursor(0,y);d.print(i+1);d.print(' ');d.print(names[i]);d.setCursor(83,y);
+    if(i==TAIL_START){
+      const uint8_t value=value_[i];
+      const uint16_t ms=value<=64 ? (uint16_t)value*130/64
+                                  : 130+(uint16_t)(value-64)*70/63;
+      d.print(ms);d.print("ms");
+    }
+    else if(i==ACID_DELAY_RATE)d.print(delayRateName(value_[i]));
+    else if(i==COMP_AMOUNT){d.print((uint16_t)value_[i]*100/127);d.print('%');}
+    else if(i==KICK_GAIN){
+      float db=value_[i]<=64?-15.f*(64.f-value_[i])/64.f:21.f*(value_[i]-64.f)/63.f;
+      char text[10];snprintf(text,sizeof(text),"%+.1fdB",db);d.print(text);
+    }else if(i==TAIL_HOLD){d.print((uint16_t)(2.f+58.f*value_[i]/127.f));d.print("ms");}
+    else {d.print((uint16_t)value_[i]*100/127);d.print('%');}
   }
-  else snprintf(out,size,"%u%%",percent(value_[c]));
+  d.setCursor(0,57);
+  if(focus){d.print(compressorEnabled_?"3 CMP:ON":"3 CMP:OFF");d.print(" 5 CUT:");d.print(cutoffEnabled_?"ON":"OFF");}
+  else d.print("K3 COMP / K5 CUTOFF");
+  d.setTextWrap(true);oledFlush(d);
 }
 
-void KickMixer::drawOverview(Adafruit_SH1106G& d){
-  d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
-  for (uint8_t k = 0; k < 6; ++k){
-    int x = (k % 3) * 43, y = (k / 3) * 32;
-    char value[12];
-    valueText(k,value,sizeof(value));
-    if (focusKnob_ == k) d.drawRect(x,y,k % 3 == 2 ? 42 : 43,32,SH110X_WHITE);
-    label(d,x+3,y+3,SHORT_NAMES[k]); label(d,x+3,y+13,value);
-  }
-  d.setTextWrap(true); d.display();
-}
-
-void KickMixer::drawFocus(Adafruit_SH1106G& d){
-  d.clearDisplay(); d.setTextWrap(false); d.setTextColor(SH110X_WHITE);
-  label(d,0,0,"MIX");
-  uint8_t v = value_[focusKnob_];
-  char value[16];
-  valueText(focusKnob_,value,sizeof(value));
-  label(d,0,13,LONG_NAMES[focusKnob_]);
-  label(d,0,26,value,3);
-  d.drawRect(LEFT,52,RIGHT-LEFT+1,10,SH110X_WHITE);
-  int w = (RIGHT-LEFT-1)*v/127;
-  if (w) d.fillRect(LEFT+1,53,w,8,SH110X_WHITE);
-  d.setTextWrap(true); d.display();
-}
-
-void KickMixer::render(Adafruit_SH1106G& overview, Adafruit_SH1106G* focus, uint32_t now){
-  if (!active_) return;
-  if (!dirty_ || (rendered_ && (uint32_t)(now-lastFrameMs_) < 40)) return;
-  drawOverview(overview);
-  if (focus) drawFocus(*focus);
-  dirty_ = false; rendered_ = true; lastFrameMs_ = now;
+void KickMixer::render(Adafruit_SH1106G& overview,Adafruit_SH1106G* focus,uint32_t now){
+  // Static page: redraw only after a change, at most 25 FPS (blocking I2C).
+  if(!active_ || !dirty_ || (rendered_ && uint32_t(now-lastFrameMs_)<40))return;
+  draw(overview,false);if(focus)draw(*focus,true);
+  dirty_=false;rendered_=true;lastFrameMs_=now;
 }

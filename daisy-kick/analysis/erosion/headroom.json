@@ -1,0 +1,74 @@
+[
+  {
+    "model": 0,
+    "frequency": 0,
+    "amount": 0.5,
+    "peak": 0.6492484211921692
+  },
+  {
+    "model": 0,
+    "frequency": 0,
+    "amount": 1,
+    "peak": 0.6494380831718445
+  },
+  {
+    "model": 0,
+    "frequency": 0.5,
+    "amount": 0.5,
+    "peak": 0.6491202712059021
+  },
+  {
+    "model": 0,
+    "frequency": 0.5,
+    "amount": 1,
+    "peak": 0.6495032906532288
+  },
+  {
+    "model": 0,
+    "frequency": 1,
+    "amount": 0.5,
+    "peak": 0.6493567228317261
+  },
+  {
+    "model": 0,
+    "frequency": 1,
+    "amount": 1,
+    "peak": 0.6496233344078064
+  },
+  {
+    "model": 1,
+    "frequency": 0,
+    "amount": 0.5,
+    "peak": 0.637890100479126
+  },
+  {
+    "model": 1,
+    "frequency": 0,
+    "amount": 1,
+    "peak": 0.6380295157432556
+  },
+  {
+    "model": 1,
+    "frequency": 0.5,
+    "amount": 0.5,
+    "peak": 0.6378242373466492
+  },
+  {
+    "model": 1,
+    "frequency": 0.5,
+    "amount": 1,
+    "peak": 0.6381223201751709
+  },
+  {
+    "model": 1,
+    "frequency": 1,
+    "amount": 0.5,
+    "peak": 0.6379653811454773
+  },
+  {
+    "model": 1,
+    "frequency": 1,
+    "amount": 1,
+    "peak": 0.6380017399787903
+  }
+]

@@ -11,6 +11,14 @@
 #define SCREEN_ROTATION 0
 #endif
 
+// Horizontal nudge for screen 2, in pixels, positive = away from its left
+// edge. SH1106 modules differ in which of the controller's 132 columns sit
+// under the glass; if screen 2's left edge is cut off, 2 moves the picture
+// back onto the glass. 0 = the Adafruit default placement.
+#ifndef OLED2_NUDGE_PX
+#define OLED2_NUDGE_PX 2
+#endif
+
 
 // --- Button matrix (5 rows x 6 columns) ------------------------
 // Hardware: 5 row pins (inputs with internal pull-ups), 6 column pins (outputs)

@@ -1,0 +1,12 @@
+{
+  "uploaded": false,
+  "files": {
+    "daisy-kick/midi_oled_monitor.cpp": "55d929590f1a6a73d4b2939dd45065c57ec0c97d7fc141bd5afe5379e9980c28",
+    "daisy-kick/midi_pulse_output.h": "7cfddeca28d4013590635586809c00392cffbf49c825c36bb6b332a3d156939b",
+    "daisy-kick/build/midi_oled_monitor.bin": "c10f276f743f7c0bc050c6a84894ceef8af59742f0e7869275519334bd8957c9"
+  },
+  "gpio_parser_callback_test": "ASAN/UBSAN passed",
+  "arm_build": "passed",
+  "USART3_vector": "0x080068cd verified",
+  "hardware_scope_test": "not performed"
+}

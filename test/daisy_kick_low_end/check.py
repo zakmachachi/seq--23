@@ -17,7 +17,7 @@ import sys
 BINARY, WORK = sys.argv[1], Path(sys.argv[2])
 RATE = 48000
 BASE = dict(note=38, vel=64, tmod=0, sub=1, punch=1, taildelay=0, shape=0, wave=0,
-            decay=1, line=25 / 127, mackamt=0, tubeamt=0, mackie=1, tube=1,
+            decay=1, line=64 / 127, mackamt=0, tubeamt=0, mackie=1, tube=1,
             bpf=0, hits=1, tail=650, spacing_ms=100)
 failures = []
 
@@ -169,11 +169,11 @@ assert render(bitcrush=0)==render(bitcrush=1), "bitcrush changed clean audio"
 # DECAY no longer waits for SWEEP. Short bass hits must still speak; a
 # deliberately long laser with shortest DECAY may end before settling.
 for note in (33,38,45):
-    short=render(note=note,shape=0,sweeptime=1,decay=0,punch=1,sub=1,vel=64,line=1)
+    short=render(note=note,shape=0,sweeptime=1,decay=0,punch=1,sub=1,vel=64,line=64/127)
     check(max(map(abs,short[:2500]))>.02, "short bass lost its onset energy")
     # The clean 240 Hz LPF intentionally rejects a laser that ends before
     # reaching bass. Its audible sweep comes through the dirty lane.
-    laser=render(note=note,shape=1,sweeptime=1,decay=0,punch=1,sub=1,vel=64,line=1,mackamt=1)
+    laser=render(note=note,shape=1,sweeptime=1,decay=0,punch=1,sub=1,vel=64,line=64/127,mackamt=1)
     check(max(map(abs,laser[:8000]))>.001, "short laser lost its onset energy")
     check(max(map(abs,laser[10000:]))<.001, "SWEEP incorrectly stretched amplitude lifetime")
 
@@ -195,10 +195,8 @@ for note in (22, 28, 33, 38, 45, 47):
                       f"character changed the boosted body {change:+.2f} dB: {settings}")
 print(f"Worst boosted-body change across character settings: {worst[0]:+.3f} dB", flush=True)
 
-# All mixer controls at 100% must leave the transient below the safety ceiling.
-# A limiter can pass a simple abs(output)<=1 assertion, so also demand exact
-# linear LINE scaling (the low test value is an exact MIDI CC, avoiding 7-bit
-# rounding ambiguity). BPF is explicitly at full here, not its BASE zero.
+# Check the new bipolar output trim below its ceiling: compare -9.14 dB
+# (CC25) with unity (CC64), while all character controls are fully active.
 peak_max, linear_error_max = 0.0, 0.0
 for model in (0, 1):
     for note in (23, 38, 47):
@@ -210,17 +208,15 @@ for model in (0, 1):
                             bpf1=center, bpf2=center, bpf3=center, vel=127,
                             belly=1, tmod=1, sweeptime=1)
             quiet = render(**settings, line=25 / 127)
-            full = render(**settings, line=1)
+            full = render(**settings, line=64 / 127)
             peak = max(map(abs, full))
-            error = max(abs(loud - soft * 127 / 25)
+            ratio = 10 ** ((15.0 * 39.0 / 64.0) / 20.0)
+            error = max(abs(loud - soft * ratio)
                         for soft, loud in zip(quiet, full))
             peak_max = max(peak_max, peak)
             linear_error_max = max(linear_error_max, error)
             check(.02 < peak < .93,
-                  f"all-max output lacks usable headroom: peak={peak:.5f}, {settings}")
-            # Float arithmetic in the 15 Hz high-pass contributes <0.2% peak
-            # residual after scaling; saturation would violate the peak bound
-            # or create a substantially larger, signal-correlated residual.
+                  f"unity-trim all-max output lacks headroom: peak={peak:.5f}, {settings}")
             check(error < peak * .002,
                   f"all-max LINE scaling became nonlinear: error={error:g}, {settings}")
 print(f"All-max mixer: peak {peak_max:.4f}, worst LINE scaling error {linear_error_max:.2g}", flush=True)
@@ -241,9 +237,9 @@ for position in (.1, .5, 1):
         check(change < -25, f"external HPF ineffective: {change:.2f} dB")
     print(f"External HPF {position}: {change:+.2f} dB; generated kick unchanged", flush=True)
 # Shared mixer needs headroom with simultaneous full-level external audio.
-combined = render(punch=1, sub=1, line=1, shape=1, wave=1, mackamt=1,
+combined = render(punch=1, sub=1, line=64 / 127, shape=1, wave=1, mackamt=1,
                   externalhz=55, externallevel=1, hits=5)
-check(max(map(abs, combined)) < .93, "shared output reached its emergency ceiling")
+check(max(map(abs, combined)) < .986, "shared output exceeded the emergency ceiling")
 # PUNCH mutes the clean lane including its bass boost; DIST is independent.
 check(max(map(abs, render(punch=0, sub=0))) < 1e-9, "PUNCH zero did not mute clean lane")
 check(max(map(abs, render(punch=0, sub=1))) < 1e-9, "PUNCH failed to mute boosted clean lane")

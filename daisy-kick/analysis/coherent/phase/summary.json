@@ -1,0 +1,341 @@
+{
+  "combinations": 1032,
+  "body_windows": 3246,
+  "component_scope": "Octave sub and note body projections, 30-90 Hz; raw data retains third-sub-harmonic projections, often window leakage rather than a generated component.",
+  "windows_below_minus_1_db": 0,
+  "worst": [
+    {
+      "loss_db": -0.576,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "shape": 0.75,
+        "wave": 0,
+        "amount": 1,
+        "decay": 0.35,
+        "punch": 1,
+        "curve": 0.5039370078740157,
+        "belly": 0.5,
+        "vel": 127,
+        "layers": 0.6666666666666666,
+        "bpf1": 0.007953097969590095,
+        "bpf2": 0.4626292790262412,
+        "bpf3": 0.9604039100874254,
+        "taildelay": 0,
+        "hits": 4,
+        "line": 0.12
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -37.011,
+        "wet_db": -49.963,
+        "phase_deg": -112.862,
+        "sum_vs_stronger_db": -0.576,
+        "output_harmonic_db": -74.482,
+        "output_rms_db": -49.255,
+        "peak": 0.014831
+      }
+    },
+    {
+      "loss_db": -0.569,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "shape": 0.25,
+        "wave": 0,
+        "amount": 0.8,
+        "decay": 0.35,
+        "punch": 1,
+        "curve": 0.5039370078740157,
+        "belly": 0.5,
+        "vel": 127,
+        "layers": 0,
+        "bpf1": 0.9624399359229409,
+        "bpf2": 0.4311174208814704,
+        "bpf3": 0.1563630321782401,
+        "taildelay": 0.3,
+        "hits": 4,
+        "line": 0.33
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -37.017,
+        "wet_db": -54.168,
+        "phase_deg": -120.763,
+        "sum_vs_stronger_db": -0.569,
+        "output_harmonic_db": -65.528,
+        "output_rms_db": -43.782,
+        "peak": 0.030963
+      }
+    },
+    {
+      "loss_db": -0.307,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "shape": 0.5,
+        "wave": 0,
+        "amount": 0.5,
+        "decay": 0.35,
+        "punch": 1,
+        "curve": 0.5039370078740157,
+        "belly": 1,
+        "vel": 1,
+        "layers": 0,
+        "bpf1": 0.40978500549117436,
+        "bpf2": 0.9399828959911344,
+        "bpf3": 0.6140926727106939,
+        "taildelay": 0,
+        "hits": 4,
+        "line": 0.7
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -36.929,
+        "wet_db": -60.674,
+        "phase_deg": -123.928,
+        "sum_vs_stronger_db": -0.307,
+        "output_harmonic_db": -58.653,
+        "output_rms_db": -43.34,
+        "peak": 0.037608
+      }
+    },
+    {
+      "loss_db": -0.275,
+      "settings": {
+        "note": 41,
+        "shape": 0.5,
+        "wave": 1,
+        "model": 0,
+        "amount": 1,
+        "decay": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -49.528,
+        "phase_deg": -149.857,
+        "sum_vs_stronger_db": -0.275,
+        "output_harmonic_db": -57.918,
+        "output_rms_db": -42.125,
+        "peak": 0.034244
+      }
+    },
+    {
+      "loss_db": -0.261,
+      "settings": {
+        "note": 41,
+        "shape": 0,
+        "wave": 1,
+        "model": 0,
+        "amount": 1,
+        "decay": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.721,
+        "wet_db": -49.149,
+        "phase_deg": -142.115,
+        "sum_vs_stronger_db": -0.261,
+        "output_harmonic_db": -57.907,
+        "output_rms_db": -43.599,
+        "peak": 0.041256
+      }
+    },
+    {
+      "loss_db": -0.209,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -51.914,
+        "phase_deg": -150.074,
+        "sum_vs_stronger_db": -0.209,
+        "output_harmonic_db": -57.853,
+        "output_rms_db": -46.302,
+        "peak": 0.03179
+      }
+    },
+    {
+      "loss_db": -0.207,
+      "settings": {
+        "note": 41,
+        "shape": 0,
+        "wave": 0,
+        "model": 0,
+        "amount": 1,
+        "decay": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.72,
+        "wet_db": -49.32,
+        "phase_deg": -130.133,
+        "sum_vs_stronger_db": -0.207,
+        "output_harmonic_db": -57.852,
+        "output_rms_db": -44.513,
+        "peak": 0.025157
+      }
+    },
+    {
+      "loss_db": -0.205,
+      "settings": {
+        "note": 41,
+        "shape": 0.5,
+        "wave": 0,
+        "model": 0,
+        "amount": 1,
+        "decay": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -49.496,
+        "phase_deg": -130.563,
+        "sum_vs_stronger_db": -0.205,
+        "output_harmonic_db": -57.849,
+        "output_rms_db": -44.354,
+        "peak": 0.025692
+      }
+    },
+    {
+      "loss_db": -0.197,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0,
+        "bpf3": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -52.006,
+        "phase_deg": -145.91,
+        "sum_vs_stronger_db": -0.197,
+        "output_harmonic_db": -57.842,
+        "output_rms_db": -46.505,
+        "peak": 0.032229
+      }
+    },
+    {
+      "loss_db": -0.197,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0,
+        "bpf2": 0.5,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -52.009,
+        "phase_deg": -145.923,
+        "sum_vs_stronger_db": -0.197,
+        "output_harmonic_db": -57.841,
+        "output_rms_db": -46.506,
+        "peak": 0.032225
+      }
+    },
+    {
+      "loss_db": -0.197,
+      "settings": {
+        "note": 41,
+        "model": 0,
+        "amount": 0.7,
+        "wave": 1,
+        "shape": 0.5,
+        "layers": 1,
+        "bpf1": 0.5,
+        "bpf2": 0,
+        "bpf3": 0
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.719,
+        "wet_db": -52.009,
+        "phase_deg": -145.923,
+        "sum_vs_stronger_db": -0.197,
+        "output_harmonic_db": -57.841,
+        "output_rms_db": -46.506,
+        "peak": 0.032225
+      }
+    },
+    {
+      "loss_db": -0.194,
+      "settings": {
+        "note": 41,
+        "shape": 1,
+        "wave": 1,
+        "model": 1,
+        "amount": 1,
+        "decay": 0.5
+      },
+      "metric": {
+        "window": 2.0,
+        "harmonic": 2.0,
+        "tracked_hz": 43.653,
+        "cycles": 8.731,
+        "dry_db": -20.725,
+        "wet_db": -50.639,
+        "phase_deg": -134.293,
+        "sum_vs_stronger_db": -0.194,
+        "output_harmonic_db": -57.846,
+        "output_rms_db": -44.409,
+        "peak": 0.028683
+      }
+    }
+  ]
+}
