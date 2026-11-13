@@ -11,6 +11,88 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ---
 
+## Install
+
+seq-23 runs on up to three boards, each with its own firmware:
+
+| Board | Firmware | Built with |
+|---|---|---|
+| Teensy 4.1: sequencer, screens, LEDs | this folder (`src/`) | PlatformIO |
+| Daisy Seed: kick | [`daisy-kick/`](daisy-kick/README.md) | make + ARM GCC |
+| Daisy Seed: ACID / HOOVER / SCREECH synths (optional) | [`acid-seed3/`](acid-seed3/README.md) | make + ARM GCC |
+
+Update the Teensy and the kick Daisy together: they share a MIDI protocol, and old firmware on either side gives wrong pitches and dead kick controls.
+
+### 1. Tools (once)
+
+- [PlatformIO](https://platformio.org/install), as the VS Code extension or the command line
+- The ARM GNU toolchain (`arm-none-eabi-gcc`) and `dfu-util`. On macOS:
+  ```bash
+  brew install --cask gcc-arm-embedded
+  brew install dfu-util
+  ```
+- libDaisy and DaisySP, cloned and built once. By default the Makefiles look for them inside this folder:
+  ```bash
+  git clone --recurse-submodules https://github.com/electro-smith/libDaisy
+  git clone https://github.com/electro-smith/DaisySP
+  make -C libDaisy
+  make -C DaisySP
+  ```
+  The revisions this project was tested with are listed in [daisy-kick/README.md](daisy-kick/README.md#dependency-versions). If the libraries live somewhere else, create `daisy-kick/local.mk` (and `acid-seed3/local.mk` for the synth board). Git ignores these files:
+  ```make
+  LIBDAISY_DIR = /path/to/libDaisy
+  DAISYSP_DIR = /path/to/DaisySP
+  # Only if arm-none-eabi-gcc is not on your PATH:
+  GCC_PATH = /path/to/arm-gcc/bin
+  ```
+
+### 2. Teensy
+
+Connect the Teensy over USB and, from this folder, run:
+
+```bash
+pio run -e teensy41 -t upload
+```
+
+If `pio` is not found, use `~/.platformio/penv/bin/pio`. If the Teensy Loader asks, press the button on the Teensy.
+
+Screens mounted upside down: create `platformio_override.ini` next to `platformio.ini`. Git ignores it:
+
+```ini
+[env:teensy41]
+build_flags =
+  -D SCREEN_ROTATION=2
+```
+
+If screen 2's picture sits off the glass at one edge, add `-D OLED2_NUDGE_PX=0` to the same `build_flags` (the default is 2).
+
+### 3. Kick Daisy
+
+Connect the Daisy Seed's own USB. Hold **BOOT**, tap **RESET**, release **BOOT**, then from this folder run:
+
+```bash
+make -C daisy-kick program-dfu
+```
+
+This builds the firmware and then flashes it. An `Error during download get_status` and `make: Error 74` after `File downloaded successfully` are normal: the Seed restarts into the new firmware before answering the last status check.
+
+### 4. Synth Daisy (optional)
+
+Put the second Seed into DFU mode the same way, then run:
+
+```bash
+make -C acid-seed3
+make -C acid-seed3 program-dfu
+```
+
+This Makefile does not build before flashing, so run `make` first.
+
+### Wiring
+
+Teensy MIDI OUT is pin 20 (Serial5 TX), through a standard MIDI driver circuit. Each Seed receives MIDI on D1 (USART3) through a MIDI input circuit. Pin mappings live in [include/SeqConfig.h](include/SeqConfig.h); the Daisy's Eurorack outputs are in [daisy-kick/EURORACK_OUTPUTS.md](daisy-kick/EURORACK_OUTPUTS.md).
+
+---
+
 ## What's new in v1.5.0
 
 **A new kick engine and performance pads, plus a round of fixes that make them usable.** Flash both the Teensy and the Daisy: the boards talk a new protocol, and old firmware on either side gives wrong pitches and dead kick controls.
