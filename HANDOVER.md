@@ -221,7 +221,7 @@ Worth doing only if it is still audible on the bench. Render it first.
   kick playing. Needs a MIDI-clock fallback — a behavioural decision.
 - **ext-in LOOPER** never implemented; needs a second large history buffer and
   SRAM is at ~87 %.
-- **PR #1** on the `deagleskyline-create` fork was never updated. `main`
+- **PR #1** on the fork was never updated. `main`
   already contains it, so closing it is tidier.
 
 ---

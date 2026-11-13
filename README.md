@@ -13,7 +13,7 @@ A **7-channel, 16-step** MIDI sequencer for Teensy 4.1 driving **two** SH1106 OL
 
 ## What's new in v1.5.0
 
-**Bob's new kick engine and performance pads, plus a round of fixes that make them usable.** Flash both the Teensy and the Daisy: the boards talk a new protocol, and old firmware on either side gives wrong pitches and dead kick controls.
+**A new kick engine and performance pads, plus a round of fixes that make them usable.** Flash both the Teensy and the Daisy: the boards talk a new protocol, and old firmware on either side gives wrong pitches and dead kick controls.
 
 **A new kick engine.** The kick is one oscillator, modelled on a 909, with a fixed 60 ms body and a DECAY from 40 ms to 2.4 s after it. Before every hit the Teensy sends the kick's pitch, decay, shape, sweep and tail tune together, so a hit never starts with half-old, half-new settings. Any track with the KICK machine on MIDI channel 15 plays it.
 
